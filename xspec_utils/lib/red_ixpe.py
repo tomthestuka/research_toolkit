@@ -238,14 +238,20 @@ def pha(obs: str,
 
         with open(os.devnull, 'w') as fnull:
             with redirect_stdout(fnull):
-                # Select source and background regions
-                src_pha_file_list = pipeline.xpselect(*obs_file_list , rad= src_rad , suffix='src', ra = ra, dec = dec, overwrite=overwrite)
-                bkg_pha_file_list = pipeline.xpselect(*obs_file_list, ra = ra, dec = dec , innerrad=bkg_inner_rad , rad=bkg_outer_rad , suffix='bkg', overwrite=overwrite)
-                kwargs = dict(algorithm='PHA1', overwrite=overwrite, irfname=f'ixpe:obssim{irf_date}_alpha075:v13', weights=True)
+                # Select source and background regions (Stokes-agnostic event files)
+                src_sel = pipeline.xpselect(*obs_file_list , rad= src_rad , suffix='src', ra = ra, dec = dec, overwrite=overwrite)
+                bkg_sel = pipeline.xpselect(*obs_file_list, ra = ra, dec = dec , innerrad=bkg_inner_rad , rad=bkg_outer_rad , suffix='bkg', overwrite=overwrite)
 
-                # PHA results
-                src_pha_file_list = pipeline.xpbin(*src_pha_file_list, **kwargs)
-                bkg_pha_file_list = pipeline.xpbin(*bkg_pha_file_list, **kwargs)
+                # Bin the selected events into Stokes I/Q/U PHA spectra.  PHA1 (I)
+                # paths are returned; PHA1Q/PHA1U (Q/U) are written to disk with the
+                # _pha1q/_pha1u suffixes that get_pha_q/get_pha_u expect.
+                bin_kwargs = dict(overwrite=overwrite, irfname=f'ixpe:obssim{irf_date}_alpha075:v13', weights=True)
+                src_pha_file_list = pipeline.xpbin(*src_sel, algorithm='PHA1', **bin_kwargs)
+                bkg_pha_file_list = pipeline.xpbin(*bkg_sel, algorithm='PHA1', **bin_kwargs)
+                pipeline.xpbin(*src_sel, algorithm='PHA1Q', **bin_kwargs)
+                pipeline.xpbin(*bkg_sel, algorithm='PHA1Q', **bin_kwargs)
+                pipeline.xpbin(*src_sel, algorithm='PHA1U', **bin_kwargs)
+                pipeline.xpbin(*bkg_sel, algorithm='PHA1U', **bin_kwargs)
     else:
         '''
         Use existing reduction results
