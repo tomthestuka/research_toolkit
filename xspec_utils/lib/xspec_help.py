@@ -25,9 +25,20 @@ def load_data(
 ) -> dict:
     """Load spectra for one epoch into XSPEC.
 
-    Instruments present in *epoch* are loaded in a fixed data-group order:
-    NuSTAR → group 1, NICER → group 2, IXPE DU1/DU2/DU3 → groups 3/4/5.
-    Instruments absent from *epoch* are silently skipped.
+    Instruments are loaded in *epoch* key order, so the key order sets the
+    data-group numbering.  **Load IXPE first** so IXPE DU1 becomes data group 1:
+    the polarized fit models (``plabs`` / ``polconst``) anchor their default
+    cross-group links to DG1, which must be a polarization-bearing (IXPE I/Q/U)
+    group — anchoring DG1 to a Stokes-I-only spectrum (NuSTAR/NICER) makes the
+    fit diverge.  Recommended order: IXPE → NICER → NuSTAR, i.e. IXPE DU1/DU2/DU3
+    → groups 1/2/3, NICER → next groups, NuSTAR FPMA/FPMB → last groups.
+    Instruments absent from *epoch* are silently skipped (e.g. no IXPE → the
+    first present instrument becomes DG1).
+
+    Note: this DG/load order is independent of ``fit_*``'s ``spec_pref``, which
+    selects the cross-calibration *reference* group (default NuSTAR) whose
+    ``constant.factor`` is frozen to 1 — a different concept from which
+    instrument is DG1.
 
     For IXPE each detector unit contributes three consecutive spectra
     (Stokes I, Q, U).  The Q and U gain slopes are linked to the
@@ -86,18 +97,18 @@ def load_data(
         gaps (recover a DG via ``AllData(spec_idx).dataGroup``)::
 
             {
-                'NuSTAR': {
-                    '<obsid>': {'FPMA': [1], 'FPMB': [2]},
-                },
-                'NICER': {
-                    '<obsid>': {'mpu7': [3]},
-                },
                 'IXPE': {
                     '<obsid>': {
-                        'DU1': [4,  5,  6],
-                        'DU2': [7,  8,  9],
-                        'DU3': [10, 11, 12],
+                        'DU1': [1,  2,  3],
+                        'DU2': [4,  5,  6],
+                        'DU3': [7,  8,  9],
                     },
+                },
+                'NICER': {
+                    '<obsid>': {'mpu7': [10]},
+                },
+                'NuSTAR': {
+                    '<obsid>': {'FPMA': [11], 'FPMB': [12]},
                 },
             }
 

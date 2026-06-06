@@ -11,8 +11,7 @@ never duplicated here — tool entries that wrap lib/ functions point directly a
 
 Workflow (all steps share the persistent XSPEC session):
   1. load_data      — load multi-instrument spectra; returns indices dict
-  2. fit_tbabs_hss  — set Cyg X-1 HSS tbabs model and fit
-     fit_tbfeo_hss  — alternative tbfeo*plabs model
+  2. fit_tbfeo_hss  — set Cyg X-1 HSS tbfeo*plabs model and fit
   3. run_fit        — refine convergence with Fit.perform()
   4. xspec_status   — query session state (spectra, model, fit stats)
   5. plot_fit       — save broadband spectrum+residuals PNG (one file)
@@ -31,7 +30,11 @@ TOOL_MANIFEST: dict = {
             "Load all instruments for one epoch into XSPEC and return a nested indices dict. "
             "Accepts an epoch dict with keys 'IXPE', 'NICER', 'NuSTAR' (each a list of obs-ID "
             "strings) and 'STATE'. Absent instruments are silently skipped. "
-            "Data-group order follows key insertion order (convention: NuSTAR → NICER → IXPE). "
+            "Data-group order follows the epoch key order. LIST IXPE FIRST so IXPE DU1 is "
+            "data group 1 — the polarized fit models require DG1 to be an IXPE (I/Q/U) group; "
+            "a non-IXPE DG1 makes the fit diverge. Recommended key order: IXPE, NICER, NuSTAR "
+            "(skip any not present). This is NOT the same as the cross-calibration reference, "
+            "which fit_* selects internally (NuSTAR by default). "
             "Returns dict: instrument → obsid → detector → [XSPEC spectrum indices]. "
             "Pass this indices dict unchanged to fit_*, xspec_status, plot_fit, and plot_iqu."
         ),
@@ -41,10 +44,11 @@ TOOL_MANIFEST: dict = {
                 "epoch": {
                     "type": "string",
                     "description": (
-                        "JSON-encoded epoch dict, e.g. "
-                        "'{\"NuSTAR\":[\"80902318002\"],\"NICER\":[\"6643010101\",\"6643010102\"],"
-                        "\"IXPE\":[\"02008401\"],\"STATE\":\"HSS\"}'. "
-                        "Key order determines data-group numbering."
+                        "JSON-encoded epoch dict. List IXPE FIRST (IXPE = data group 1), then "
+                        "NICER, then NuSTAR; key order determines data-group numbering. E.g. "
+                        "'{\"IXPE\":[\"02008401\"],\"NICER\":[\"6643010101\",\"6643010102\"],"
+                        "\"NuSTAR\":[\"80902318002\"],\"STATE\":\"HSS\"}'. "
+                        "Omit any instrument not present in the epoch."
                     ),
                 },
                 "ixpe_path": {
@@ -84,46 +88,14 @@ TOOL_MANIFEST: dict = {
         },
     },
 
-    # ── Step 2a: Cyg X-1 HSS tbabs model ──────────────────────────────────
-    "research_toolkit.xspec_utils.fit_tbabs_hss": {
-        "module": "xspec_utils.lib.xspec_help",
-        "fn": "fit_tbabs_bknpower_polconst_diskbb_polconst_relxillCp",
-        "description": (
-            "Define and fit constant*tbabs*(polconst*diskbb + polconst*relxillCp) "
-            "with Cyg X-1 HSS initial values. "
-            "Must be called after load_data. Pass the indices dict returned by load_data. "
-            "Sets nH=0.45, Tin=0.43 keV, diskbb psi=63 deg, relxillCp i=37 deg (frozen), "
-            "a=0.998 (frozen). NuSTAR cross-calibration constant frozen to 1; all others freed. "
-            "Returns None; call xspec_status or run_fit after."
-        ),
-        "args_schema": {
-            "type": "object",
-            "properties": {
-                "indices": {
-                    "type": "string",
-                    "description": "JSON-encoded return value of load_data.",
-                },
-                "log_path": {
-                    "type": "string",
-                    "description": "Write verbose XSPEC model/fit output to this file path.",
-                },
-                "audit_data": {
-                    "type": "string",
-                    "description": "JSON bool. Print file paths and count rates at start. Default 'true'.",
-                },
-            },
-            "required": ["indices"],
-        },
-    },
-
-    # ── Step 2b: Cyg X-1 HSS tbfeo model ──────────────────────────────────
+    # ── Step 2: Cyg X-1 HSS tbfeo model ───────────────────────────────────
     "research_toolkit.xspec_utils.fit_tbfeo_hss": {
         "module": "xspec_utils.lib.xspec_help",
         "fn": "fit_tbfeo_plabs_polconst_diskbb_polconst_relxillCp",
         "description": (
             "Define and fit constant*tbfeo*plabs*(polconst*diskbb + polconst*relxillCp) "
-            "for Cyg X-1 HSS — alternative to fit_tbabs_hss with polarized absorption. "
-            "Same calling convention as fit_tbabs_hss. Pass indices from load_data."
+            "for Cyg X-1 HSS with polarized absorption. "
+            "Pass indices from load_data."
         ),
         "args_schema": {
             "type": "object",
@@ -144,7 +116,7 @@ TOOL_MANIFEST: dict = {
         "module": "xspec_utils.skills.session",
         "fn": "run_fit",
         "description": (
-            "Run XSPEC Fit.perform() to refine convergence after fit_tbabs_hss or fit_tbfeo_hss. "
+            "Run XSPEC Fit.perform() to refine convergence after fit_tbfeo_hss. "
             "Call multiple times until stat/dof stabilises. "
             "Returns dict with fit_stat, dof, stat_per_dof."
         ),
@@ -264,7 +236,7 @@ TOOL_MANIFEST: dict = {
                 "outfile": {"type": "string", "description": "Output grouped PHA file path."},
                 "e_edges": {
                     "type": "string",
-                    "description": "JSON list of bin edges in keV, e.g. '[2.0,3.0,4.0,5.0,6.0,8.0]'.",
+                    "description": "JSON list of bin edges in keV, e.g. '[2.0,3.0,4.0,5.0,6.0,8.0]'. This argument is named 'e_edges' — not 'bin_edges' or 'edges'.",
                 },
             },
             "required": ["infile", "outfile", "e_edges"],

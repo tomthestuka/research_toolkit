@@ -99,13 +99,13 @@ def pcube(obs: str,
         Energy binning scheme to use for PCUBE reduction. Required if changes=True.
 
     src_rad: float
-        Radius of the source region in arcseconds. Required if changes=True.
+        Radius of the source region in arcmin. Required if changes=True.
 
     bkg_inner_rad: float
-        Inner radius of the background annulus in arcseconds. Required if changes=True.
+        Inner radius of the background annulus in arcmin. Required if changes=True.
 
     bkg_outer_rad: float
-        Outer radius of the background annulus in arcseconds. Required if changes=True.
+        Outer radius of the background annulus in arcmin. Required if changes=True.
 
     ra: float
         Right ascension of the source in degrees. Required if changes=True.
@@ -144,7 +144,7 @@ def pcube(obs: str,
             with redirect_stdout(fnull):
                 src_pcube_file_list = pipeline.xpselect(*obs_file_list , rad= src_rad , suffix='src', ra = ra, dec = dec, overwrite=overwrite)
                 bkg_pcube_file_list = pipeline.xpselect(*obs_file_list, ra = ra, dec = dec , innerrad=bkg_inner_rad , rad=bkg_outer_rad , suffix='bkg', overwrite=overwrite)
-                kwargs = dict(algorithm='PCUBE', ebinalg='LIST',ebinning=ebinning , overwrite=overwrite, irfname=f'ixpe:obssim{irf_date}:v13', weights=True)
+                kwargs = dict(algorithm='PCUBE', ebinalg='LIST',ebinning=ebinning , overwrite=overwrite, irfname=f'ixpe:obssim{irf_date}_alpha075:v13', weights=True)
 
                 # PCUBE results
                 src_pcube_file_list = pipeline.xpbin(*src_pcube_file_list, **kwargs)
@@ -199,13 +199,13 @@ def pha(obs: str,
     Required if changes=True:
 
     src_rad: float
-        Radius of the source region in arcseconds. Required if changes=True.
+        Radius of the source region in arcmin. Required if changes=True.
 
     bkg_inner_rad: float
-        Inner radius of the background annulus in arcseconds. Required if changes=True.
+        Inner radius of the background annulus in arcmin. Required if changes=True.
 
     bkg_outer_rad: float
-        Outer radius of the background annulus in arcseconds. Required if changes=True.
+        Outer radius of the background annulus in arcmin. Required if changes=True.
 
     ra: float
         Right ascension of the source in degrees. Required if changes=True.
