@@ -36,18 +36,24 @@ TOOL_MANIFEST: dict = {
             "(skip any not present). This is NOT the same as the cross-calibration reference, "
             "which fit_* selects internally (NuSTAR by default). "
             "Returns dict: instrument → obsid → detector → [XSPEC spectrum indices]. "
-            "Pass this indices dict unchanged to fit_*, xspec_status, plot_fit, and plot_iqu."
+            "Pass this indices dict unchanged to fit_*, xspec_status, plot_fit, and plot_iqu. "
+            "On first load XSPEC prints harmless warnings about unresolved response-file "
+            "paths (arf/rmf are loaded explicitly) — ignore them. For bright sources like "
+            "Cyg X-1, NuSTAR/NICER background is None by design — not an error or missing data."
         ),
         "args_schema": {
             "type": "object",
             "properties": {
                 "epoch": {
-                    "type": "string",
+                    "type": "object",
+                    "additionalProperties": True,
                     "description": (
-                        "JSON-encoded epoch dict. List IXPE FIRST (IXPE = data group 1), then "
-                        "NICER, then NuSTAR; key order determines data-group numbering. E.g. "
-                        "'{\"IXPE\":[\"02008401\"],\"NICER\":[\"6643010101\",\"6643010102\"],"
-                        "\"NuSTAR\":[\"80902318002\"],\"STATE\":\"HSS\"}'. "
+                        "Epoch dict (pass the object directly — do NOT JSON-encode it). "
+                        "List IXPE FIRST (IXPE = data group 1), then NICER, then NuSTAR; "
+                        "key order determines data-group numbering. Keys 'IXPE'/'NICER'/'NuSTAR' "
+                        "map to lists of obs-ID strings; 'STATE' is a label. E.g. "
+                        "{\"IXPE\":[\"02008401\"],\"NICER\":[\"6643010101\",\"6643010102\"],"
+                        "\"NuSTAR\":[\"80902318002\"],\"STATE\":\"HSS\"}. "
                         "Omit any instrument not present in the epoch."
                     ),
                 },
@@ -73,15 +79,14 @@ TOOL_MANIFEST: dict = {
                     ),
                 },
                 "clear_existing": {
-                    "type": "string",
+                    "type": "boolean",
                     "description": (
-                        "JSON bool. Call AllData.clear() + AllModels.clear() before loading. "
-                        "Default 'true'."
+                        "Call AllData.clear() + AllModels.clear() before loading. Default true."
                     ),
                 },
                 "chatter": {
-                    "type": "string",
-                    "description": "JSON bool. Print file paths and loading summaries. Default 'false'.",
+                    "type": "boolean",
+                    "description": "Print file paths and loading summaries. Default false.",
                 },
             },
             "required": ["epoch", "ixpe_path"],
@@ -101,11 +106,12 @@ TOOL_MANIFEST: dict = {
             "type": "object",
             "properties": {
                 "indices": {
-                    "type": "string",
-                    "description": "JSON-encoded return value of load_data.",
+                    "type": "object",
+                    "additionalProperties": True,
+                    "description": "Return value of load_data — pass the object directly, do NOT JSON-encode it.",
                 },
                 "log_path": {"type": "string"},
-                "audit_data": {"type": "string"},
+                "audit_data": {"type": "boolean", "description": "Audit loaded data before fitting. Default true."},
             },
             "required": ["indices"],
         },
@@ -124,8 +130,8 @@ TOOL_MANIFEST: dict = {
             "type": "object",
             "properties": {
                 "n_iterations": {
-                    "type": "string",
-                    "description": "JSON int. XSPEC Fit.nIterations. Default 100.",
+                    "type": "integer",
+                    "description": "XSPEC Fit.nIterations. Default 100.",
                 },
                 "log_path": {
                     "type": "string",
@@ -161,8 +167,9 @@ TOOL_MANIFEST: dict = {
             "type": "object",
             "properties": {
                 "indices": {
-                    "type": "string",
-                    "description": "JSON-encoded return value of load_data.",
+                    "type": "object",
+                    "additionalProperties": True,
+                    "description": "Return value of load_data — pass the object directly, do NOT JSON-encode it.",
                 },
                 "save_path": {
                     "type": "string",
@@ -174,12 +181,14 @@ TOOL_MANIFEST: dict = {
                     "description": "'ufspec' or 'data'. Default 'ufspec'.",
                 },
                 "residuals": {
-                    "type": "string",
-                    "description": "JSON list of residual types, e.g. '[\"delchi\"]'. Default ['delchi'].",
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Residual types, e.g. [\"delchi\"]. Default ['delchi'].",
                 },
                 "xlim": {
-                    "type": "string",
-                    "description": "JSON [xmin, xmax] in keV, e.g. '[1, 79]'.",
+                    "type": "array",
+                    "items": {"type": "number"},
+                    "description": "[xmin, xmax] in keV, e.g. [1, 79].",
                 },
             },
             "required": ["indices"],
@@ -200,12 +209,17 @@ TOOL_MANIFEST: dict = {
             "type": "object",
             "properties": {
                 "indices": {
-                    "type": "string",
-                    "description": "JSON-encoded return value of load_data (must contain 'IXPE').",
+                    "type": "object",
+                    "additionalProperties": True,
+                    "description": (
+                        "Return value of load_data (must contain 'IXPE') — pass the object "
+                        "directly, do NOT JSON-encode it."
+                    ),
                 },
                 "e_bins": {
-                    "type": "string",
-                    "description": "JSON list of energy bin edges in keV. Default '[2,3,4,5,6,8]'.",
+                    "type": "array",
+                    "items": {"type": "number"},
+                    "description": "Energy bin edges in keV. Default [2,3,4,5,6,8].",
                 },
                 "save_path_prefix": {
                     "type": "string",
@@ -235,8 +249,9 @@ TOOL_MANIFEST: dict = {
                 "infile": {"type": "string", "description": "Input PHA file path."},
                 "outfile": {"type": "string", "description": "Output grouped PHA file path."},
                 "e_edges": {
-                    "type": "string",
-                    "description": "JSON list of bin edges in keV, e.g. '[2.0,3.0,4.0,5.0,6.0,8.0]'. This argument is named 'e_edges' — not 'bin_edges' or 'edges'.",
+                    "type": "array",
+                    "items": {"type": "number"},
+                    "description": "Bin edges in keV, e.g. [2.0,3.0,4.0,5.0,6.0,8.0]. This argument is named 'e_edges' — not 'bin_edges' or 'edges'.",
                 },
             },
             "required": ["infile", "outfile", "e_edges"],
