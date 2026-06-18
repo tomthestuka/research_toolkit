@@ -30,7 +30,7 @@ import os
 
 from . import _domain, neutral
 
-__all__ = ["repair"]
+__all__ = ["repair", "repair_all"]
 
 
 def _newest_parseable_snapshot(obs_db_path: str):
@@ -108,3 +108,20 @@ def repair(obs_db_path, mission: str | None = None) -> dict:
 
         neutral._commit(obs_db_path, catalog)
         return catalog
+
+
+def repair_all(root) -> dict:
+    """Repair every mission catalog under a single ``root`` directory.
+
+    Discovers missions the way the orchestration does: each immediate subdirectory of ``root``
+    that holds a ``catalog.json`` is a mission (keyed by its lowercased basename); unrelated
+    working directories under ``root`` (no ``catalog.json``) are ignored. Each discovered
+    mission is repaired via :func:`repair`. Returns ``{mission: repaired_catalog}``.
+    """
+    root = os.fspath(root)
+    results: dict[str, dict] = {}
+    for name in sorted(os.listdir(root)):
+        sub = os.path.join(root, name)
+        if os.path.isdir(sub) and os.path.exists(os.path.join(sub, neutral.CATALOG_NAME)):
+            results[name.lower()] = repair(sub)
+    return results

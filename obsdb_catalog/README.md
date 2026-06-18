@@ -9,9 +9,10 @@ contract; a separate read side (`auto_research`) consumes it read-only.
 **Prisoned write path.** `catalog.json` is mutated *only* through this package —
 `neutral` for producers, `repair` for deliberate recovery. No producer, script,
 or runtime-authored tool ever opens the catalog for writing. Not `*_utils`-named
-and exposes no `skills/` / `TOOL_MANIFEST` / CLI, so it is invisible to LLM tool
+and exposes no `skills/` / `TOOL_MANIFEST`, so it is invisible to LLM tool
 discovery; catalog writes are a side effect of data-producing libraries, never a
-model action.
+model action. Its only command line is a deliberate **human/operator** maintenance
+entry (`python -m obsdb_catalog …`, see Maintenance) — not an agent-callable tool.
 
 ## Layers
 
@@ -50,14 +51,28 @@ file is confirmed on disk; product `path` is relative to `obs_db_path`.
 
 ```python
 from obsdb_catalog.healthcheck import healthcheck
-from obsdb_catalog.repair import repair
+from obsdb_catalog.repair import repair, repair_all
 
 healthcheck(obs_db_path)   # True if healthy, else a report of what's broken
-repair(obs_db_path)        # restore + reconcile + re-derive; writes atomically
+repair(obs_db_path)        # restore + reconcile + re-derive ONE mission; writes atomically
+repair_all(root)           # repair EVERY mission under a root -> {mission: catalog}
 ```
 
-`repair` is the only write-side recovery — invoke it deliberately, never
+`repair_all(root)` discovers missions the way the orchestration does — each immediate
+subdirectory of `root` holding a `catalog.json` is a mission (lowercased basename);
+unrelated working dirs are skipped — then runs `repair` on each. `obs_db_path` is one
+mission's directory (`<root>/<MISSION>`); `root` is the parent that holds them.
+
+`repair`/`repair_all` are the only write-side recovery — invoke them deliberately, never
 automatically.
+
+Or from the command line (the same three operations, for a human/operator):
+
+```bash
+python -m obsdb_catalog healthcheck <obs_db_path>   # detect-only; exits 1 on drift
+python -m obsdb_catalog repair      <obs_db_path>   # recover+reconcile ONE mission (writes)
+python -m obsdb_catalog repair_all  <root>          # repair EVERY mission under a root (writes)
+```
 
 The per-mission disk knowledge used by `repair`/`healthcheck` lives in `_domain.py`
 (`scan`, `kind_level`). Its `level2_evt` derivation **mirrors `heasarc_utils`** (the
@@ -79,3 +94,11 @@ python3 -m pytest obsdb_catalog/tests/
   `repair` backfills downloaded level-2 events and stays consistent with `heasarc_utils`.
   Globs are gz-tolerant (fresh archive downloads are gzipped, reduction gunzips), preferring
   the uncompressed twin when both exist.
+- 2026-06-18 — Added `repair_all(root)`: repair every mission catalog under one root, with
+  missions discovered by the `catalog.json` marker (lowercased subdir basename), unrelated
+  working dirs skipped. Thin loop over the per-mission `repair` primitive (unchanged); returns
+  `{mission: catalog}`. Covered by `tests/test_repair.py`.
+- 2026-06-18 — Added a `__main__` CLI (`python -m obsdb_catalog {healthcheck,repair,repair_all}`)
+  for deliberate human/operator maintenance; `healthcheck` exits 1 on drift (prints the report).
+  Pure-stdlib (argparse/json), not an agent-callable tool — the package stays invisible to LLM
+  tool discovery.

@@ -2,8 +2,31 @@ import os
 
 from obsdb_catalog import neutral
 from obsdb_catalog.healthcheck import healthcheck
-from obsdb_catalog.repair import repair
+from obsdb_catalog.repair import repair, repair_all
 from obsdb_catalog.tests.test_neutral import prod, touch
+
+
+def test_repair_all_discovers_missions_under_root_and_repairs_each(tmp_path):
+    # Two mission subdirs (each with a catalog.json) plus an unrelated working dir.
+    nicer = tmp_path / "NICER"
+    obs = "4690010101"
+    touch(str(nicer), f"{obs}/xti/event_cl/ni{obs}_0mpu7_cl.evt")  # level-2 on disk, uncatalogued
+    neutral._commit(str(nicer), {"mission": "nicer", "entries": {}})  # empty catalog → drift
+
+    nustar = tmp_path / "NuSTAR"
+    obs2 = "30702017002"
+    touch(str(nustar), f"{obs2}/event_cl/nu{obs2}A01_cl.evt")
+    neutral._commit(str(nustar), {"mission": "nustar", "entries": {}})
+
+    (tmp_path / "lib").mkdir()  # non-mission clutter: no catalog.json → must be skipped
+
+    results = repair_all(tmp_path)
+
+    assert set(results) == {"nicer", "nustar"}          # clutter ignored
+    assert obs in results["nicer"]["entries"]            # level-2 backfilled
+    assert obs2 in results["nustar"]["entries"]
+    assert healthcheck(str(nicer)) is True               # drift cleared
+    assert healthcheck(str(nustar)) is True
 
 
 def test_restore_from_snapshot_when_unparseable(tmp_path):

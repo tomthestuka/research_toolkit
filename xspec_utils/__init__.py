@@ -1,8 +1,7 @@
 """xspec_utils — XSPEC spectral analysis tools for the auto_research sandbox.
 
-Human-authored domain code lives in lib/ (xspec_help, NICER, NuSTAR, red_ixpe,
-find_src, src_pos) and is synced from the live working directory via
-sync_from_src.sh. Do not edit lib/ here.
+Domain code lives in lib/ (xspec_help, NICER, NuSTAR, red_ixpe, find_src,
+src_pos) — the editable working copy a tool author may extend or refactor.
 
 The AI-dedicated tool interface lives in skills/:
   skills/__init__.py  — TOOL_MANIFEST (pure data; no xspec import)
