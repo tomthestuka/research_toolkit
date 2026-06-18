@@ -59,8 +59,23 @@ repair(obs_db_path)        # restore + reconcile + re-derive; writes atomically
 `repair` is the only write-side recovery — invoke it deliberately, never
 automatically.
 
+The per-mission disk knowledge used by `repair`/`healthcheck` lives in `_domain.py`
+(`scan`, `kind_level`). Its `level2_evt` derivation **mirrors `heasarc_utils`** (the
+download producer) so a freshly recorded download and a `repair` re-derivation agree —
+keep the two in sync when adding or changing a mission. Running `repair` on the live
+catalogs backfills `level2_evt` for NICER/NuSTAR (the original bootstrap recorded it for
+IXPE only); until then `healthcheck` reports the cleaned-event files as `uncatalogued`.
+
 ## Tests
 
 ```bash
 python3 -m pytest obsdb_catalog/tests/
 ```
+
+## Changelog
+
+- 2026-06-17 — `_domain` scanners derive a representative `level2_evt` for NICER
+  (`*mpu7_cl.evt*`) and NuSTAR (`event_cl/nu<obsid>A01_cl.evt*`) in addition to IXPE, so
+  `repair` backfills downloaded level-2 events and stays consistent with `heasarc_utils`.
+  Globs are gz-tolerant (fresh archive downloads are gzipped, reduction gunzips), preferring
+  the uncompressed twin when both exist.

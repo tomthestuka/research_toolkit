@@ -31,6 +31,9 @@ UNRECOVERABLE = "repaired session, unrecoverable"
 _LEVEL2_KINDS = {"level2_evt", "raw_evt"}
 _LEVEL1_KINDS = {"raw", "level1"}
 
+#: Representative-product note, mirrored by heasarc_utils when it records level-2 events.
+_NUSTAR_NOTE = "fpmA listed; fpmB follows same naming pattern"
+
 
 def mission_from_path(obs_db_path: str) -> str:
     return os.path.basename(os.path.normpath(obs_db_path)).lower()
@@ -53,6 +56,19 @@ def _rel(obs_db_path: str, full: str) -> str:
     return os.path.relpath(full, obs_db_path)
 
 
+def _prefer(matches: list[str]) -> str | None:
+    """Pick one representative, preferring an uncompressed file over its ``.gz`` twin.
+
+    Fresh archive downloads are gzipped (``*.evt.gz`` / ``*.fits.gz``) and reduction
+    later gunzips them; glob both and prefer the plain file when present. Mirrors
+    ``heasarc_utils.lib.heasarc._pick`` — keep the two in sync.
+    """
+    if not matches:
+        return None
+    plain = [m for m in matches if not m.endswith(".gz")]
+    return sorted(plain or matches)[0]
+
+
 # --------------------------------------------------------------------------- #
 # Per-mission disk scanners: obs_db_path -> {obsid: [product, ...]}
 # Products are fully formed (kind, path, produced_by, params); files exist
@@ -68,6 +84,16 @@ def _scan_nicer(obs_db_path: str) -> dict[str, list[dict]]:
     for evt_cl in sorted(glob.glob(os.path.join(obs_db_path, "*", "xti", "event_cl"))):
         obsid = evt_cl.split(os.sep)[-3]
         products = []
+        # level-2 cleaned event (archive; gzipped on download, gunzipped by reduction).
+        l2 = _prefer(glob.glob(os.path.join(evt_cl, "*mpu7_cl.evt*")))
+        if l2:
+            products.append({
+                "kind": "level2_evt",
+                "path": _rel(obs_db_path, l2),
+                "produced_by": "heasarc",
+                "params": {"mpu": 7},
+            })
+        # level-3 nicerl3-spect reduction products.
         specs = [
             ("pha", "*sr.pha", {"background_model": "3C50", "mpu": 7}),
             ("pha_bkg", "*bg.pha", {"background_model": "3C50", "mpu": 7}),
@@ -89,20 +115,38 @@ def _scan_nicer(obs_db_path: str) -> dict[str, list[dict]]:
 
 def _scan_nustar(obs_db_path: str) -> dict[str, list[dict]]:
     out: dict[str, list[dict]] = {}
-    for prod_dir in sorted(glob.glob(os.path.join(obs_db_path, "*", "products"))):
-        obsid = prod_dir.split(os.sep)[-2]
+    # A downloaded ObsID has event_cl (level-2); a reduced one also has products/ (level-3).
+    obsids: set[str] = set()
+    for d in glob.glob(os.path.join(obs_db_path, "*", "event_cl")):
+        obsids.add(d.split(os.sep)[-2])
+    for d in glob.glob(os.path.join(obs_db_path, "*", "products")):
+        obsids.add(d.split(os.sep)[-2])
+
+    # kind suffix, glob, produced_by, extra params (besides fpm) for level-3 products
+    specs = [
+        ("pha_grp", "*{fpm}01_sr_grp.pha", "nustar_grp.sh", {"grouping": "optimal"}),
+        ("pha_src", "*{fpm}01_sr.pha", "nustar_red.sh", {}),
+        ("arf", "*{fpm}01_sr.arf", "nustar_red.sh", {}),
+        ("rmf", "*{fpm}01_sr.rmf", "nustar_red.sh", {}),
+    ]
+    for obsid in sorted(obsids):
         products = []
-        # kind suffix, glob, produced_by, extra params (besides fpm)
-        specs = [
-            ("pha_grp", "*{fpm}01_sr_grp.pha", "nustar_grp.sh", {"grouping": "optimal"}),
-            ("pha_src", "*{fpm}01_sr.pha", "nustar_red.sh", {}),
-            ("arf", "*{fpm}01_sr.arf", "nustar_red.sh", {}),
-            ("rmf", "*{fpm}01_sr.rmf", "nustar_red.sh", {}),
-        ]
+        # level-2 cleaned events: representative FPMA, from the archive download.
+        l2 = _prefer(glob.glob(
+            os.path.join(obs_db_path, obsid, "event_cl", f"nu{obsid}A01_cl.evt*")
+        ))
+        if l2:
+            products.append({
+                "kind": "level2_evt",
+                "path": _rel(obs_db_path, l2),
+                "produced_by": "heasarc",
+                "params": {"fpm": "A", "note": _NUSTAR_NOTE},
+            })
+        # level-3 reduction products, per FPM.
+        prod_dir = os.path.join(obs_db_path, obsid, "products")
         for fpm in ("A", "B"):
             for kind, pat, produced_by, extra in specs:
-                matches = sorted(glob.glob(os.path.join(prod_dir, pat.format(fpm=fpm))))
-                for full in matches:
+                for full in sorted(glob.glob(os.path.join(prod_dir, pat.format(fpm=fpm)))):
                     params = {"fpm": fpm}
                     params.update(extra)
                     products.append({
@@ -117,7 +161,7 @@ def _scan_nustar(obs_db_path: str) -> dict[str, list[dict]]:
 
 
 # IXPE level-2 event file for the det1 representative: ixpe<obsid>_det1_evt2_v<NN>.fits
-_IXPE_EVT = re.compile(r"_det1_evt2_(?P<ver>v\d+)\.fits$")
+_IXPE_EVT = re.compile(r"_det1_evt2_(?P<ver>v\d+)\.fits(?:\.gz)?$")
 # pcube/pha derived names carry the filter infix and calibration version.
 _IXPE_DERIVED = re.compile(
     r"_det1_evt2_(?P<ver>v\d+)_(?P<filter>rej_src|src)_(?P<prod>pcube|pha1)\.fits$"
@@ -131,7 +175,7 @@ def _scan_ixpe(obs_db_path: str) -> dict[str, list[dict]]:
         obsid = evt_l2.split(os.sep)[-2]
         names = sorted(
             os.path.basename(f)
-            for f in glob.glob(os.path.join(evt_l2, "ixpe*_det1_evt2_*.fits"))
+            for f in glob.glob(os.path.join(evt_l2, "ixpe*_det1_evt2_*.fits*"))
         )
         derived = [(n, m) for n in names if (m := _IXPE_DERIVED.search(n))]
         # Per the bootstrap convention, the catalogued products use the
@@ -142,19 +186,20 @@ def _scan_ixpe(obs_db_path: str) -> dict[str, list[dict]]:
             else "src"
 
         products = []
-        for name in names:
-            m_evt = _IXPE_EVT.search(name)
-            if m_evt:
-                products.append({
-                    "kind": "level2_evt",
-                    "path": _rel(obs_db_path, os.path.join(evt_l2, name)),
-                    "produced_by": "heasarc",
-                    "params": {
-                        "detectors": [1, 2, 3],
-                        "calibration_version": m_evt.group("ver"),
-                        "note": _IXPE_NOTE,
-                    },
-                })
+        # base det1 level-2 event (single representative; prefer uncompressed over .gz).
+        base = _prefer([os.path.join(evt_l2, n) for n in names if _IXPE_EVT.search(n)])
+        if base:
+            ver = _IXPE_EVT.search(os.path.basename(base)).group("ver")
+            products.append({
+                "kind": "level2_evt",
+                "path": _rel(obs_db_path, base),
+                "produced_by": "heasarc",
+                "params": {
+                    "detectors": [1, 2, 3],
+                    "calibration_version": ver,
+                    "note": _IXPE_NOTE,
+                },
+            })
         for name, m in derived:
             if m.group("filter") != chosen:
                 continue

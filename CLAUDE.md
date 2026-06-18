@@ -30,7 +30,7 @@ Two kinds of top-level package live here, and the distinction matters:
 
 | Kind | Examples | Discoverable as an LLM tool? | Built by |
 |---|---|---|---|
-| **`<domain>_utils/` toolkits** | `xspec_utils` (exists); `heasarc_utils`, `lib_utils` (planned) | **Yes** — via `skills/TOOL_MANIFEST` | human + (Phase-2) runtime tool-author, on a branch |
+| **`<domain>_utils/` toolkits** | `xspec_utils`, `heasarc_utils` (exist); `lib_utils` (planned) | **Yes** — via `skills/TOOL_MANIFEST` | human + (Phase-2) runtime tool-author, on a branch |
 | **Plain support packages** | `obsdb_catalog` | **No** — deliberately invisible | human / build-time agent, by hand |
 
 - **`*_utils` toolkits** are the AI-facing surface. Their name and `TOOL_MANIFEST` are how
@@ -143,8 +143,10 @@ Each mission keeps its observations under an `obs_db_path` with a single
 - **The only write path is `obsdb_catalog`** (`neutral` for producers, `repair` for deliberate
   recovery). No producer, script, or runtime-authored tool ever opens `catalog.json` for
   writing — see `obsdb_catalog/README.md`.
-- Producers (download/reduction tools) record by **calling `obsdb_catalog.neutral`**. Wiring
-  the existing reduction scripts into it is pending work specified in `HANDOFF_CATALOG.md`.
+- Producers (download/reduction tools) record by **calling `obsdb_catalog.neutral`**.
+  `heasarc_utils` (acquire/download) is the first wired producer; wiring the existing
+  reduction scripts (`*_red.sh`, `filter_inst_bkg_IXPE.sh`) is still pending work specified
+  in `HANDOFF_CATALOG.md`.
 
 ---
 
@@ -178,3 +180,13 @@ Each mission keeps its observations under an `obs_db_path` with a single
   rule.** Code must be backed by official docs (and a known-good example where one exists);
   no remembered signatures or plausible-looking flags, because this repo wraps fragile
   science-stack APIs that fail silently when misused.
+- 2026-06-17 — **Built `heasarc_utils`** (the acquire toolkit) and marked it in §2. A
+  mission-agnostic `astroquery.heasarc` engine + `MissionProfile` registry (ixpe/nicer/nustar,
+  extensible) downloads an ObsID and records its level-2 event via `obsdb_catalog.neutral.new`
+  — the first producer wired into the catalog. Extended `obsdb_catalog._domain` to derive a
+  representative `level2_evt` for NICER/NuSTAR (mirrors `heasarc_utils`) so `repair` backfills
+  downloaded level-2 events.
+- 2026-06-17 — `heasarc_utils` live-verified against installed astroquery (NICER acquire,
+  `logs/dev/live_acquire_nicer.md`): resolve uses `query_tap` (not `query_region(column_filters)`,
+  which drops the obsid filter); fresh archive event files are gzipped → level-2 globs made
+  gz-tolerant in `heasarc_utils` + `obsdb_catalog._domain`; `download_data` tar is obsid-rooted.

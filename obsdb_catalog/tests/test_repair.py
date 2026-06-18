@@ -34,6 +34,7 @@ def test_rederive_nicer_from_disk(tmp_path):
     nicer = tmp_path / "NICER"
     nicer.mkdir()
     obs = "4690010101"
+    touch(str(nicer), f"{obs}/xti/event_cl/ni{obs}_0mpu7_cl.evt")  # level-2 (download)
     for suffix in ("mpu7_sr.pha", "mpu7_bg.pha", "mpu7.arf", "mpu7.rmf"):
         touch(str(nicer), f"{obs}/xti/event_cl/ni{obs}{suffix}")
 
@@ -42,7 +43,9 @@ def test_rederive_nicer_from_disk(tmp_path):
     assert entry["max_level"] == 3
     assert entry["levels_present"] == [1, 2, 3]
     by_kind = {p["kind"]: p for p in entry["products"]}
-    assert set(by_kind) == {"pha", "pha_bkg", "arf", "rmf"}
+    assert set(by_kind) == {"level2_evt", "pha", "pha_bkg", "arf", "rmf"}
+    assert by_kind["level2_evt"]["produced_by"] == "heasarc"
+    assert by_kind["level2_evt"]["params"] == {"mpu": 7}
     assert by_kind["pha"]["produced_by"] == "nicer_red.sh"
     assert by_kind["pha"]["params"] == {"background_model": "3C50", "mpu": 7}
     assert by_kind["arf"]["params"] == {"mpu": 7}
@@ -53,6 +56,7 @@ def test_rederive_nustar_per_fpm(tmp_path):
     nustar = tmp_path / "NuSTAR"
     nustar.mkdir()
     obs = "30702017002"
+    touch(str(nustar), f"{obs}/event_cl/nu{obs}A01_cl.evt")  # level-2 (download)
     for fpm in ("A", "B"):
         for suffix in ("_sr_grp.pha", "_sr.pha", "_sr.arf", "_sr.rmf"):
             touch(str(nustar), f"{obs}/products/nu{obs}{fpm}01{suffix}")
@@ -63,6 +67,8 @@ def test_rederive_nustar_per_fpm(tmp_path):
     assert by_kind["pha_grp_fpmA"]["produced_by"] == "nustar_grp.sh"
     assert by_kind["pha_grp_fpmA"]["params"] == {"fpm": "A", "grouping": "optimal"}
     assert by_kind["pha_src_fpmB"]["params"] == {"fpm": "B"}
+    assert by_kind["level2_evt"]["produced_by"] == "heasarc"
+    assert by_kind["level2_evt"]["params"]["fpm"] == "A"
 
 
 def test_rederive_ixpe_filter_and_special_case(tmp_path):
