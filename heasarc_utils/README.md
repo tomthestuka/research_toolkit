@@ -49,7 +49,12 @@ from heasarc_utils.lib.heasarc_help import acquire
 acquire("01002901", "ixpe", "/data/fzhou/XSPEC/Cyg_X-1/IXPE")
 # -> downloads to <obs_db_path>/01002901/, records level2_evt at level 2,
 #    returns {"obsid", "mission", "level2_evt": <rel path>, "catalog_entry"}
+
+# Large/slow IXPE transfers that would otherwise time out:
+acquire("03005801", "ixpe", "/data/fzhou/XSPEC/Cyg_X-1/IXPE", timeout_s=3600)
 ```
+
+Signature: `acquire(obsid, mission, obs_db_path, *, host=None, chatter=False, timeout_s=1800.0)`
 
 - **Always (re)downloads** — the tool executes; the caller decides *when* to acquire. A
   deliberate re-acquire records at level 2, regressing `max_level` to 2 and thereby flagging
@@ -57,6 +62,11 @@ acquire("01002901", "ixpe", "/data/fzhou/XSPEC/Cyg_X-1/IXPE")
 - **Fails loudly** — unknown mission, ObsID not in the master table, or a download that does
   not yield the expected level-2 file all raise `heasarc.HeasarcError`; nothing is recorded.
 - `host` (`heasarc`/`sciserver`/`aws`) is optional; omit to let astroquery choose.
+- `timeout_s` — HTTP transfer timeout in seconds. Defaults to 1800 s (30 min). The astroquery
+  factory default is **30 s**, which is far too short for large IXPE observations (> 1 GB).
+  This tool always overrides it. The three-layer threading path is:
+  `acquire(timeout_s)` → `acquire_obsid(timeout_s)` → `download(timeout_s)` →
+  `h.timeout = timeout_s` on the astroquery singleton before `download_data`.
 
 Shipped missions and the level-2 representative each records (these mirror
 `obsdb_catalog._domain` exactly — keep the two in sync):
@@ -107,3 +117,10 @@ by a live NICER `acquire` run on 2026-06-17 (see `logs/dev/live_acquire_nicer.md
 - 2026-06-17 — Live-verified against installed astroquery; two corrections: resolve via
   `query_tap` (not `query_region(column_filters=…)`, which drops the obsid filter), and
   gz-tolerant level-2 globs (fresh downloads are `.gz`). Layout confirmed obsid-rooted.
+- 2026-06-22 — `timeout_s` parameter added (default 1800 s). Threaded from
+  `heasarc_help.acquire` → `heasarc.acquire_obsid` → `heasarc.download`, where it is
+  applied as `h.timeout = timeout_s` on the astroquery singleton before `download_data`.
+  Fixes IXPE acquisition timeouts on large (> 1 GB) observations (03005801, 02001901,
+  01250401) that aborted under the astroquery factory default of 30 s. Surfaced in
+  `TOOL_MANIFEST` args_schema. Three new tests: differential wiring, error-contract
+  regression, default-in-all-layers guard.

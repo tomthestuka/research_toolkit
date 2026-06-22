@@ -73,13 +73,29 @@ def resolve(catalog: str, obsid: str):
     return heasarc.locate_data(tab, catalog_name=catalog)
 
 
-def download(links, obs_db_path: str, host: str | None = None) -> None:
-    """Download resolved links into ``obs_db_path`` via astroquery."""
-    heasarc = _heasarc()
-    kwargs = {"location": obs_db_path}
-    if host is not None:
-        kwargs["host"] = host
-    heasarc.download_data(links, **kwargs)
+def download(links, obs_db_path: str, host: str | None = None,
+             timeout_s: float = 1800.0) -> None:
+    """Download resolved links into ``obs_db_path`` via astroquery.
+
+    The astroquery ``Heasarc`` singleton carries a ``timeout`` attribute
+    (default 30 s) that its internal ``_download_heasarc`` passes directly to
+    the underlying HTTP transfer.  Large IXPE observations can exceed 1 GB and
+    need several minutes — the factory default is far too short.
+
+    This function temporarily raises ``h.timeout`` to ``timeout_s`` for the
+    duration of the call and restores the previous value on exit, so concurrent
+    or subsequent callers are unaffected.
+    """
+    h = _heasarc()
+    _prev_timeout = getattr(h, "timeout", None)
+    h.timeout = timeout_s
+    try:
+        kwargs = {"location": obs_db_path}
+        if host is not None:
+            kwargs["host"] = host
+        h.download_data(links, **kwargs)
+    finally:
+        h.timeout = _prev_timeout
 
 
 def normalize_layout(obs_db_path: str, obsid: str) -> str:
@@ -194,13 +210,21 @@ MISSIONS: dict[str, MissionProfile] = {
 
 
 def acquire_obsid(mission: str, obsid: str, obs_db_path: str,
-                  *, host: str | None = None) -> dict:
+                  *, host: str | None = None,
+                  timeout_s: float = 1800.0) -> dict:
     """Resolve → download → normalize → derive the level-2 product. No recording.
 
     Returns the level-2 product dict (relative ``path`` confirmed on disk). The
     high-level :func:`heasarc_utils.lib.heasarc_help.acquire` adds catalog
     recording. Raises :class:`HeasarcError` for an unknown mission, a missing
     ObsID, or a download that does not yield the expected level-2 file.
+
+    Parameters
+    ----------
+    timeout_s : float
+        HTTP transfer timeout in seconds, passed through to :func:`download`.
+        Default 1800 s (30 min). The astroquery factory default (30 s) is too
+        short for large IXPE transfers.
     """
     profile = MISSIONS.get(mission.lower())
     if profile is None:
@@ -210,6 +234,6 @@ def acquire_obsid(mission: str, obsid: str, obs_db_path: str,
             f"master table). Known missions: {sorted(MISSIONS)}"
         )
     links = resolve(profile.catalog, obsid)
-    download(links, obs_db_path, host=host)
+    download(links, obs_db_path, host=host, timeout_s=timeout_s)
     normalize_layout(obs_db_path, obsid)
     return profile.level2(obs_db_path, obsid)

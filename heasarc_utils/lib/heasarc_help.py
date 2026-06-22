@@ -16,7 +16,8 @@ __all__ = ["acquire"]
 
 
 def acquire(obsid: str, mission: str, obs_db_path: str,
-            *, host: str | None = None, chatter: bool = False) -> dict:
+            *, host: str | None = None, chatter: bool = False,
+            timeout_s: float = 1800.0) -> dict:
     """Acquire archive data for ``obsid`` into ``obs_db_path`` and record it.
 
     Resolves the ObsID authoritatively via the mission's HEASARC master table,
@@ -37,6 +38,11 @@ def acquire(obsid: str, mission: str, obs_db_path: str,
     host : str, optional
         astroquery download host (``"heasarc"`` | ``"sciserver"`` | ``"aws"``).
         Default lets astroquery choose based on the environment.
+    timeout_s : float, optional
+        HTTP transfer timeout in seconds for the archive download. Default
+        1800 s (30 min). The astroquery factory default (30 s) is too short
+        for large IXPE observations (> 1 GB). Increase further if transfers
+        are still being cut off on very slow connections.
 
     Returns
     -------
@@ -50,9 +56,11 @@ def acquire(obsid: str, mission: str, obs_db_path: str,
         expected level-2 file. Nothing is recorded on failure.
     """
     mission = mission.lower()
-    product = heasarc.acquire_obsid(mission, obsid, obs_db_path, host=host)
+    product = heasarc.acquire_obsid(mission, obsid, obs_db_path,
+                                    host=host, timeout_s=timeout_s)
     if chatter:
-        print(f"[heasarc_utils] {mission} {obsid}: recording {product['path']}")
+        print(f"[heasarc_utils] {mission} {obsid}: recording {product['path']}"
+              f" (timeout_s={timeout_s})")
     entry = neutral.new(obs_db_path, mission, obsid, products=[product])
     return {
         "obsid": obsid,

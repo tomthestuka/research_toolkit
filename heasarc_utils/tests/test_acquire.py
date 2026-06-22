@@ -114,6 +114,120 @@ def test_unregistered_mission_raises(tmp_path):
         acquire("12345", "chandra", str(tmp_path))
 
 
+# ── timeout_s tests ───────────────────────────────────────────────────────
+
+
+def test_timeout_threaded_to_download(tmp_path, monkeypatch):
+    """Differential: timeout_s value threads through all three layers to the
+    astroquery object at download time.
+
+    A capturing fake reads ``cls.timeout`` inside ``download_data``; the value
+    must equal exactly what was passed to ``acquire``.  The default (omitted
+    timeout_s) must land as 1800.0, confirming the old astroquery factory
+    default (30 s) is never used when this tool is the caller.
+    """
+    obsid = OBSID["ixpe"]
+    mission = "ixpe"
+    captured: list[float] = []
+
+    class CapturingFakeHeasarc:
+        @classmethod
+        def query_tap(cls, adql):
+            class _R:
+                def to_table(self):
+                    return ["row"]
+            return _R()
+
+        @classmethod
+        def locate_data(cls, tab, catalog_name=None):
+            return {"access_url": ["u"]}
+
+        @classmethod
+        def download_data(cls, links, location=None, host=None):
+            captured.append(cls.timeout)
+            _write(os.path.join(location, LEVEL2_REL[mission].format(obsid=obsid)))
+
+    monkeypatch.setattr(heasarc, "_heasarc", lambda: CapturingFakeHeasarc)
+
+    # custom value — must arrive unchanged
+    acquire(obsid, mission, str(tmp_path), timeout_s=900.0)
+    assert captured[-1] == 900.0, (
+        f"expected timeout 900.0 at download_data, got {captured[-1]}"
+    )
+
+    # default (omitted) — must be 1800.0, NOT the astroquery factory 30 s
+    acquire(obsid, mission, str(tmp_path))
+    assert captured[-1] == 1800.0, (
+        f"default timeout must be 1800.0, got {captured[-1]}"
+    )
+
+
+def test_timeout_does_not_suppress_obsid_error(tmp_path, monkeypatch):
+    """Regression: passing timeout_s must not alter the loud-failure contract
+    for a missing ObsID — HeasarcError still raised, nothing recorded."""
+    monkeypatch.setattr(heasarc, "_heasarc",
+                        lambda: _fake("ixpe", "01002901", found=False))
+    with pytest.raises(heasarc.HeasarcError):
+        acquire("01002901", "ixpe", str(tmp_path), timeout_s=1800.0)
+    assert neutral.read(tmp_path)["entries"] == {}
+
+
+def test_timeout_default_in_all_three_layers():
+    """Regression: default timeout_s is 1800 s at every call layer, confirming
+    the old astroquery 30 s bound cannot silently reappear when the argument is
+    omitted anywhere in the chain."""
+    import inspect
+    from heasarc_utils.lib import heasarc as hm
+
+    for fn, name in [
+        (acquire, "heasarc_help.acquire"),
+        (hm.acquire_obsid, "heasarc.acquire_obsid"),
+        (hm.download, "heasarc.download"),
+    ]:
+        params = inspect.signature(fn).parameters
+        assert "timeout_s" in params, f"{name} missing timeout_s parameter"
+        assert params["timeout_s"].default == 1800.0, (
+            f"{name}: timeout_s default is {params['timeout_s'].default}, "
+            f"expected 1800.0"
+        )
+
+
+def test_tool_manifest_exposes_timeout_s():
+    """Pin the AI-facing half: TOOL_MANIFEST must expose timeout_s in args_schema.
+
+    A lib/ change that adds timeout_s to heasarc_help.acquire but forgets to
+    surface it in skills/__init__.py would leave the LLM unable to set the
+    parameter.  This test makes that gap a Layer-B failure.
+
+    Asserts:
+    - timeout_s is present in args_schema.properties
+    - its type is "number" (JSON Schema — not "float" or "integer")
+    - timeout_s is NOT listed in required (optional argument with a default)
+    - the description records the 1800 s default so the LLM knows what to expect
+    """
+    from heasarc_utils.skills import TOOL_MANIFEST
+
+    entry = TOOL_MANIFEST["research_toolkit.heasarc_utils.acquire"]
+    schema = entry["args_schema"]
+    props = schema["properties"]
+
+    assert "timeout_s" in props, (
+        "timeout_s missing from args_schema.properties — "
+        "LLM callers cannot pass it"
+    )
+    assert props["timeout_s"]["type"] == "number", (
+        f"timeout_s type should be 'number', got {props['timeout_s'].get('type')!r}"
+    )
+    assert "timeout_s" not in schema.get("required", []), (
+        "timeout_s must not be required — it has a default of 1800 s"
+    )
+    desc = props["timeout_s"].get("description", "")
+    assert "1800" in desc, (
+        "timeout_s description must mention the 1800 s default so the LLM "
+        f"knows the baseline; got: {desc!r}"
+    )
+
+
 def test_register_new_mission_profile(tmp_path, monkeypatch):
     obsid = "999"
 
