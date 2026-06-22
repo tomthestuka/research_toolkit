@@ -1,0 +1,11 @@
+# Per-package tool configuration, read by auto_research's ToolkitRegistry.
+# Modular by design: this lives with the package, so the orchestration layer never
+# needs to know about heasarc_utils' tools.
+
+# Sandbox per-tool-call timeout ceilings (seconds), keyed by the tool's short name.
+# The sandbox SIGTERM-kills a tool call at this many seconds (exit 124) regardless of any
+# timeout inside the tool. This is a fixed HARD BACKSTOP, not a caller knob — set it a bit
+# ABOVE the tool's own graceful timeout so the tool times out cleanly (a real error) before
+# this hard kill.
+call_timeout_s:
+  acquire: 21600
