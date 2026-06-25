@@ -22,6 +22,7 @@ stay in sync so a freshly recorded download and a ``repair`` re-derivation agree
 from __future__ import annotations
 
 import glob
+import gzip
 import os
 import re
 import shutil
@@ -29,7 +30,8 @@ from dataclasses import dataclass
 from typing import Callable
 
 __all__ = ["HeasarcError", "MissionProfile", "MISSIONS", "acquire_obsid",
-           "resolve", "download", "normalize_layout", "discover_master"]
+           "resolve", "download", "normalize_layout", "gunzip_tree",
+           "discover_master"]
 
 # Notes mirrored from obsdb_catalog._domain (representative-product convention).
 _IXPE_NOTE = "det1 listed; det2/det3 follow same naming pattern"
@@ -120,6 +122,29 @@ def normalize_layout(obs_db_path: str, obsid: str) -> str:
     return target
 
 
+def gunzip_tree(obs_db_path: str, obsid: str) -> int:
+    """Decompress every ``*.gz`` under the ObsID directory in place; return the count.
+
+    Fresh HEASARC downloads arrive gzipped (``*.evt.gz`` / ``*.fits.gz``); acquire
+    decompresses them here so downstream reduction and the level-2 derivers operate
+    on plain files. Each ``<name>.gz`` becomes ``<name>`` and the compressed copy is
+    removed. Decompression writes a ``.part`` sidecar first and renames on success,
+    so an interrupted gunzip leaves the original ``.gz`` intact rather than a
+    half-written file masquerading as data.
+    """
+    root = os.path.join(obs_db_path, str(obsid))
+    count = 0
+    for gz in sorted(glob.glob(os.path.join(root, "**", "*.gz"), recursive=True)):
+        dest = gz[:-3]                      # strip the trailing ".gz"
+        part = dest + ".part"
+        with gzip.open(gz, "rb") as fin, open(part, "wb") as fout:
+            shutil.copyfileobj(fin, fout, length=16 * 1024 * 1024)
+        os.replace(part, dest)
+        os.remove(gz)
+        count += 1
+    return count
+
+
 def discover_master(mission: str):
     """List candidate HEASARC master tables for a mission name (authoring aid).
 
@@ -142,7 +167,8 @@ class MissionProfile:
 def _pick(matches: list[str]) -> str | None:
     """Pick a single representative file, preferring an uncompressed file over its
     ``.gz`` twin. Fresh archive downloads are gzipped (``*.evt.gz`` / ``*.fits.gz``);
-    reduction later gunzips them — so glob both and prefer the plain file if present.
+    :func:`gunzip_tree` decompresses them during acquire, so the plain file is normally
+    present — glob both and prefer the plain one (gz-tolerant for robustness).
     """
     if not matches:
         return None
@@ -212,7 +238,7 @@ MISSIONS: dict[str, MissionProfile] = {
 def acquire_obsid(mission: str, obsid: str, obs_db_path: str,
                   *, host: str | None = None,
                   timeout_s: float = 1800.0) -> dict:
-    """Resolve → download → normalize → derive the level-2 product. No recording.
+    """Resolve → download → normalize → gunzip → derive the level-2 product. No recording.
 
     Returns the level-2 product dict (relative ``path`` confirmed on disk). The
     high-level :func:`heasarc_utils.lib.heasarc_help.acquire` adds catalog
@@ -236,4 +262,5 @@ def acquire_obsid(mission: str, obsid: str, obs_db_path: str,
     links = resolve(profile.catalog, obsid)
     download(links, obs_db_path, host=host, timeout_s=timeout_s)
     normalize_layout(obs_db_path, obsid)
+    gunzip_tree(obs_db_path, obsid)
     return profile.level2(obs_db_path, obsid)

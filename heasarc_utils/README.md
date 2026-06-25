@@ -36,10 +36,11 @@ Two facts the live run pinned down (don't "fix" them back):
 - **Resolve uses `query_tap`, not `query_region(column_filters=…)`** — the latter silently
   drops the obsid filter for a position-less query and returns the whole catalog. `SELECT *`
   carries the `__row` column `locate_data` needs.
-- **Fresh archive event files are gzipped** (`*.evt.gz` / `*.fits.gz`); reduction later
-  gunzips them. The level-2 globs are gz-tolerant and prefer the uncompressed twin when both
-  exist. `download_data` untars an obsid-rooted tar, so data lands cleanly at
-  `<obs_db_path>/<obsid>/`.
+- **Fresh archive event files are gzipped** (`*.evt.gz` / `*.fits.gz`); **acquire gunzips the
+  whole ObsID tree after download** (`heasarc.gunzip_tree`), so downstream reduction and the
+  level-2 derivers operate on plain files and the recorded level-2 path is the decompressed
+  `.fits`. The level-2 globs stay gz-tolerant and prefer the uncompressed twin for robustness.
+  `download_data` untars an obsid-rooted tar, so data lands cleanly at `<obs_db_path>/<obsid>/`.
 
 ## Interfaces / Usage
 
@@ -104,10 +105,12 @@ registry entry**:
 ```bash
 python3 -m pytest heasarc_utils/tests/
 ```
-Offline: a fake `Heasarc` (injected via the `_heasarc` seam) creates the expected (gzipped)
-files, so the resolve/normalize/record/regression/extensibility paths run without network or
-astroquery. The download layout, the `query_tap` resolve path, and gzip handling were pinned
-by a live NICER `acquire` run on 2026-06-17 (see `logs/dev/live_acquire_nicer.md`).
+Offline: a fake `Heasarc` (injected via the `_heasarc` seam) creates the expected gzipped
+files, so the resolve/normalize/gunzip/record/regression/extensibility paths run without
+network or astroquery; `test_acquire_gunzips_download` asserts the `.gz` is decompressed and
+removed and the plain file is recorded. The download layout, the `query_tap` resolve path, and
+gzip handling were pinned by a live NICER `acquire` run on 2026-06-17 (see
+`logs/dev/live_acquire_nicer.md`).
 
 ## Changelog
 
@@ -124,3 +127,11 @@ by a live NICER `acquire` run on 2026-06-17 (see `logs/dev/live_acquire_nicer.md
   01250401) that aborted under the astroquery factory default of 30 s. Surfaced in
   `TOOL_MANIFEST` args_schema. Three new tests: differential wiring, error-contract
   regression, default-in-all-layers guard.
+- 2026-06-25 — `acquire` now **gunzips the downloaded ObsID tree** before deriving the
+  level-2 product (`heasarc.gunzip_tree`, called in `acquire_obsid` after `normalize_layout`).
+  Fresh archive downloads are gzipped; decompressing at acquire time means reduction and the
+  level-2 derivers see plain `.fits`/`.evt` files and the recorded level-2 path is the
+  decompressed file. Decompression writes a `.part` sidecar then renames, so an interrupted
+  gunzip leaves the `.gz` intact. Tests: `test_acquire_gunzips_download` (3 missions); the
+  offline fakes now write valid gzip content and the level-2 path assertion expects the plain
+  file. The level-2 globs remain gz-tolerant.

@@ -1,3 +1,4 @@
+import gzip
 import os
 
 import pytest
@@ -6,8 +7,9 @@ from heasarc_utils.lib import heasarc
 from heasarc_utils.lib.heasarc_help import acquire
 from obsdb_catalog import neutral
 
-# Relative level-2 file each mission's profile expects on disk. Fresh archive
-# downloads are gzipped (the live run confirmed this); reduction later gunzips.
+# Relative level-2 file each mission's download lands on disk. Fresh archive
+# downloads are gzipped (the live run confirmed this); acquire gunzips them, so
+# the recorded path is the plain (decompressed) twin — see ``_plain``.
 LEVEL2_REL = {
     "ixpe": "{obsid}/event_l2/ixpe{obsid}_det1_evt2_v01.fits.gz",
     "nicer": "{obsid}/xti/event_cl/ni{obsid}_0mpu7_cl.evt.gz",
@@ -16,10 +18,21 @@ LEVEL2_REL = {
 OBSID = {"ixpe": "01002901", "nicer": "4690010101", "nustar": "30702017002"}
 
 
+def _plain(rel: str) -> str:
+    """The decompressed path acquire records after gunzipping the download."""
+    return rel[:-3] if rel.endswith(".gz") else rel
+
+
 def _write(path):
+    """Write a fixture file. A ``.gz`` path gets valid gzip content so that the
+    acquire-time gunzip can decompress it (mirrors a real archive download)."""
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "wb") as fh:
-        fh.write(b"x")
+    if path.endswith(".gz"):
+        with gzip.open(path, "wb") as fh:
+            fh.write(b"x")
+    else:
+        with open(path, "wb") as fh:
+            fh.write(b"x")
 
 
 def _fake(mission, obsid, *, found=True, create=True, nest=False):
@@ -59,7 +72,7 @@ def test_acquire_records_level2(tmp_path, monkeypatch, mission):
     assert entry["max_level"] == 2 and entry["levels_present"] == [1, 2]
     (prod,) = entry["products"]
     assert prod["kind"] == "level2_evt" and prod["produced_by"] == "heasarc"
-    assert prod["path"] == LEVEL2_REL[mission].format(obsid=obsid)
+    assert prod["path"] == _plain(LEVEL2_REL[mission].format(obsid=obsid))
 
     expected_params = {
         "ixpe": {"detectors": [1, 2, 3], "calibration_version": "v01",
@@ -68,6 +81,24 @@ def test_acquire_records_level2(tmp_path, monkeypatch, mission):
         "nustar": {"fpm": "A", "note": heasarc._NUSTAR_NOTE},
     }[mission]
     assert prod["params"] == expected_params
+
+
+@pytest.mark.parametrize("mission", ["ixpe", "nicer", "nustar"])
+def test_acquire_gunzips_download(tmp_path, monkeypatch, mission):
+    """Acquire decompresses the gzipped download: the plain level-2 file exists on
+    disk, its ``.gz`` source is gone, and the recorded path is the plain file."""
+    obsid = OBSID[mission]
+    monkeypatch.setattr(heasarc, "_heasarc", lambda: _fake(mission, obsid))
+    summary = acquire(obsid, mission, str(tmp_path))
+
+    gz = tmp_path / LEVEL2_REL[mission].format(obsid=obsid)
+    plain = tmp_path / _plain(LEVEL2_REL[mission].format(obsid=obsid))
+    assert plain.exists(), "decompressed level-2 file should be on disk"
+    assert not gz.exists(), "the .gz source should be removed after gunzip"
+    assert plain.read_bytes() == b"x", "decompressed content should match the source"
+
+    prod = neutral.read(tmp_path)["entries"][obsid]["products"][0]
+    assert prod["path"] == _plain(LEVEL2_REL[mission].format(obsid=obsid))
 
 
 def test_reacquire_regresses_to_level2(tmp_path, monkeypatch):
