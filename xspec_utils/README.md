@@ -8,6 +8,7 @@ A Python/Bash toolkit for joint spectro-polarimetric analysis of X-ray binary da
 - **Automated point-source detection** via image centroiding (`find_src.py`) with DS9 region output
 - **Unified data loader** that assigns XSPEC data groups across instruments in a single call (`xspec_help.load_data`), extensible to new instruments
 - **Stokes I/Q/U spectral extraction** for IXPE polarization cubes and PHA spectra
+- **Time-resolved IXPE polarimetry** (`red_ixpe.pcube_timeseg`) for intra-observation PD/PA/Stokes/MDP99 stability, DU1/2/3 merged, exposed as the `ixpe_pcube_timeseg` AI tool
 - **Joint fitting helpers**: multi-panel plotting with model component decomposition, fit-state freezing for snapshotting
 - **Fully customisable epoch management** for multi-observation campaigns, applicable to any source
 
@@ -508,6 +509,41 @@ Computes the hardness ratio `H/S` for a given observation by loading PHA files i
 
 ---
 
+#### `red_ixpe.pcube_timeseg(obs, file_list, irf_date, ...)`
+
+Time-resolved PCUBE polarimetry for one observation: splits it into natural elapsed-time segments and runs one single-band, DU-merged PCUBE reduction per segment plus one integrated whole-observation reduction, to test intra-observation polarization constancy (e.g. Cyg X-1, 4U 1630-47). This is the tool wrapped as the `ixpe_pcube_timeseg` AI-facing entry (`skills/session.py`).
+
+```python
+def pcube_timeseg(
+    obs: str,
+    file_list: list[str],
+    irf_date: str,
+    ra: float | None = None,
+    dec: float | None = None,
+    emin_kev: float = 2.0,
+    emax_kev: float = 8.0,
+    src_rad: float = 1.0,
+    bkg: bool = False,
+    bkg_inner_rad: float = 3.0,
+    bkg_outer_rad: float = 5.0,
+    segment_duration_s: float = 5000.0,
+    overwrite: bool = True,
+    chatter: bool = False,
+) -> dict
+```
+
+**Segmentation.** Edges are `TSTART + k*segment_duration_s` for `k = 0..n_full`, plus a final partial edge at `TSTOP` when the span does not divide evenly — natural elapsed time, **not** exposure-equalised. A segment with zero events or zero GTI overlap is skipped (warned, no row) rather than emitting a spurious row.
+
+**Source position.** If both `ra` and `dec` are `None`, the source is centroided from one Level-2 event file via `find_src.run_extraction` (validated against this tool's accuracy anchor — see Changelog). Otherwise the given `ra`/`dec` are used verbatim.
+
+**Background.** Off by default (`bkg=False`), matching `pcube`'s convention and appropriate for bright source-dominated targets. When `bkg=True`, an annulus (`bkg_inner_rad`-`bkg_outer_rad`) is reduced the same way and subtracted exactly as `pcube` does (`bpc *= spc.backscal()/bpc.backscal(); spc -= bpc`), per segment and for the integrated cube.
+
+**`exposure_s` is *not* read off the PCUBE FITS header.** `pipeline.xpselect` only rewrites `TSTART`/`TSTOP`/`ONTIME`/`LIVETIME`/`DEADC` when `ltimeupdate=True`, and that option raises (`KeyError: 'LIVETIME'`) on Level-2 IXPE event files, which carry no per-event `LIVETIME` column (ixpeobssim supports only an average deadtime correction for L2 data). Left alone, every segment's PCUBE would silently inherit the identical, unmodified full-observation header values — the same defect class as segments inheriting the full-observation GTI. Instead, `exposure_s` and the segment's `t_start_mjd`/`t_stop_mjd` are computed from the observation's own GTI extension intersected with `[t0, t1)`, scaled by the (per-observation constant) `DEADC` keyword — mirroring the `exposure = dt * deadc` averaging ixpeobssim's own `LC`/`MDPMAPCUBE` binning uses for Level-2 data.
+
+**Returns** `{"timeseries": [...], "integrated": {...}, "csv_path": <abs path>}`. Each row (segment and integrated) has keys `segment_id, t_start_mjd, t_stop_mjd, exposure_s, PD_pct, PD_err, PA_deg, PA_err, QI, QI_err, UI, UI_err, MDP99, SIGNIF` (the integrated row uses `segment_id=-1`). `PD_pct`/`PD_err`/`MDP99` are in percent; `PA_deg`/`PA_err` in degrees; `QI`/`UI` are the normalized Stokes parameters Q/I, U/I. The CSV is written to `<obsid_dir>/pcube_timeseg_<obs>.csv` (the observation directory inferred from `file_list`) with these same columns, in the same order.
+
+---
+
 ### `NICER` — NICER file locators
 
 All three functions share the same signature pattern: `(obs: str, nicer_path: str, chatter=False)`. They glob under `<nicer_path>/<obs>/xti/event_cl/` and raise `ValueError` if exactly one match is not found.
@@ -622,7 +658,7 @@ Any subset of the instrument keys may be present; the loader silently skips abse
 
 `SRC_COORD: dict[str, tuple[float, float]]` maps IXPE observation IDs to manually determined `[RA, Dec]` in degrees (J2000 / FK5). Currently covers all 12 Cyg X-1 observations. Coordinates are determined from the IXPE event data; the pi-corrected variant `01002901_picorr` has a slightly different centroid.
 
-In principle this catalogue is superseded by the on-the-fly centroiding in `find_src.py`, but `find_src` has not been tested on IXPE event files and `src_pos` remains the operational source for IXPE reductions.
+In principle this catalogue is superseded by the on-the-fly centroiding in `find_src.py`; `find_src` is now validated on IXPE event files by `red_ixpe.pcube_timeseg` (its centroid on 01250401 matches the source's published position and polarization within tolerance — see Changelog), but `src_pos` remains the operational source for the fixed-epoch `xspec_help.load_data` reductions.
 
 ## IXPE background filtering
 
@@ -631,6 +667,10 @@ Instrumental background rejection follows the method described in [Di Marco et a
 ## Notes
 
 - The `epoch.py` file defines 12 observing epochs (E1--E12) for Cyg X-1, spanning both the low/hard state (LHS) and the high/soft state (HSS). Adapt this file for other sources.
-- `src_pos.py` stores manually determined IXPE source coordinates. In principle this should be depreciated and be replaced by `find_src.py`, but I haven't tested it on IXPE event files. For NuSTAR, centroids are computed on-the-fly by `find_src.py`.
+- `src_pos.py` stores manually determined IXPE source coordinates, used by the fixed-epoch `xspec_help.load_data` path. `find_src.py` centroiding is now also validated on IXPE event files (used automatically by `red_ixpe.pcube_timeseg` when `ra`/`dec` are omitted). For NuSTAR, centroids are computed on-the-fly by `find_src.py`.
 - IXPE Stokes Q and U PHA files are derived from the I file path by replacing `pha1` with `pha1q`/`pha1u`.
 - NuSTAR background loading is disabled by default (`nustar_use_bkg=False`) because clean background regions are often unavailable for bright sources like Cyg X-1.
+
+## Changelog
+
+- **2026-06-30** — Added `red_ixpe.pcube_timeseg` (time-resolved 2-8 keV IXPE PCUBE polarimetry, DU1/2/3 merged, natural elapsed-time segmentation, background subtraction off by default) and the `ixpe_pcube_timeseg` AI tool (`skills/session.py`, records the written CSV in the mission catalog at level 3 via `obsdb_catalog.neutral.advance`). Validated against a published 3-DU-merged accuracy anchor on IXPE ObsID 01250401 (PD, PA within tolerance); this run also validated `find_src.py` centroiding on IXPE event files for the first time (previously untested — see the `src_pos` notes above).

@@ -1,6 +1,9 @@
 
 import os
+import csv
 import glob
+import re
+import tempfile
 import warnings
 from pathlib import Path
 from astropy.io import fits
@@ -8,6 +11,8 @@ import ixpeobssim.core.pipeline as pipeline
 from ixpeobssim.binning.polarization import xBinnedPolarizationCube
 from contextlib import redirect_stdout, redirect_stderr
 from xspec import AllData, Spectrum, AllModels
+
+import find_src
 
 def get_all_file_list(ixpe_path: str, chatter=False) -> list[str]:
     """
@@ -411,3 +416,279 @@ def HR(obs, src_pha_file_list, bkg_pha_file_list, s_bin: tuple[float, float], h_
         print(f'Hardness Ratio: {hr:.4f} +/- {hr_err:.4f}')
 
     return hr, hr_err
+
+_TIMESEG_FIELDS = ['segment_id', 't_start_mjd', 't_stop_mjd', 'exposure_s',
+                   'PD_pct', 'PD_err', 'PA_deg', 'PA_err',
+                   'QI', 'QI_err', 'UI', 'UI_err', 'MDP99', 'SIGNIF']
+
+def _segment_edges(tstart: float, tstop: float, duration: float) -> list[float]:
+    """Natural elapsed-time segment edges: TSTART + k*duration, plus a final
+    partial edge at TSTOP when the span does not divide evenly."""
+    n_full = int((tstop - tstart) // duration)
+    edges = [tstart + k * duration for k in range(n_full + 1)]
+    if tstop - edges[-1] > 0:
+        edges.append(tstop)
+    return edges
+
+def _gti_overlap(gti_start, gti_stop, t0: float, t1: float) -> tuple[float, float, float] | None:
+    """Intersect the observation's GTI intervals with the MET window [t0, t1).
+
+    Returns ``(clipped_start, clipped_stop, overlap_s)`` — the tightest MET
+    bounds actually covered by data within the window and the total livetime
+    of GTI overlap — or ``None`` if no GTI interval overlaps the window at all
+    (zero exposure).
+    """
+    clipped_start = clipped_stop = None
+    overlap_s = 0.0
+    for s, e in zip(gti_start, gti_stop):
+        lo, hi = max(s, t0), min(e, t1)
+        if hi > lo:
+            overlap_s += hi - lo
+            clipped_start = lo if clipped_start is None else min(clipped_start, lo)
+            clipped_stop = hi if clipped_stop is None else max(clipped_stop, hi)
+    if clipped_start is None:
+        return None
+    return clipped_start, clipped_stop, overlap_s
+
+def _validate_du_files(obs: str, obs_file_list: list[str]) -> list[str]:
+    """Guarantee exactly one Level-2 event file per DU1/DU2/DU3, in DU order.
+
+    Raises ``ValueError`` naming the offending file(s) on any filename that
+    doesn't carry a recognisable DU number, a missing DU, or more than one
+    file for the same DU (e.g. two calibration versions, or a ``_rej`` and
+    plain variant) — callers must resolve the ambiguity rather than have one
+    silently picked for them.
+    """
+    by_du: dict[int, list[str]] = {}
+    for f in obs_file_list:
+        m = re.search(r'_det([123])_evt2_', os.path.basename(f))
+        if not m:
+            raise ValueError(f'pcube_timeseg: could not parse a DU number (_det[123]_evt2_) from {f}')
+        by_du.setdefault(int(m.group(1)), []).append(f)
+
+    present = set(by_du)
+    if present != {1, 2, 3}:
+        raise ValueError(
+            f'pcube_timeseg: expected Level-2 event files for DU1, DU2 and DU3 for obs {obs}; '
+            f'found DUs {sorted(present)} in: {obs_file_list}')
+
+    for n in (1, 2, 3):
+        if len(by_du[n]) > 1:
+            raise ValueError(
+                f'pcube_timeseg: multiple Level-2 files for DU{n} (obs {obs}): '
+                f'{by_du[n]}; pass exactly one file per DU')
+
+    return [by_du[1][0], by_du[2][0], by_du[3][0]]
+
+def _pcube_row(spc: xBinnedPolarizationCube) -> dict:
+    """Extract the single-energy-bin PD/PA/Stokes/MDP99 fields from a PCUBE.
+
+    Does NOT read ``exposure_s`` here: ``xpselect`` only rewrites
+    TSTART/TSTOP/ONTIME/LIVETIME/DEADC when ``ltimeupdate=True``, and that
+    option raises on Level-2 IXPE event files (no per-event LIVETIME column —
+    ixpeobssim only supports an average deadtime correction for L2 data).
+    Left alone, every segment's PCUBE would carry the identical, unmodified
+    full-observation LIVETIME. The caller computes the real per-segment
+    exposure independently from the GTI extension (see ``_gti_overlap``).
+    """
+    return {
+        'PD_pct': float(spc.PD[0]) * 100.0,
+        'PD_err': float(spc.PD_ERR[0]) * 100.0,
+        'PA_deg': float(spc.PA[0]),
+        'PA_err': float(spc.PA_ERR[0]),
+        'QI': float(spc.QN[0]),
+        'QI_err': float(spc.QN_ERR[0]),
+        'UI': float(spc.UN[0]),
+        'UI_err': float(spc.UN_ERR[0]),
+        'MDP99': float(spc.MDP_99[0]) * 100.0,
+        'SIGNIF': float(spc.SIGNIF[0]),
+        '_counts': float(spc.COUNTS[0]),
+    }
+
+def pcube_timeseg(obs: str,
+                   file_list: list[str],
+                   irf_date: str,
+                   ra: float | None = None,
+                   dec: float | None = None,
+                   emin_kev: float = 2.0,
+                   emax_kev: float = 8.0,
+                   src_rad: float = 1.0,
+                   bkg: bool = False,
+                   bkg_inner_rad: float = 3.0,
+                   bkg_outer_rad: float = 5.0,
+                   segment_duration_s: float = 5000.0,
+                   overwrite: bool = True,
+                   chatter: bool = False,
+                   ) -> dict:
+    """Time-resolved IXPE PCUBE polarimetry for one observation, DU1/2/3 merged.
+
+    Splits the observation into natural elapsed-time segments of
+    ``segment_duration_s`` (TSTART + k*segment_duration_s, NOT exposure
+    equalised) and runs a single-band (``emin_kev``-``emax_kev``) weighted
+    PCUBE reduction in each, plus one integrated whole-observation PCUBE.
+    Background subtraction (annulus ``bkg_inner_rad``-``bkg_outer_rad``) is
+    applied per segment and to the integrated cube only when ``bkg=True`` —
+    default off, appropriate for bright source-dominated targets. Segments
+    with zero events, a failed xpbin, or zero GTI overlap are skipped
+    (warned, no row). Writes a CSV of the per-segment + integrated rows next
+    to the observation's event files.
+
+    ``exposure_s`` and the segment's ``t_start_mjd``/``t_stop_mjd`` are
+    computed from the observation's own GTI extension intersected with each
+    segment's ``[t0, t1)`` window, scaled by the (per-observation constant)
+    ``DEADC`` deadtime-correction keyword — mirroring the ``exposure = dt *
+    deadc`` averaging ixpeobssim's own LC/MDPMAPCUBE binning uses for Level-2
+    data. They are deliberately **not** read off the segment PCUBE FITS
+    header: ``xpselect`` only rewrites TSTART/TSTOP/ONTIME/LIVETIME/DEADC
+    when ``ltimeupdate=True``, and that option raises on Level-2 IXPE event
+    files (no per-event LIVETIME column). Left alone, every segment's PCUBE
+    header carries the identical, unmodified full-observation values — the
+    same defect class as segments silently inheriting the full-observation
+    GTI.
+
+    Parameters
+    ----------
+    obs, file_list : see ``_get_obs_file_list``.
+    irf_date : str
+        IRF date string ('YYYYMMDD'); resolves to ``ixpe:obssim{irf_date}_alpha075:v13``.
+    ra, dec : float or None
+        Source position in degrees. If both None, centroided from one Level-2
+        event file via ``find_src.run_extraction``.
+    emin_kev, emax_kev : float
+        Single energy bin edges in keV. Default 2.0-8.0.
+    src_rad : float
+        Source region radius in arcmin. Default 1.0.
+    bkg : bool
+        Subtract a background annulus (``bkg_inner_rad``-``bkg_outer_rad``
+        arcmin). Default False.
+    segment_duration_s : float
+        Elapsed-time segment length in seconds. Default 5000.0.
+
+    Returns
+    -------
+    dict with 'timeseries' (list of per-segment dicts), 'integrated' (dict,
+    same fields, segment_id=-1), 'csv_path' (absolute path written).
+
+    Raises
+    ------
+    ValueError
+        ``file_list`` does not resolve to exactly one Level-2 event file per
+        DU1/DU2/DU3 for ``obs`` (missing DU, unparseable filename, or more
+        than one file for the same DU — never silently picked), or exactly
+        one of ``ra``/``dec`` is given without the other.
+    """
+    obs_file_list = _get_obs_file_list(obs, file_list, chatter=chatter)
+    obs_file_list = _validate_du_files(obs, obs_file_list)
+
+    if (ra is None) != (dec is None):
+        raise ValueError(
+            f'pcube_timeseg: provide both ra and dec, or neither (auto-centroid); '
+            f'got ra={ra}, dec={dec}')
+
+    if ra is None:
+        with tempfile.TemporaryDirectory(prefix=f'pcube_timeseg_{obs}_') as tmp_dir:
+            src_reg = os.path.join(tmp_dir, 'src.reg')
+            with open(os.devnull, 'w') as fnull:
+                with redirect_stdout(fnull):
+                    find_src.run_extraction(
+                        obs_file_list[0], src_reg,
+                        os.path.join(tmp_dir, 'bkg.reg'), None,
+                        src_rad, bkg_inner_rad, bkg_outer_rad)
+            with open(src_reg) as f:
+                region_line = f.readlines()[1]
+            m = re.match(r'circle\(\s*([-\d.]+)\s*,\s*([-\d.]+)\s*,', region_line)
+            if not m:
+                raise ValueError(f'Could not parse source region from {src_reg}: {region_line!r}')
+            ra, dec = float(m.group(1)), float(m.group(2))
+
+    with fits.open(obs_file_list[0]) as hdul:
+        hdr = hdul['EVENTS'].header
+        if 'GTI' not in hdul or len(hdul['GTI'].data) == 0:
+            raise ValueError(f'{obs_file_list[0]}: no GTI extension data; cannot compute exposure_s')
+        gti = hdul['GTI'].data
+        gti_start = [float(x) for x in gti['START']]
+        gti_stop = [float(x) for x in gti['STOP']]
+        tstart, tstop = hdr.get('TSTART'), hdr.get('TSTOP')
+        if tstart is None or tstop is None:
+            tstart, tstop = gti_start[0], gti_stop[-1]
+        tstart, tstop = float(tstart), float(tstop)
+        mjdref = float(hdr['MJDREFI']) + float(hdr['MJDREFF'])
+        deadc = hdul['PRIMARY'].header.get('DEADC')
+        if deadc is None:
+            raise ValueError(f'{obs_file_list[0]}: PRIMARY header missing DEADC keyword')
+        deadc = float(deadc)
+
+    def met_to_mjd(met: float) -> float:
+        return mjdref + met / 86400.0
+
+    bin_kwargs = dict(algorithm='PCUBE', ebinalg='LIST', ebinning=[emin_kev, emax_kev],
+                       overwrite=overwrite, irfname=f'ixpe:obssim{irf_date}_alpha075:v13',
+                       weights=True)
+
+    def _reduce(suffix: str, tmin: float | None, tmax: float | None) -> xBinnedPolarizationCube:
+        sel_kwargs = dict(rad=src_rad, ra=ra, dec=dec, suffix=f'{suffix}src', overwrite=overwrite)
+        if tmin is not None:
+            sel_kwargs.update(tmin=tmin, tmax=tmax)
+        with open(os.devnull, 'w') as fnull:
+            with redirect_stdout(fnull):
+                src_files = pipeline.xpselect(*obs_file_list, **sel_kwargs)
+                spc = xBinnedPolarizationCube.from_file_list(pipeline.xpbin(*src_files, **bin_kwargs))
+                if bkg:
+                    bkg_sel_kwargs = dict(ra=ra, dec=dec, innerrad=bkg_inner_rad,
+                                           rad=bkg_outer_rad, suffix=f'{suffix}bkg', overwrite=overwrite)
+                    if tmin is not None:
+                        bkg_sel_kwargs.update(tmin=tmin, tmax=tmax)
+                    bkg_files = pipeline.xpselect(*obs_file_list, **bkg_sel_kwargs)
+                    bpc = xBinnedPolarizationCube.from_file_list(pipeline.xpbin(*bkg_files, **bin_kwargs))
+                    bpc *= spc.backscal() / bpc.backscal()
+                    spc -= bpc
+        return spc
+
+    edges = _segment_edges(tstart, tstop, segment_duration_s)
+    timeseries = []
+    for i in range(len(edges) - 1):
+        t0, t1 = edges[i], edges[i + 1]
+        try:
+            spc = _reduce(f'seg{i:03d}', t0, t1)
+        except (Exception, SystemExit) as exc:
+            warnings.warn(f'pcube_timeseg: segment {i} [{t0:.1f},{t1:.1f}) failed ({exc}); skipping.')
+            continue
+        row = _pcube_row(spc)
+        overlap = _gti_overlap(gti_start, gti_stop, t0, t1)
+        counts = row.pop('_counts')
+        if counts <= 0 or overlap is None:
+            warnings.warn(f'pcube_timeseg: segment {i} [{t0:.1f},{t1:.1f}) has zero events/GTI overlap; skipping.')
+            continue
+        clip_start, clip_stop, overlap_s = overlap
+        row['exposure_s'] = overlap_s * deadc
+        if row['exposure_s'] <= 0:
+            warnings.warn(f'pcube_timeseg: segment {i} [{t0:.1f},{t1:.1f}) has zero exposure; skipping.')
+            continue
+        row['segment_id'] = i
+        row['t_start_mjd'], row['t_stop_mjd'] = met_to_mjd(clip_start), met_to_mjd(clip_stop)
+        timeseries.append(row)
+        if chatter:
+            print(f"segment {i}: PD={row['PD_pct']:.3f}% PA={row['PA_deg']:.3f} deg "
+                  f"exposure={row['exposure_s']:.1f}s")
+
+    spc_int = _reduce('int', None, None)
+    integrated = _pcube_row(spc_int)
+    del integrated['_counts']
+    int_start, int_stop, int_overlap_s = _gti_overlap(gti_start, gti_stop, tstart, tstop)
+    integrated['exposure_s'] = int_overlap_s * deadc
+    integrated['segment_id'] = -1
+    integrated['t_start_mjd'], integrated['t_stop_mjd'] = met_to_mjd(int_start), met_to_mjd(int_stop)
+
+    obs_dir = Path(obs_file_list[0]).resolve().parent.parent
+    csv_path = str(obs_dir / f'pcube_timeseg_{obs}.csv')
+    with open(csv_path, 'w', newline='') as f:
+        writer = csv.DictWriter(f, fieldnames=_TIMESEG_FIELDS)
+        writer.writeheader()
+        for row in timeseries:
+            writer.writerow(row)
+        writer.writerow(integrated)
+
+    if chatter:
+        print(f'pcube_timeseg: wrote {len(timeseries)} segment(s) + integrated to {csv_path}')
+
+    return {'timeseries': timeseries, 'integrated': integrated, 'csv_path': csv_path}

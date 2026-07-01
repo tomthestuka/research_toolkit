@@ -1,0 +1,12 @@
+# Per-package tool configuration, read by auto_research's ToolkitRegistry.
+# Modular by design: this lives with the package, so the orchestration layer never
+# needs to know about xspec_utils' tools.
+
+# Maximum wall-clock runtime (seconds) allowed per tool, keyed by the tool's short name.
+call_timeout_s:
+  # ixpe_pcube_timeseg has no internal timeout knob of its own — it runs one
+  # xpselect+xpbin PCUBE reduction per elapsed-time segment plus one integrated
+  # reduction. At the default segment_duration_s=5000s a multi-day observation
+  # can produce O(100) segments, each taking ~10-15s; set the backstop well
+  # above that worst case rather than the 300s orchestration default.
+  ixpe_pcube_timeseg: 5400

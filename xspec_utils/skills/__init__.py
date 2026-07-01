@@ -257,4 +257,110 @@ TOOL_MANIFEST: dict = {
             "required": ["infile", "outfile", "e_edges"],
         },
     },
+
+    # ── Time-resolved IXPE polarimetry (intra-observation stability) ───────
+    "research_toolkit.xspec_utils.ixpe_pcube_timeseg": {
+        "module": "xspec_utils.skills.session",
+        "fn": "ixpe_pcube_timeseg",
+        "description": (
+            "Time-resolved 2-8 keV IXPE PCUBE polarimetry for one local ObsID, via "
+            "ixpeobssim (xpselect -> xpbin PCUBE, weights=True), DU1/2/3 merged. "
+            "Splits the observation into natural elapsed-time segments of "
+            "segment_duration_s (default 5000 s; TSTART + k*segment_duration_s, NOT "
+            "exposure-equalised) and additionally runs one integrated whole-observation "
+            "reduction. Use this to test intra-observation polarization constancy "
+            "(PD/PA/normalized-Stokes/MDP99 vs time) for a bright, source-dominated "
+            "target already local at level >= 2 (check with a data-catalog tool first; "
+            "this tool does not download data). Background subtraction is OFF by default "
+            "(bkg=False) — appropriate for bright source-dominated targets (e.g. Cyg X-1, "
+            "4U 1630-47); set bkg=True only when the source is faint enough that "
+            "instrumental/diffuse background is a non-negligible fraction of the source "
+            "aperture counts. When ra/dec are omitted, the source position is centroided "
+            "automatically from one Level-2 event file. Writes a CSV of per-segment + "
+            "integrated rows (segment_id, t_start_mjd, t_stop_mjd, exposure_s, PD_pct, "
+            "PD_err, PA_deg, PA_err, QI, QI_err, UI, UI_err, MDP99, SIGNIF; the integrated "
+            "row has segment_id=-1) to <obs_db_path>/<obsid>/pcube_timeseg_<obsid>.csv and "
+            "records it in the mission catalog at level 3. Segments with zero events or "
+            "zero GTI overlap are skipped (warned, no row) rather than emitting a "
+            "spurious row. Returns 'timeseries' (list of per-segment dicts), "
+            "'integrated' (dict, same fields), 'csv_path', plus 'stdout'/'exit_code' "
+            "(1 with 'stderr' on failure; nothing is recorded on failure)."
+        ),
+        "args_schema": {
+            "type": "object",
+            "properties": {
+                "obs_db_path": {
+                    "type": "string",
+                    "description": (
+                        "The IXPE mission's obs-db directory (e.g. "
+                        "'/data/fzhou/XSPEC/Cyg_X-1/IXPE'). Event files are expected at "
+                        "<obs_db_path>/<obsid>/event_l2/."
+                    ),
+                },
+                "obsid": {
+                    "type": "string",
+                    "description": "9-digit IXPE Observation ID, as a string, e.g. '01250401'.",
+                },
+                "irf_date": {
+                    "type": "string",
+                    "description": (
+                        "IRF calibration date 'YYYYMMDD', resolved to "
+                        "'ixpe:obssim{irf_date}_alpha075:v13'. Default '20230702'."
+                    ),
+                },
+                "ra": {
+                    "type": "number",
+                    "description": (
+                        "Source RA in decimal degrees. Omit together with dec to "
+                        "auto-centroid from one Level-2 event file."
+                    ),
+                },
+                "dec": {
+                    "type": "number",
+                    "description": (
+                        "Source Dec in decimal degrees. Omit together with ra to "
+                        "auto-centroid from one Level-2 event file."
+                    ),
+                },
+                "emin_kev": {
+                    "type": "number",
+                    "description": "Lower edge of the single energy bin, in keV. Default 2.0.",
+                },
+                "emax_kev": {
+                    "type": "number",
+                    "description": "Upper edge of the single energy bin, in keV. Default 8.0.",
+                },
+                "src_rad": {
+                    "type": "number",
+                    "description": "Source region radius in arcminutes. Default 1.0.",
+                },
+                "bkg": {
+                    "type": "boolean",
+                    "description": (
+                        "Subtract a background annulus (bkg_inner_rad-bkg_outer_rad) from "
+                        "each segment and the integrated cube. Default false (bright "
+                        "source-dominated targets); set true for fainter sources."
+                    ),
+                },
+                "bkg_inner_rad": {
+                    "type": "number",
+                    "description": "Background annulus inner radius in arcminutes (used only if bkg=true). Default 3.0.",
+                },
+                "bkg_outer_rad": {
+                    "type": "number",
+                    "description": "Background annulus outer radius in arcminutes (used only if bkg=true). Default 5.0.",
+                },
+                "segment_duration_s": {
+                    "type": "number",
+                    "description": (
+                        "Elapsed-time segment length in seconds (natural TSTART + "
+                        "k*segment_duration_s edges, not exposure-equalised). Default 5000.0. "
+                        "Increase for a coarser, faster time series; decrease for finer time "
+                        "resolution at the cost of larger per-segment MDP99/uncertainties."
+                    ),
+                },
+            },
+            "required": ["obs_db_path", "obsid"],
+        },
+    },
 }

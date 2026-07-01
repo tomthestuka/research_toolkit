@@ -11,6 +11,7 @@ matplotlib objects never cross the subprocess boundary.
 
 from __future__ import annotations
 
+import glob
 import hashlib
 import os
 import time as _time
@@ -23,6 +24,9 @@ import matplotlib.pyplot as plt
 from xspec import AllData, AllModels, Fit, Xset
 
 import xspec_help  # human-authored lib; on sys.path via xspec_utils/__init__.py
+import red_ixpe
+
+from obsdb_catalog import neutral
 
 
 def run_fit(n_iterations: int = 100, log_path: str | None = None) -> dict:
@@ -276,5 +280,79 @@ def plot_iqu(
     return {
         "stdout": f"Saved {len(saved)} IQU figure(s): {', '.join(saved)}",
         "figures": figures,
+        "exit_code": 0,
+    }
+
+
+def ixpe_pcube_timeseg(
+    obs_db_path: str,
+    obsid: str,
+    irf_date: str = "20230702",
+    ra: float | None = None,
+    dec: float | None = None,
+    emin_kev: float = 2.0,
+    emax_kev: float = 8.0,
+    src_rad: float = 1.0,
+    bkg: bool = False,
+    bkg_inner_rad: float = 3.0,
+    bkg_outer_rad: float = 5.0,
+    segment_duration_s: float = 5000.0,
+) -> dict:
+    """Time-resolved 2-8 keV IXPE PCUBE polarimetry for one local ObsID.
+
+    Locates the ObsID's Level-2 DU1/2/3 event files under
+    ``<obs_db_path>/<obsid>/event_l2/`` (preferring the instrumental-background-
+    rejected ``_rej`` files; falling back to plain ``evt2_v*.fits`` when no
+    ``_rej`` variant exists), runs ``red_ixpe.pcube_timeseg``, and records the
+    written CSV in the mission catalog at level 3.
+
+    Returns
+    -------
+    dict with 'timeseries', 'integrated', 'csv_path' (the three ``lib`` keys),
+    plus 'stdout' and 'exit_code' (0 on success; 1 with 'stderr' on failure —
+    nothing is recorded on failure).
+    """
+    evt_dir = os.path.join(obs_db_path, obsid, "event_l2")
+    # v[0-9][0-9] anchored immediately against .fits (or _rej.fits) -- NOT
+    # v*.fits -- so this matches only original Level-2 event files, never this
+    # tool's own generated products (e.g. ..._v03_seg000src.fits,
+    # ..._v03_intsrc_pcube.fits), which have extra text between the version
+    # digits and .fits and would otherwise be rediscovered as inputs on a
+    # second run. Mirrors red_ixpe.get_all_file_list's version convention.
+    file_list = sorted(glob.glob(os.path.join(evt_dir, f"ixpe{obsid}_det[123]_evt2_v[0-9][0-9]_rej.fits")))
+    if not file_list:
+        file_list = sorted(glob.glob(os.path.join(evt_dir, f"ixpe{obsid}_det[123]_evt2_v[0-9][0-9].fits")))
+    if not file_list:
+        return {"exit_code": 1, "stdout": "",
+                "stderr": f"No Level-2 event files found for {obsid} under {evt_dir}"}
+
+    try:
+        result = red_ixpe.pcube_timeseg(
+            obsid, file_list, irf_date, ra=ra, dec=dec,
+            emin_kev=emin_kev, emax_kev=emax_kev, src_rad=src_rad, bkg=bkg,
+            bkg_inner_rad=bkg_inner_rad, bkg_outer_rad=bkg_outer_rad,
+            segment_duration_s=segment_duration_s,
+        )
+    except (Exception, SystemExit) as exc:
+        return {"exit_code": 1, "stdout": "", "stderr": str(exc)}
+
+    csv_path = result["csv_path"]
+    if not os.path.exists(csv_path):
+        return {"exit_code": 1, "stdout": "",
+                "stderr": f"pcube_timeseg did not produce {csv_path}"}
+
+    neutral.advance(obs_db_path, "ixpe", obsid, level=3, products=[{
+        "kind": "pcube_timeseg",
+        "path": os.path.relpath(csv_path, obs_db_path),
+        "produced_by": "xspec_utils.red_ixpe.pcube_timeseg",
+        "params": {"emin_kev": emin_kev, "emax_kev": emax_kev, "src_rad": src_rad,
+                   "bkg": bkg, "segment_duration_s": segment_duration_s},
+    }])
+
+    return {
+        "timeseries": result["timeseries"],
+        "integrated": result["integrated"],
+        "csv_path": csv_path,
+        "stdout": f"pcube_timeseg: {len(result['timeseries'])} segment(s) + integrated -> {csv_path}",
         "exit_code": 0,
     }
