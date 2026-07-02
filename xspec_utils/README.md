@@ -9,6 +9,7 @@ A Python/Bash toolkit for joint spectro-polarimetric analysis of X-ray binary da
 - **Unified data loader** that assigns XSPEC data groups across instruments in a single call (`xspec_help.load_data`), extensible to new instruments
 - **Stokes I/Q/U spectral extraction** for IXPE polarization cubes and PHA spectra
 - **Time-resolved IXPE polarimetry** (`red_ixpe.pcube_timeseg`) for intra-observation PD/PA/Stokes/MDP99 stability, DU1/2/3 merged, exposed as the `ixpe_pcube_timeseg` AI tool
+- **PA/PD constancy analysis** (`pa_pd_stability.pa_pd_stability`) on an existing `pcube_timeseg` CSV: weighted chi-squared constancy tests (PD/PA/QI/UI), the authoritative 2D Stokes variability test, moment-estimator intrinsic scatter, peak-to-peak ranges, structure functions, and cross-source Spearman correlations — pure numpy/scipy, no XSPEC/ixpeobssim, exposed as the `ixpe_pa_pd_stability` AI tool
 - **Joint fitting helpers**: multi-panel plotting with model component decomposition, fit-state freezing for snapshotting
 - **Fully customisable epoch management** for multi-observation campaigns, applicable to any source
 
@@ -18,6 +19,7 @@ A Python/Bash toolkit for joint spectro-polarimetric analysis of X-ray binary da
 lib/                        # Python library modules
   xspec_help.py             # Core: data loading, fitting, inspection, rebinning
   red_ixpe.py               # IXPE reduction: PCUBE, PHA1/Q/U extraction, MJD, hardness ratio
+  pa_pd_stability.py        # PA/PD/Stokes constancy statistics on an existing pcube_timeseg CSV (pure numpy/scipy)
   NICER.py                  # NICER file locators (PHA, RMF, ARF)
   NuSTAR.py                 # NuSTAR file locators (PHA grouped, RMF, ARF)
   find_src.py               # Automated source centroiding and region file generation
@@ -561,6 +563,45 @@ Each row (segment and integrated) has keys `segment_id, t_start_mjd, t_stop_mjd,
 
 ---
 
+### `pa_pd_stability` — PA/PD/Stokes constancy analysis
+
+---
+
+#### `pa_pd_stability.pa_pd_stability(obs_db_path, obsids, output_dir, ...)`
+
+Cross-ObsID intra-observation PA/PD stability analysis for IXPE, computed entirely from the `pcube_timeseg_<obsid>.csv` files `red_ixpe.pcube_timeseg` already wrote (run `ixpe_pcube_timeseg` first — this tool never reduces data itself). Pure numpy/scipy: imports neither `xspec` nor `ixpeobssim`, unlike every other module in this package, so it runs standalone and fast, and is wired directly in `TOOL_MANIFEST` (module `xspec_utils.lib.pa_pd_stability`, no `skills/session.py` involvement — the same pattern as `group_pha`).
+
+```python
+def pa_pd_stability(
+    obs_db_path: str,
+    obsids: list[str],
+    output_dir: str,
+    sources: dict | None = None,
+    variability_p_threshold: float = 0.01,
+    sf_lags_ks: list[float] | None = None,
+    min_seg_for_sf: int = 10,
+) -> dict
+```
+
+**Per-ObsID statistics** (`compute_obsid_stability`, one call per `obsid`):
+
+1. **Weighted constancy tests.** Inverse-variance weighted mean `x_bar = sum(w_i x_i)/sum(w_i)`, `w_i = 1/sigma_i^2`, and `chi2 = sum(w_i (x_i - x_bar)^2)`, `dof = N-1`, for PD, QI, and UI. PA uses mod-180 circular handling: the weighted mean is the doubled-angle circular mean (`atan2(sum(w sin 2θ), sum(w cos 2θ))/2`, wrapped to `(-90, +90]`), and residuals are wrapped via `((d+90) % 180) - 90` before the chi-squared sum, so a PA flip between e.g. +89° and -89° (physically ~2° apart) is never scored as a ~178° jump. A quantity's non-finite values and non-finite/non-positive errors are excluded per quantity (independently) before the fit; `chi2`/`p` are NaN and `variable=False` when fewer than 2 usable points remain.
+2. **Authoritative 2D Stokes test.** `chi2_2D = chi2_QI + chi2_UI` (QI and UI computed on their shared valid-data mask so `dof_2D = 2*(N-1)` is well defined), `p_2D = scipy.stats.chi2.sf(chi2_2D, dof_2D)`, and `variable = p_2D < variability_p_threshold`. This is the authoritative variability call; the PD/PA chi-squared tests above are secondary/descriptive.
+3. **Moment-estimator intrinsic scatter**, for PD and PA (circular residuals): `sigma_int = sqrt(max(0, sigma_obs^2 - mean_var))`, where `sigma_obs^2` is the sample variance (ddof=1) of the values about their mean and `mean_var` is the unweighted mean of the per-point `err^2`; `*_upper_limit=True` when the excess term is `<= 0`.
+4. **Peak-to-peak ranges** `PD_ptp`, `PA_ptp` (PA computed from the wrapped residuals about its circular mean, so a branch-cut crossing does not inflate the range).
+5. **First-order structure functions** `SF_PD(tau)`, `SF_PA(tau)` (PA differences wrapped) at each lag in `sf_lags_ks` (default `[5, 10, 20]` ks), only when an ObsID has `>= min_seg_for_sf` (default 10) segments; the tolerance half-width is half the ObsID's own `segment_duration_s` (read from the CSV's provenance header), falling back to half the median inter-segment spacing if absent. NaN for a lag with no segment pair inside its tolerance window.
+6. **Cross-source Spearman correlation** (across all successfully-processed ObsIDs together, not per-ObsID) of each ObsID's mean MDP99 against its reduced chi-squared for PD and for PA (`scipy.stats.spearmanr`); NaN with a `note` when fewer than 3 ObsIDs have finite values.
+
+**Edge cases handled without raising.** An ObsID whose CSV is missing, or fails the same provenance-header check `red_ixpe._read_existing_timeseg_csv` uses (see below), is recorded as an error entry in `per_obs` and the catalog's `error` column, and skipped — it never appears in the Spearman correlation. `N < 2` valid points for any quantity yields `chi2=NaN`, `variable=False`, never a crash.
+
+**The CSV reader (`_read_timeseg_csv`) is an independent reimplementation**, not a shared helper: it never imports `red_ixpe` (which pulls in `ixpeobssim`/`xspec` at module load), but mirrors its contract exactly — same provenance-comment-header format, same `segment_id=-1` integrated-row convention, same "missing/unrecognised header → treat as absent" rule (verified by a differential test against `red_ixpe._read_existing_timeseg_csv` on real data).
+
+**Writes** (to `output_dir`, created if absent): `pa_pd_stability_catalog.csv` (one row per ObsID: `obsid, source, N_seg`, integrated PD/PA/MDP99/SIGNIF, `chi2/dof/p` for PD/PA/QI/UI, `chi2_2D/dof_2D/p_2D/variable`, `sigma_PD_int/PD_int_upper_limit`, `sigma_PA_int/PA_int_upper_limit`, `PD_ptp/PA_ptp`, `rchi2_PD/rchi2_PA`, `mean_MDP99`, `error`) and `pa_pd_variability_summary.txt` (per-ObsID 2D verdict + secondary stats, the two Spearman results, and the cited source CSV paths). Does not copy the per-segment input CSVs.
+
+**Returns** a dict with `per_obs` (obsid → the stats above, including `sf_pd`/`sf_pa`, or `{'error': ...}`), `spearman`, `catalog_csv`, `summary_txt`, `exit_code` (always 0 — a per-ObsID problem is recorded, not raised).
+
+---
+
 ### `NICER` — NICER file locators
 
 All three functions share the same signature pattern: `(obs: str, nicer_path: str, chatter=False)`. They glob under `<nicer_path>/<obs>/xti/event_cl/` and raise `ValueError` if exactly one match is not found.
@@ -689,6 +730,8 @@ Instrumental background rejection follows the method described in [Di Marco et a
 - NuSTAR background loading is disabled by default (`nustar_use_bkg=False`) because clean background regions are often unavailable for bright sources like Cyg X-1.
 
 ## Changelog
+
+- **2026-07-02** — Added `lib/pa_pd_stability.py` (`pa_pd_stability`) and the `ixpe_pa_pd_stability` AI tool: intra-observation PA/PD/Stokes constancy analysis across one or more local IXPE ObsIDs, computed purely from each ObsID's existing `pcube_timeseg_<obsid>.csv` (all six BH-XRB ObsIDs — 01002901, 01250401, 02001901, 03002599, 03005801, 03006001 — already carry one). Weighted chi-squared constancy tests on PD/PA (mod-180 circular handling)/QI/UI; the authoritative 2D Stokes test (`chi2_2D = chi2_QI + chi2_UI`, `dof_2D = 2(N-1)`, `variable = p_2D < variability_p_threshold`); moment-estimator intrinsic scatter (upper-limit flagged); peak-to-peak ranges; first-order structure functions at configurable lags (`sf_lags_ks`, default `[5,10,20]`, gated on `min_seg_for_sf`); and a cross-source Spearman correlation of mean MDP99 against reduced chi-squared. Pure numpy/scipy — imports neither `xspec` nor `ixpeobssim` (its own small, independently-implemented CSV reader avoids importing `red_ixpe`, which would otherwise pull in the whole science stack) — so `TOOL_MANIFEST` wires it directly to `xspec_utils.lib.pa_pd_stability` (no `skills/session.py` involvement, same pattern as `group_pha`). Validated on real, already-local data: the 2D test correctly separates a known-constant real ObsID (01002901, p_2D ≈ 0.96) from a known-variable one at the default threshold (03006001, p_2D ≈ 0.0079); an independent differential recompute of `chi2_PD` and a differential CSV-parse check against `red_ixpe._read_existing_timeseg_csv` both agree; two independent calls reproduce every catalog number near-exactly (pure arithmetic, no fitting). No `obsdb_catalog` write (a derived summary, not observation data). A companion `plot_pa_pd_stability` plotting tool (consuming this tool's catalog/summary) is the natural next addition.
 
 - **2026-07-01** — Fixed `red_ixpe.pcube_timeseg`/`ixpe_pcube_timeseg` for long observations (03002599, 01250401, 02001901). Three coupled fixes: (1) a GTI pre-reduction gate — each window's GTI-clipped exposure is now checked (new `min_seg_exposure_s`, default 1000.0s) *before* any `xpselect`/`xpbin` call, so windows falling inside a long inter-pointing gap (e.g. 03002599's two glued pointings) are skipped (`n_skipped_empty`) instead of wasting the call budget on spurious near-zero-exposure rows; the 1000s default was set from the real GTI structure of the reported pathological windows (1.7s at 01250401 segment 7, 241.0s at 02001901 segment 148) and validated to sit below every other real segment measured in both observations; (2) incremental write + resume/override — rows are now appended and flushed to the CSV as each segment completes (a provenance comment header records every parameter plus the derived `tstart`/`tstop`), so a call hitting the 5400s cap leaves a real checkpoint; a rerun with `resume=True` (default) and matching provenance computes only the missing segments, while any mismatch deletes and rebuilds the CSV from scratch rather than gluing rows from different configurations; (3) the `ixpe_pcube_timeseg` wrapper no longer returns the full per-segment `timeseries` inline (it could exceed the sandbox transport chunk limit at the ~150-170 segment production default) — it now returns a bounded summary (`csv_path`, `n_segments`, `n_skipped_empty`, `n_expected`, `complete`, `resumed`, `integrated`, `head`/`tail`) and records `complete` in the catalog params. The 5400s per-call cap is held fixed; the gate and checkpointing are what let a long observation finish, across repeated calls if needed. Held-timeout tests (`tests/test_ixpe_pcube_timeseg.py`) run ~30 real `xpselect`/`xpbin` reductions on real, already-local 01250401/02001901 event data to validate the gate, resume, override, and bounded-return behaviour against genuine data — `tool_config.yaml`'s `gate_test_timeout_s` was raised to 1500s accordingly.
 

@@ -17,6 +17,8 @@ Workflow (all steps share the persistent XSPEC session):
   5. plot_fit       — save broadband spectrum+residuals PNG (one file)
      plot_iqu       — save per-DU Stokes IQU panels (one file per DU)
   6. group_pha      — pre-process PHA grouping (no XSPEC required)
+  7. ixpe_pa_pd_stability — constancy/variability stats on an existing
+     pcube_timeseg CSV (no XSPEC/ixpeobssim required)
 """
 
 from __future__ import annotations
@@ -396,6 +398,96 @@ TOOL_MANIFEST: dict = {
                 },
             },
             "required": ["obs_db_path", "obsid"],
+        },
+    },
+
+    # ── Constancy/variability statistics on an existing pcube_timeseg CSV ──
+    "research_toolkit.xspec_utils.ixpe_pa_pd_stability": {
+        "module": "xspec_utils.lib.pa_pd_stability",
+        "fn": "pa_pd_stability",
+        "description": (
+            "Intra-observation PA/PD/Stokes constancy analysis across one or more local "
+            "IXPE ObsIDs, from each ObsID's existing pcube_timeseg_<obsid>.csv (produced "
+            "by ixpe_pcube_timeseg -- run that first; this tool never reduces data itself, "
+            "so it needs no XSPEC or ixpeobssim and runs fast). For each ObsID: inverse-"
+            "variance-weighted chi-squared constancy tests on PD, PA (mod-180 circular "
+            "handling -- PA residuals wrapped to (-90,+90] so e.g. a +89/-89 deg flip "
+            "scores as ~2 deg, not ~178), QI, and UI; the AUTHORITATIVE variability call "
+            "is the 2D Stokes test chi2_2D=chi2_QI+chi2_UI, dof_2D=2*(N-1), flagging "
+            "'variable' when p_2D < variability_p_threshold (PD/PA chi-squared are "
+            "secondary/descriptive, not the variability call); moment-estimator intrinsic "
+            "scatter (sigma_int=sqrt(max(0, sample_variance - mean_measurement_variance)), "
+            "upper-limit flagged when non-positive) for PD and PA; peak-to-peak PD/PA "
+            "ranges; first-order structure functions SF_PD/SF_PA at sf_lags_ks (NaN for a "
+            "lag with no segment pair inside its tolerance window, and only computed at "
+            "all when an ObsID has >= min_seg_for_sf segments); and, across all requested "
+            "ObsIDs together, a Spearman rank correlation of each ObsID's mean MDP99 "
+            "against its reduced chi-squared for PD and for PA (NaN with a note when fewer "
+            "than 3 ObsIDs have finite values). An ObsID with no pcube_timeseg CSV (or an "
+            "unrecognised one -- missing the provenance header ixpe_pcube_timeseg writes) "
+            "is recorded as an error entry and skipped, never raised. Writes "
+            "pa_pd_stability_catalog.csv (one row per ObsID) and "
+            "pa_pd_variability_summary.txt (per-ObsID verdict, secondary stats, the two "
+            "Spearman results, and the source CSV paths) under output_dir. Returns "
+            "'per_obs' (obsid -> stats dict, including 'sf_pd'/'sf_pa'), 'spearman', "
+            "'catalog_csv', 'summary_txt', 'exit_code' (always 0 -- per-ObsID problems are "
+            "recorded, not raised)."
+        ),
+        "args_schema": {
+            "type": "object",
+            "properties": {
+                "obs_db_path": {
+                    "type": "string",
+                    "description": (
+                        "The IXPE mission's obs-db directory (e.g. "
+                        "'/data/fzhou/XSPEC/Cyg_X-1/IXPE'). Each ObsID's CSV is read from "
+                        "<obs_db_path>/<obsid>/pcube_timeseg_<obsid>.csv."
+                    ),
+                },
+                "obsids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "ObsIDs to analyse (each must already carry a pcube_timeseg CSV).",
+                },
+                "output_dir": {
+                    "type": "string",
+                    "description": "Directory the catalog CSV and summary text file are written to (created if absent).",
+                },
+                "sources": {
+                    "type": "object",
+                    "additionalProperties": {"type": "string"},
+                    "description": (
+                        "Optional {obsid: source_name} label map for the catalog/summary "
+                        "(e.g. distinguishing which BH-XRB each ObsID belongs to). Falls "
+                        "back to the obsid itself when omitted or an obsid is absent from it."
+                    ),
+                },
+                "variability_p_threshold": {
+                    "type": "number",
+                    "description": (
+                        "p_2D below this flags an ObsID 'variable' in the authoritative "
+                        "2D Stokes (QI+UI) test. Default 0.01."
+                    ),
+                },
+                "sf_lags_ks": {
+                    "type": "array",
+                    "items": {"type": "number"},
+                    "description": (
+                        "Structure-function lags to evaluate, in kiloseconds. Default "
+                        "[5, 10, 20]. The tolerance half-width around each lag is half the "
+                        "ObsID's own segment_duration_s (from the CSV's provenance header)."
+                    ),
+                },
+                "min_seg_for_sf": {
+                    "type": "integer",
+                    "description": (
+                        "Minimum per-segment row count an ObsID must have before its "
+                        "structure functions are computed at all (else every lag is NaN "
+                        "for that ObsID). Default 10."
+                    ),
+                },
+            },
+            "required": ["obs_db_path", "obsids", "output_dir"],
         },
     },
 }
