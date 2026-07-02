@@ -297,20 +297,33 @@ def ixpe_pcube_timeseg(
     bkg_inner_rad: float = 3.0,
     bkg_outer_rad: float = 5.0,
     segment_duration_s: float = 5000.0,
+    min_seg_exposure_s: float = 1000.0,
+    resume: bool = True,
 ) -> dict:
     """Time-resolved 2-8 keV IXPE PCUBE polarimetry for one local ObsID.
 
     Locates the ObsID's Level-2 DU1/2/3 event files under
     ``<obs_db_path>/<obsid>/event_l2/`` (preferring the instrumental-background-
     rejected ``_rej`` files; falling back to plain ``evt2_v*.fits`` when no
-    ``_rej`` variant exists), runs ``red_ixpe.pcube_timeseg``, and records the
-    written CSV in the mission catalog at level 3.
+    ``_rej`` variant exists), runs ``red_ixpe.pcube_timeseg`` (which gates
+    each window on GTI-clipped exposure before reducing it, and checkpoints
+    to CSV incrementally so a call near the sandbox time cap can resume next
+    call), and records the CSV in the mission catalog at level 3.
+
+    The full per-segment timeseries is never returned inline -- for a long
+    observation (O(100) segments) it can exceed the sandbox transport chunk
+    limit even though the CSV itself is written fine. Read the CSV at
+    ``csv_path`` for the complete table; this wrapper returns only a bounded
+    summary (integrated row plus the first/last 3 segment rows).
 
     Returns
     -------
-    dict with 'timeseries', 'integrated', 'csv_path' (the three ``lib`` keys),
-    plus 'stdout' and 'exit_code' (0 on success; 1 with 'stderr' on failure —
-    nothing is recorded on failure).
+    dict with 'csv_path', 'n_segments' (rows in the in-memory timeseries,
+    resumed + newly computed), 'n_skipped_empty', 'n_expected', 'complete'
+    (bool), 'resumed' (bool), 'integrated' (dict, segment_id=-1), 'head'
+    and 'tail' (first/last 3 segment-row dicts), 'stdout', 'exit_code'
+    (0 on success; 1 with 'stderr' on failure -- nothing is recorded on
+    failure).
     """
     evt_dir = os.path.join(obs_db_path, obsid, "event_l2")
     # v[0-9][0-9] anchored immediately against .fits (or _rej.fits) -- NOT
@@ -331,7 +344,8 @@ def ixpe_pcube_timeseg(
             obsid, file_list, irf_date, ra=ra, dec=dec,
             emin_kev=emin_kev, emax_kev=emax_kev, src_rad=src_rad, bkg=bkg,
             bkg_inner_rad=bkg_inner_rad, bkg_outer_rad=bkg_outer_rad,
-            segment_duration_s=segment_duration_s,
+            segment_duration_s=segment_duration_s, min_seg_exposure_s=min_seg_exposure_s,
+            resume=resume,
         )
     except (Exception, SystemExit) as exc:
         return {"exit_code": 1, "stdout": "", "stderr": str(exc)}
@@ -341,18 +355,30 @@ def ixpe_pcube_timeseg(
         return {"exit_code": 1, "stdout": "",
                 "stderr": f"pcube_timeseg did not produce {csv_path}"}
 
+    timeseries = result["timeseries"]
+    complete = result["complete"]
+
     neutral.advance(obs_db_path, "ixpe", obsid, level=3, products=[{
         "kind": "pcube_timeseg",
         "path": os.path.relpath(csv_path, obs_db_path),
         "produced_by": "xspec_utils.red_ixpe.pcube_timeseg",
         "params": {"emin_kev": emin_kev, "emax_kev": emax_kev, "src_rad": src_rad,
-                   "bkg": bkg, "segment_duration_s": segment_duration_s},
+                   "bkg": bkg, "segment_duration_s": segment_duration_s,
+                   "min_seg_exposure_s": min_seg_exposure_s, "complete": complete},
     }])
 
     return {
-        "timeseries": result["timeseries"],
-        "integrated": result["integrated"],
         "csv_path": csv_path,
-        "stdout": f"pcube_timeseg: {len(result['timeseries'])} segment(s) + integrated -> {csv_path}",
+        "n_segments": len(timeseries),
+        "n_skipped_empty": result["n_skipped_empty"],
+        "n_expected": result["n_expected"],
+        "complete": complete,
+        "resumed": result["resumed"],
+        "integrated": result["integrated"],
+        "head": timeseries[:3],
+        "tail": timeseries[-3:],
+        "stdout": (f"pcube_timeseg: {len(timeseries)}/{result['n_expected']} segment(s) "
+                   f"(+integrated), {result['n_skipped_empty']} skipped, complete={complete}, "
+                   f"resumed={result['resumed']} -> {csv_path}"),
         "exit_code": 0,
     }

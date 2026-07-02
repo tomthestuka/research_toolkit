@@ -8,5 +8,19 @@ call_timeout_s:
   # xpselect+xpbin PCUBE reduction per elapsed-time segment plus one integrated
   # reduction. At the default segment_duration_s=5000s a multi-day observation
   # can produce O(100) segments, each taking ~10-15s; set the backstop well
-  # above that worst case rather than the 300s orchestration default.
+  # above that worst case rather than the 300s orchestration default. This cap
+  # is held fixed (not raised) by design: the GTI pre-reduction gate (skip
+  # near-zero-exposure windows) and the incremental checkpoint/resume (append
+  # + flush each segment row, pick up only the missing segments on the next
+  # call) are what let a long observation finish -- across repeated 5400s
+  # calls if needed -- rather than raising this backstop further.
   ixpe_pcube_timeseg: 5400
+
+# Per-package Layer-B (pytest) budget, applied to EACH of the gate's two runs.
+# ixpe_pcube_timeseg's tests exercise several real xpselect+xpbin PCUBE
+# reductions on real, already-local IXPE Level-2 event files (01250401,
+# 02001901) to validate the GTI gate, resume/override, and bounded-return
+# behaviour against genuine, already-local data; ~30 real
+# reductions at ~8-10s each measured in-sandbox, well under the 900s default,
+# but this raises it modestly to absorb slower CI hardware.
+gate_test_timeout_s: 1500

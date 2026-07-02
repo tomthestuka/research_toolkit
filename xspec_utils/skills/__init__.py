@@ -276,14 +276,26 @@ TOOL_MANIFEST: dict = {
             "4U 1630-47); set bkg=True only when the source is faint enough that "
             "instrumental/diffuse background is a non-negligible fraction of the source "
             "aperture counts. When ra/dec are omitted, the source position is centroided "
-            "automatically from one Level-2 event file. Writes a CSV of per-segment + "
-            "integrated rows (segment_id, t_start_mjd, t_stop_mjd, exposure_s, PD_pct, "
-            "PD_err, PA_deg, PA_err, QI, QI_err, UI, UI_err, MDP99, SIGNIF; the integrated "
-            "row has segment_id=-1) to <obs_db_path>/<obsid>/pcube_timeseg_<obsid>.csv and "
-            "records it in the mission catalog at level 3. Segments with zero events or "
-            "zero GTI overlap are skipped (warned, no row) rather than emitting a "
-            "spurious row. Returns 'timeseries' (list of per-segment dicts), "
-            "'integrated' (dict, same fields), 'csv_path', plus 'stdout'/'exit_code' "
+            "automatically from one Level-2 event file. Before reducing a window, its "
+            "GTI-clipped good exposure is checked against min_seg_exposure_s (default "
+            "1000 s) and windows below it are skipped without running xpselect/xpbin -- "
+            "this matters for observations with a long inter-pointing gap, where whole "
+            "windows can fall inside the gap. Rows are appended to the CSV and flushed "
+            "as each segment finishes, so a call that hits the sandbox time cap leaves a "
+            "genuine checkpoint; call again with the same arguments (resume=True, the "
+            "default) to compute only the remaining segments, or resume=False (or any "
+            "changed argument) to force a full rebuild. Writes/updates a CSV of "
+            "per-segment + integrated rows (segment_id, t_start_mjd, t_stop_mjd, "
+            "exposure_s, PD_pct, PD_err, PA_deg, PA_err, QI, QI_err, UI, UI_err, MDP99, "
+            "SIGNIF; the integrated row has segment_id=-1, plus a provenance comment "
+            "header) to <obs_db_path>/<obsid>/pcube_timeseg_<obsid>.csv and records it "
+            "in the mission catalog at level 3 with a 'complete' flag. This tool's "
+            "return value NEVER carries the full per-segment table (it can exceed the "
+            "sandbox transport limit for long observations) -- read csv_path for every "
+            "row. Returns 'csv_path', 'n_segments' (rows resumed + newly computed), "
+            "'n_skipped_empty', 'n_expected', 'complete' (bool: every expected segment "
+            "plus the integrated row is present), 'resumed' (bool), 'integrated' (dict), "
+            "'head'/'tail' (first/last 3 segment-row dicts), plus 'stdout'/'exit_code' "
             "(1 with 'stderr' on failure; nothing is recorded on failure)."
         ),
         "args_schema": {
@@ -357,6 +369,29 @@ TOOL_MANIFEST: dict = {
                         "k*segment_duration_s edges, not exposure-equalised). Default 5000.0. "
                         "Increase for a coarser, faster time series; decrease for finer time "
                         "resolution at the cost of larger per-segment MDP99/uncertainties."
+                    ),
+                },
+                "min_seg_exposure_s": {
+                    "type": "number",
+                    "description": (
+                        "Minimum GTI-clipped good exposure (seconds) a window must have "
+                        "before it is reduced at all; windows below this are skipped "
+                        "before any xpselect/xpbin call and counted in n_skipped_empty. "
+                        "Default 1000.0. Lower it only if a target observation's real "
+                        "GTI structure has genuine short segments worth keeping; raise it "
+                        "to be more conservative near pointing-gap/GTI boundaries."
+                    ),
+                },
+                "resume": {
+                    "type": "boolean",
+                    "description": (
+                        "Resume from an existing pcube_timeseg_<obsid>.csv whose "
+                        "provenance (all reduction parameters plus the derived segment "
+                        "edges) exactly matches this call, computing only the segments "
+                        "still missing. Default true. Any mismatch (including a prior "
+                        "call with different arguments) deletes the stale CSV and "
+                        "rebuilds from scratch rather than mixing rows from different "
+                        "configurations; set false to always force a full rebuild."
                     ),
                 },
             },

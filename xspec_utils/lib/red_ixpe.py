@@ -2,6 +2,7 @@
 import os
 import csv
 import glob
+import json
 import re
 import tempfile
 import warnings
@@ -505,6 +506,49 @@ def _pcube_row(spc: xBinnedPolarizationCube) -> dict:
         '_counts': float(spc.COUNTS[0]),
     }
 
+_PROVENANCE_HEADER_PREFIX = '# pcube_timeseg provenance: '
+
+def _provenance_line(provenance: dict) -> str:
+    """Serialise the run's reproducibility-relevant parameters as the CSV's first line."""
+    return _PROVENANCE_HEADER_PREFIX + json.dumps(provenance, sort_keys=True) + '\n'
+
+def _read_existing_timeseg_csv(csv_path: str) -> tuple[dict, dict, dict | None] | None:
+    """Read a previously written ``pcube_timeseg`` CSV back into memory.
+
+    Returns ``(provenance, rows_by_segment_id, integrated_row_or_None)``, or
+    ``None`` if ``csv_path`` does not exist or does not carry a recognisable
+    provenance header (the latter is treated as absent -- callers override
+    rather than resume from an unrecognised file).
+    """
+    if not os.path.exists(csv_path):
+        return None
+    with open(csv_path, newline='') as f:
+        header_line = f.readline()
+        if not header_line.startswith(_PROVENANCE_HEADER_PREFIX):
+            return None
+        provenance = json.loads(header_line[len(_PROVENANCE_HEADER_PREFIX):])
+        rows_by_segid: dict[int, dict] = {}
+        integrated = None
+        for r in csv.DictReader(f):
+            row = {k: (int(v) if k == 'segment_id' else float(v)) for k, v in r.items()}
+            if row['segment_id'] == -1:
+                integrated = row
+            else:
+                rows_by_segid[row['segment_id']] = row
+    return provenance, rows_by_segid, integrated
+
+def _write_timeseg_csv_header(csv_path: str, provenance: dict) -> None:
+    with open(csv_path, 'w', newline='') as f:
+        f.write(_provenance_line(provenance))
+        csv.DictWriter(f, fieldnames=_TIMESEG_FIELDS).writeheader()
+
+def _append_timeseg_csv_row(csv_path: str, row: dict) -> None:
+    """Append one row and durably flush it -- the checkpoint a resumed call reads back."""
+    with open(csv_path, 'a', newline='') as f:
+        csv.DictWriter(f, fieldnames=_TIMESEG_FIELDS).writerow(row)
+        f.flush()
+        os.fsync(f.fileno())
+
 def pcube_timeseg(obs: str,
                    file_list: list[str],
                    irf_date: str,
@@ -517,6 +561,8 @@ def pcube_timeseg(obs: str,
                    bkg_inner_rad: float = 3.0,
                    bkg_outer_rad: float = 5.0,
                    segment_duration_s: float = 5000.0,
+                   min_seg_exposure_s: float = 1000.0,
+                   resume: bool = True,
                    overwrite: bool = True,
                    chatter: bool = False,
                    ) -> dict:
@@ -528,23 +574,34 @@ def pcube_timeseg(obs: str,
     PCUBE reduction in each, plus one integrated whole-observation PCUBE.
     Background subtraction (annulus ``bkg_inner_rad``-``bkg_outer_rad``) is
     applied per segment and to the integrated cube only when ``bkg=True`` —
-    default off, appropriate for bright source-dominated targets. Segments
-    with zero events, a failed xpbin, or zero GTI overlap are skipped
-    (warned, no row). Writes a CSV of the per-segment + integrated rows next
-    to the observation's event files.
+    default off, appropriate for bright source-dominated targets.
 
-    ``exposure_s`` and the segment's ``t_start_mjd``/``t_stop_mjd`` are
-    computed from the observation's own GTI extension intersected with each
-    segment's ``[t0, t1)`` window, scaled by the (per-observation constant)
-    ``DEADC`` deadtime-correction keyword — mirroring the ``exposure = dt *
-    deadc`` averaging ixpeobssim's own LC/MDPMAPCUBE binning uses for Level-2
-    data. They are deliberately **not** read off the segment PCUBE FITS
-    header: ``xpselect`` only rewrites TSTART/TSTOP/ONTIME/LIVETIME/DEADC
-    when ``ltimeupdate=True``, and that option raises on Level-2 IXPE event
-    files (no per-event LIVETIME column). Left alone, every segment's PCUBE
-    header carries the identical, unmodified full-observation values — the
-    same defect class as segments silently inheriting the full-observation
-    GTI.
+    **GTI pre-reduction gate.** Each window's GTI-clipped good exposure is
+    computed via ``_gti_overlap`` *before* any ``xpselect``/``xpbin`` call;
+    windows whose good exposure is below ``min_seg_exposure_s`` are skipped
+    without running the reduction (counted in the returned
+    ``n_skipped_empty``). This matters for observations with a long
+    inter-pointing gap (e.g. two pointings glued together with a multi-day
+    gap between them): without the gate, every window that falls inside the
+    gap still runs a full reduction for a spurious near-zero-exposure row.
+    A segment that clears the gate but still yields zero counts or a failed
+    reduction is warned and skipped (not counted in ``n_skipped_empty``,
+    since the gate itself passed it as an expected segment).
+
+    **Incremental write + resume.** Rows are appended to
+    ``pcube_timeseg_<obs>.csv`` and flushed as each segment's reduction
+    completes, so a call that hits the sandbox's wall-clock cap leaves a
+    genuine checkpoint of the segments already done. The CSV's first line is
+    a provenance comment recording every parameter that determines the
+    segmentation and reduction (``segment_duration_s``, ``emin_kev``,
+    ``emax_kev``, ``src_rad``, ``bkg``, ``bkg_inner_rad``, ``bkg_outer_rad``,
+    ``ra``, ``dec``, ``irf_date``, ``min_seg_exposure_s``, ``tstart``,
+    ``tstop``). When ``resume=True`` and an existing CSV's provenance matches
+    this call's exactly, only the missing segments (and the integrated row,
+    if absent) are computed; existing rows are re-emitted from disk without
+    a repeat reduction. Otherwise (``resume=False``, no existing CSV, or any
+    provenance mismatch) the CSV is deleted and rebuilt from scratch — rows
+    from a different configuration are never glued onto a fresh run.
 
     Parameters
     ----------
@@ -563,11 +620,24 @@ def pcube_timeseg(obs: str,
         arcmin). Default False.
     segment_duration_s : float
         Elapsed-time segment length in seconds. Default 5000.0.
+    min_seg_exposure_s : float
+        Minimum GTI-clipped good exposure (seconds) a window must have to be
+        reduced at all. Default 1000.0 -- above the sub-minute slices a
+        window can straddle at a pointing-gap or GTI boundary, below a
+        genuine multi-ks segment.
+    resume : bool
+        Resume from an existing same-provenance CSV, computing only the
+        missing segments. Default True.
 
     Returns
     -------
-    dict with 'timeseries' (list of per-segment dicts), 'integrated' (dict,
-    same fields, segment_id=-1), 'csv_path' (absolute path written).
+    dict with 'timeseries' (list of per-segment dicts, including any rows
+    re-emitted from a resumed CSV), 'integrated' (dict, same fields,
+    segment_id=-1), 'csv_path' (absolute path), 'n_skipped_empty' (windows
+    the GTI gate skipped), 'n_expected' (windows the gate passed, i.e.
+    attempted), 'complete' (True iff every expected segment plus the
+    integrated row is present), 'resumed' (True iff this call resumed from a
+    matching on-disk CSV rather than starting fresh).
 
     Raises
     ------
@@ -645,50 +715,86 @@ def pcube_timeseg(obs: str,
         return spc
 
     edges = _segment_edges(tstart, tstop, segment_duration_s)
+
+    provenance = {
+        'segment_duration_s': segment_duration_s, 'emin_kev': emin_kev, 'emax_kev': emax_kev,
+        'src_rad': src_rad, 'bkg': bkg, 'bkg_inner_rad': bkg_inner_rad,
+        'bkg_outer_rad': bkg_outer_rad, 'ra': ra, 'dec': dec, 'irf_date': irf_date,
+        'min_seg_exposure_s': min_seg_exposure_s, 'tstart': tstart, 'tstop': tstop,
+    }
+
+    obs_dir = Path(obs_file_list[0]).resolve().parent.parent
+    csv_path = str(obs_dir / f'pcube_timeseg_{obs}.csv')
+
+    existing = _read_existing_timeseg_csv(csv_path)
+    resumed = bool(resume and existing is not None and existing[0] == provenance)
+    if resumed:
+        _, existing_rows, existing_integrated = existing
+    else:
+        if os.path.exists(csv_path):
+            os.remove(csv_path)
+        _write_timeseg_csv_header(csv_path, provenance)
+        existing_rows, existing_integrated = {}, None
+
     timeseries = []
+    n_skipped_empty = 0
+    n_expected = 0
     for i in range(len(edges) - 1):
         t0, t1 = edges[i], edges[i + 1]
+        overlap = _gti_overlap(gti_start, gti_stop, t0, t1)
+        good_exposure = overlap[2] * deadc if overlap is not None else 0.0
+        if overlap is None or good_exposure < min_seg_exposure_s:
+            n_skipped_empty += 1
+            continue
+        n_expected += 1
+
+        if i in existing_rows:
+            timeseries.append(existing_rows[i])
+            continue
+
         try:
             spc = _reduce(f'seg{i:03d}', t0, t1)
         except (Exception, SystemExit) as exc:
             warnings.warn(f'pcube_timeseg: segment {i} [{t0:.1f},{t1:.1f}) failed ({exc}); skipping.')
             continue
         row = _pcube_row(spc)
-        overlap = _gti_overlap(gti_start, gti_stop, t0, t1)
         counts = row.pop('_counts')
-        if counts <= 0 or overlap is None:
-            warnings.warn(f'pcube_timeseg: segment {i} [{t0:.1f},{t1:.1f}) has zero events/GTI overlap; skipping.')
+        if counts <= 0:
+            warnings.warn(f'pcube_timeseg: segment {i} [{t0:.1f},{t1:.1f}) has zero events; skipping.')
             continue
-        clip_start, clip_stop, overlap_s = overlap
-        row['exposure_s'] = overlap_s * deadc
-        if row['exposure_s'] <= 0:
-            warnings.warn(f'pcube_timeseg: segment {i} [{t0:.1f},{t1:.1f}) has zero exposure; skipping.')
-            continue
+        clip_start, clip_stop, _overlap_s = overlap
+        row['exposure_s'] = good_exposure
         row['segment_id'] = i
         row['t_start_mjd'], row['t_stop_mjd'] = met_to_mjd(clip_start), met_to_mjd(clip_stop)
         timeseries.append(row)
+        _append_timeseg_csv_row(csv_path, row)
         if chatter:
             print(f"segment {i}: PD={row['PD_pct']:.3f}% PA={row['PA_deg']:.3f} deg "
                   f"exposure={row['exposure_s']:.1f}s")
 
-    spc_int = _reduce('int', None, None)
-    integrated = _pcube_row(spc_int)
-    del integrated['_counts']
-    int_start, int_stop, int_overlap_s = _gti_overlap(gti_start, gti_stop, tstart, tstop)
-    integrated['exposure_s'] = int_overlap_s * deadc
-    integrated['segment_id'] = -1
-    integrated['t_start_mjd'], integrated['t_stop_mjd'] = met_to_mjd(int_start), met_to_mjd(int_stop)
+    if existing_integrated is not None:
+        integrated = existing_integrated
+    else:
+        spc_int = _reduce('int', None, None)
+        integrated = _pcube_row(spc_int)
+        del integrated['_counts']
+        int_overlap = _gti_overlap(gti_start, gti_stop, tstart, tstop)
+        if int_overlap is None:
+            raise ValueError(f'{obs_file_list[0]}: no GTI overlap over the full [tstart,tstop) span')
+        int_start, int_stop, int_overlap_s = int_overlap
+        integrated['exposure_s'] = int_overlap_s * deadc
+        integrated['segment_id'] = -1
+        integrated['t_start_mjd'], integrated['t_stop_mjd'] = met_to_mjd(int_start), met_to_mjd(int_stop)
+        _append_timeseg_csv_row(csv_path, integrated)
 
-    obs_dir = Path(obs_file_list[0]).resolve().parent.parent
-    csv_path = str(obs_dir / f'pcube_timeseg_{obs}.csv')
-    with open(csv_path, 'w', newline='') as f:
-        writer = csv.DictWriter(f, fieldnames=_TIMESEG_FIELDS)
-        writer.writeheader()
-        for row in timeseries:
-            writer.writerow(row)
-        writer.writerow(integrated)
+    complete = len(timeseries) == n_expected and integrated is not None
 
     if chatter:
-        print(f'pcube_timeseg: wrote {len(timeseries)} segment(s) + integrated to {csv_path}')
+        print(f'pcube_timeseg: {len(timeseries)}/{n_expected} segment(s) + integrated -> {csv_path} '
+              f'(skipped {n_skipped_empty}, resumed={resumed}, complete={complete})')
 
-    return {'timeseries': timeseries, 'integrated': integrated, 'csv_path': csv_path}
+    return {
+        'timeseries': timeseries, 'integrated': integrated, 'csv_path': csv_path,
+        'n_skipped_empty': n_skipped_empty, 'n_expected': n_expected,
+        'complete': complete, 'resumed': resumed,
+    }
