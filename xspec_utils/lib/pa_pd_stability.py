@@ -13,15 +13,27 @@ of `red_ixpe._read_existing_timeseg_csv`'s contract (same provenance-header
 format, same `segment_id=-1` integrated-row convention, same "no header ->
 treat as absent" rule) -- not a shared helper, precisely so this module never
 imports `red_ixpe` (which pulls in `ixpeobssim`/`xspec` at module load).
+
+`stability_plot` (bottom of this module) is the pure-matplotlib companion
+plotter: it renders the four standard diagnostic figures from a
+`pa_pd_stability` catalog plus the underlying `pcube_timeseg` CSVs. Only
+matplotlib (Agg backend) -- no xspec/ixpeobssim -- so it stays in `lib/` and
+is wired directly into `TOOL_MANIFEST`, not through `skills/session.py`.
 """
 
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import os
+import time as _time
+from pathlib import Path
 from typing import Sequence
 
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 import numpy as np
 from scipy import stats
 
@@ -466,5 +478,319 @@ def pa_pd_stability(
     return {
         'per_obs': per_obs, 'spearman': spearman,
         'catalog_csv': catalog_csv, 'summary_txt': summary_txt,
+        'exit_code': 0,
+    }
+
+
+# --------------------------------------------------------------------------- #
+# stability_plot -- pure-matplotlib companion plotter (no xspec/ixpeobssim)
+# --------------------------------------------------------------------------- #
+
+_MIME_BY_FMT = {'png': 'image/png', 'pdf': 'application/pdf'}
+
+_PLOT_REQUIRED_CATALOG_FIELDS = (
+    'obsid',
+    'PA_deg_int', 'PA_err_int', 'PD_pct_int', 'PD_err_int',
+    'rchi2_PD', 'rchi2_PA',
+)
+
+
+def _safe_float(v) -> float:
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return float('nan')
+
+
+def _load_catalog_rows(catalog_csv: str) -> dict:
+    """Read `pa_pd_stability_catalog.csv` keyed on its `obsid` column.
+
+    Validates up front that the header contains every field `stability_plot`
+    later reads (`_PLOT_REQUIRED_CATALOG_FIELDS`) and raises KeyError naming
+    the missing columns if not -- so a malformed / wrong-schema / header-only
+    (or completely empty) catalog is rejected before any figure is drawn,
+    rather than degrading to an empty catalog or raising mid-plot after
+    files are already written. Fields otherwise follow `CATALOG_FIELDS`; a
+    plain header+rows CSV (unlike the provenance-commented `pcube_timeseg`
+    CSVs), so a bare `csv.DictReader` suffices. Blank/error cells convert to
+    NaN downstream via `_safe_float`.
+    """
+    rows = {}
+    with open(catalog_csv, newline='') as f:
+        reader = csv.DictReader(f)
+        fieldnames = reader.fieldnames or []
+        missing = [c for c in _PLOT_REQUIRED_CATALOG_FIELDS if c not in fieldnames]
+        if missing:
+            raise KeyError(
+                f'catalog_csv missing required column(s) {missing}; '
+                f'header was {fieldnames}')
+        for r in reader:
+            rows[r['obsid']] = r
+    return rows
+
+
+def mid_time_structure_functions(arr: dict, lags_s: Sequence[float]) -> tuple[dict, dict]:
+    """PA/PD structure functions vs lag from one ObsID's per-segment arrays.
+
+    The convention `stability_plot`'s structure-function panel draws: times
+    are mid-segment (`0.5*(t_start_mjd + t_stop_mjd)`, converted to seconds),
+    and the pair-matching tolerance half-width is half the median spacing
+    between an ObsID's own sorted mid-times -- independent of any
+    `pcube_timeseg` provenance. Delegates the actual pairing/averaging to
+    `structure_function` (this module); never reimplements it.
+    """
+    mid_s = 0.5 * (arr['t_start_mjd'] + arr['t_stop_mjd']) * 86400.0
+    dt = np.diff(np.sort(mid_s))
+    half_width_s = float(np.median(dt) * 0.5) if dt.size else float('nan')
+    sf_pa = structure_function(mid_s, arr['PA_deg'], lags_s, half_width_s, wrap=True)
+    sf_pd = structure_function(mid_s, arr['PD_pct'], lags_s, half_width_s, wrap=False)
+    return sf_pa, sf_pd
+
+
+def stability_plot(
+    obs_db_path: str,
+    obsids: list[str],
+    catalog_csv: str,
+    save_path_prefix: str | None = None,
+    sf_lags_ks: list[float] | None = None,
+    sf_min_segments: int = 10,
+    fmt: str = 'png',
+) -> dict:
+    """Render the four standard IXPE PA/PD stability diagnostic figures.
+
+    Reads each requested ObsID's `pcube_timeseg_<obsid>.csv` (written by
+    `ixpe_pcube_timeseg`) and the `pa_pd_stability_catalog.csv` (written by
+    `pa_pd_stability`, fields per `CATALOG_FIELDS`), and writes exactly four
+    files, `{save_path_prefix}_<suffix>.{fmt}`:
+
+    - `_pa_pd_timeseries`: per-ObsID PA (top) / PD (bottom) vs time-elapsed
+      (kiloseconds from the earliest segment's `t_start_mjd`), with the
+      catalog's weighted-mean +/-1sigma band overlaid when the ObsID is in
+      `catalog_csv`.
+    - `_stokes_plane`: per-ObsID Q/I vs U/I scatter, color-coded by
+      mid-segment elapsed time, with 1sigma error crosses and the origin
+      marked.
+    - `_chi2_hist`: histograms of `rchi2_PD`/`rchi2_PA` across every row of
+      `catalog_csv` (not just `obsids`), with a reference line at 1.0.
+    - `_structure_function`: SF_PA (top) / SF_PD (bottom) vs lag, one line
+      per ObsID with >= `sf_min_segments` segments, computed via
+      `mid_time_structure_functions` (which itself calls the shared
+      `structure_function` primitive -- never an independent computation).
+
+    An ObsID with no readable `pcube_timeseg` CSV is skipped (noted in
+    `stdout`); if every requested ObsID is unreadable, nothing is written and
+    `exit_code=1` with `stderr` set. `catalog_csv` is a required upstream
+    product (from `pa_pd_stability`): if it is missing, or exists but cannot
+    be read as a catalog (e.g. lacks an `obsid` column), this is a hard input
+    error -- `exit_code=1` with `stderr` set and no files written, regardless
+    of whether any `pcube_timeseg` CSV is readable. This is distinct from an
+    ObsID simply absent from an otherwise-present, readable catalog, which
+    still gets its time-series/Stokes-plane panels -- only its weighted-mean
+    overlay is skipped. An ObsID short of `sf_min_segments` is omitted from
+    the structure-function panel only; if none qualify, that panel carries an
+    explicit annotation instead of empty axes.
+
+    Parameters
+    ----------
+    obs_db_path : str
+        The IXPE mission's obs-db directory; each ObsID's per-segment CSV is
+        read from `<obs_db_path>/<obsid>/pcube_timeseg_<obsid>.csv`.
+    obsids : list[str]
+        ObsIDs to draw the time-series/Stokes-plane/structure-function
+        panels for.
+    catalog_csv : str
+        Path to the `pa_pd_stability_catalog.csv` written by
+        `pa_pd_stability`.
+    save_path_prefix : str or None
+        Base path; the four suffixes above plus `.{fmt}` are appended.
+        Auto-generated timestamped prefix in `os.getcwd()` when None.
+    sf_lags_ks : list[float] or None
+        Structure-function lags in kiloseconds. Default [5, 10, 20].
+    sf_min_segments : int
+        Minimum per-segment row count an ObsID needs to appear in the
+        structure-function panel. Default 10.
+    fmt : str
+        Output image format, 'png' or 'pdf'. Default 'png'.
+
+    Returns
+    -------
+    dict with 'figures' (list of 4 FigureRef dicts), 'structure_function'
+    (obsid -> {'lags_ks', 'sf_pa', 'sf_pd'} for the ObsIDs actually drawn in
+    the structure-function panel -- the exact values plotted, for
+    differential verification), 'stdout', 'exit_code' (1 with 'stderr' and
+    no files written when `catalog_csv` is missing/unreadable, or when every
+    requested ObsID is unreadable).
+    """
+    if fmt not in _MIME_BY_FMT:
+        raise ValueError(f"fmt must be one of {sorted(_MIME_BY_FMT)}, got {fmt!r}")
+
+    # catalog_csv is a required upstream product (from pa_pd_stability) -- a
+    # missing or malformed file is a hard input error, not an empty catalog,
+    # regardless of whether any pcube_timeseg CSV below is readable.
+    if not os.path.exists(catalog_csv):
+        return {
+            'exit_code': 1, 'stdout': '',
+            'stderr': (f'catalog_csv not found: {catalog_csv}. It is a required '
+                       f'ixpe_pa_pd_stability product; run that tool first.'),
+        }
+    try:
+        cat_rows = _load_catalog_rows(catalog_csv)
+    except (OSError, csv.Error, KeyError) as exc:
+        return {
+            'exit_code': 1, 'stdout': '',
+            'stderr': f'catalog_csv unreadable ({catalog_csv}): {exc!r}',
+        }
+
+    lags_ks = list(sf_lags_ks) if sf_lags_ks else list(_DEFAULT_SF_LAGS_KS)
+    lags_s = [ks * 1000.0 for ks in lags_ks]
+
+    per_obs: dict = {}
+    notes = []
+    for obsid in obsids:
+        csv_path = os.path.join(obs_db_path, obsid, f'pcube_timeseg_{obsid}.csv')
+        parsed = _read_timeseg_csv(csv_path)
+        if parsed is None:
+            notes.append(f'{obsid}: skipped (no readable pcube_timeseg CSV at {csv_path})')
+            continue
+        _provenance, rows_by_segid, _integrated = parsed
+        arr = _rows_to_arrays(rows_by_segid)
+        t0_s = float(np.min(arr['t_start_mjd'])) * 86400.0 if arr['segment_id'].size else 0.0
+        mid_s = 0.5 * (arr['t_start_mjd'] + arr['t_stop_mjd']) * 86400.0
+        per_obs[obsid] = {'arr': arr, 'x_ks': (mid_s - t0_s) / 1000.0}
+
+    if not per_obs:
+        return {
+            'exit_code': 1, 'stdout': '',
+            'stderr': f'No readable pcube_timeseg CSV for any of {obsids} under {obs_db_path}.',
+        }
+
+    if save_path_prefix is None:
+        ts = _time.strftime('%Y%m%dT%H%M%S')
+        save_path_prefix = os.path.join(os.getcwd(), f'stability_plot_{ts}')
+    os.makedirs(os.path.dirname(os.path.abspath(save_path_prefix)) or '.', exist_ok=True)
+
+    mime = _MIME_BY_FMT[fmt]
+    savefig_kwargs = ({'metadata': {'Software': 'xspec_utils.lib.pa_pd_stability.stability_plot'}}
+                       if fmt == 'png' else
+                       {'metadata': {'CreationDate': None,
+                                     'Producer': 'xspec_utils.lib.pa_pd_stability.stability_plot'}})
+
+    def _save(fig, suffix: str, caption: str) -> dict:
+        path = f'{save_path_prefix}_{suffix}.{fmt}'
+        fig.savefig(path, dpi=150, bbox_inches='tight', **savefig_kwargs)
+        plt.close(fig)
+        sha = hashlib.sha256(Path(path).read_bytes()).hexdigest()
+        return {
+            'path': path, 'caption': caption, 'mime_type': mime,
+            'produced_by': 'xspec_utils.lib.pa_pd_stability.stability_plot',
+            'created_at': _time.strftime('%Y-%m-%dT%H:%M:%SZ', _time.gmtime()),
+            'sha256': sha,
+        }
+
+    plotted = [o for o in obsids if o in per_obs]
+    n = len(plotted)
+    figures = []
+
+    # -- 1. PA/PD time series ------------------------------------------------
+    fig1, axes1 = plt.subplots(nrows=2, ncols=n, figsize=(5 * n, 6),
+                                sharex='col', squeeze=False)
+    for i, obsid in enumerate(plotted):
+        arr, x_ks = per_obs[obsid]['arr'], per_obs[obsid]['x_ks']
+        ax_pa, ax_pd = axes1[0, i], axes1[1, i]
+        ax_pa.errorbar(x_ks, arr['PA_deg'], yerr=arr['PA_err'], fmt='o', ms=3,
+                        elinewidth=0.7, capsize=2, color='tab:blue')
+        ax_pd.errorbar(x_ks, arr['PD_pct'], yerr=arr['PD_err'], fmt='o', ms=3,
+                        elinewidth=0.7, capsize=2, color='tab:orange')
+        cat = cat_rows.get(obsid)
+        if cat is not None:
+            pa_int, pa_err_int = _safe_float(cat['PA_deg_int']), _safe_float(cat['PA_err_int'])
+            pd_int, pd_err_int = _safe_float(cat['PD_pct_int']), _safe_float(cat['PD_err_int'])
+            if np.isfinite(pa_int):
+                ax_pa.axhline(pa_int, color='k', lw=1, ls='--')
+                if np.isfinite(pa_err_int):
+                    ax_pa.axhspan(pa_int - pa_err_int, pa_int + pa_err_int, color='k', alpha=0.15)
+            if np.isfinite(pd_int):
+                ax_pd.axhline(pd_int, color='k', lw=1, ls='--')
+                if np.isfinite(pd_err_int):
+                    ax_pd.axhspan(pd_int - pd_err_int, pd_int + pd_err_int, color='k', alpha=0.15)
+        ax_pa.set_title(obsid)
+        ax_pa.set_ylabel('PA (deg)' if i == 0 else '')
+        ax_pd.set_ylabel('PD (%)' if i == 0 else '')
+        ax_pd.set_xlabel('Time elapsed (ks)')
+    fig1.tight_layout()
+    figures.append(_save(fig1, 'pa_pd_timeseries',
+                          f'PA/PD time series for {", ".join(plotted)}'))
+
+    # -- 2. Stokes plane ------------------------------------------------------
+    fig2, axes2 = plt.subplots(ncols=n, figsize=(5 * n, 4.5), squeeze=False)
+    for i, obsid in enumerate(plotted):
+        arr, x_ks = per_obs[obsid]['arr'], per_obs[obsid]['x_ks']
+        ax = axes2[0, i]
+        ax.errorbar(arr['QI'], arr['UI'], xerr=arr['QI_err'], yerr=arr['UI_err'],
+                    fmt='none', ecolor='gray', elinewidth=0.5, alpha=0.5, zorder=1)
+        sc = ax.scatter(arr['QI'], arr['UI'], c=x_ks, cmap='viridis', zorder=2, s=20)
+        fig2.colorbar(sc, ax=ax, label='Time elapsed (ks)')
+        ax.axhline(0.0, color='k', lw=0.5)
+        ax.axvline(0.0, color='k', lw=0.5)
+        ax.set_xlabel('Q/I')
+        ax.set_ylabel('U/I' if i == 0 else '')
+        ax.set_title(obsid)
+        ax.set_aspect('equal', adjustable='datalim')
+    fig2.tight_layout()
+    figures.append(_save(fig2, 'stokes_plane',
+                          f'Stokes-plane (Q/I vs U/I) evolution for {", ".join(plotted)}'))
+
+    # -- 3. Reduced chi-squared histograms (every catalog row) ----------------
+    rchi2_pd_all = np.array([_safe_float(r['rchi2_PD']) for r in cat_rows.values()])
+    rchi2_pa_all = np.array([_safe_float(r['rchi2_PA']) for r in cat_rows.values()])
+    rchi2_pd_all = rchi2_pd_all[np.isfinite(rchi2_pd_all)]
+    rchi2_pa_all = rchi2_pa_all[np.isfinite(rchi2_pa_all)]
+    fig3, (ax_hpd, ax_hpa) = plt.subplots(nrows=2, ncols=1, figsize=(6, 8))
+    ax_hpd.hist(rchi2_pd_all, bins=20, color='tab:orange', edgecolor='k', alpha=0.8)
+    ax_hpd.axvline(1.0, color='k', ls='--')
+    ax_hpd.set_xlabel(r'$\chi^2_\nu$(PD)')
+    ax_hpd.set_ylabel('N obsids')
+    ax_hpa.hist(rchi2_pa_all, bins=20, color='tab:blue', edgecolor='k', alpha=0.8)
+    ax_hpa.axvline(1.0, color='k', ls='--')
+    ax_hpa.set_xlabel(r'$\chi^2_\nu$(PA)')
+    ax_hpa.set_ylabel('N obsids')
+    fig3.tight_layout()
+    figures.append(_save(fig3, 'chi2_hist',
+                          f'Reduced chi-squared histograms across {len(cat_rows)} catalog ObsID(s)'))
+
+    # -- 4. Structure functions -------------------------------------------------
+    sf_out: dict = {}
+    sf_eligible = [o for o in plotted if per_obs[o]['arr']['segment_id'].size >= sf_min_segments]
+    fig4, (ax_sfpa, ax_sfpd) = plt.subplots(nrows=2, ncols=1, sharex=True, figsize=(6, 8))
+    if not sf_eligible:
+        ax_sfpa.annotate(f'No ObsID has >= sf_min_segments={sf_min_segments} segments',
+                          xy=(0.5, 0.5), xycoords='axes fraction', ha='center', va='center')
+        ax_sfpa.set_xticks([]); ax_sfpa.set_yticks([])
+        ax_sfpd.set_xticks([]); ax_sfpd.set_yticks([])
+    else:
+        for obsid in sf_eligible:
+            arr = per_obs[obsid]['arr']
+            sf_pa, sf_pd = mid_time_structure_functions(arr, lags_s)
+            sf_out[obsid] = {
+                'lags_ks': lags_ks,
+                'sf_pa': {lag: sf_pa[lag] for lag in lags_s},
+                'sf_pd': {lag: sf_pd[lag] for lag in lags_s},
+            }
+            ax_sfpa.plot(lags_ks, [sf_pa[lag] for lag in lags_s], marker='o', label=obsid)
+            ax_sfpd.plot(lags_ks, [sf_pd[lag] for lag in lags_s], marker='o', label=obsid)
+        ax_sfpa.legend(fontsize='small')
+    ax_sfpa.set_ylabel(r'SF$_{PA}$ (deg$^2$)')
+    ax_sfpd.set_ylabel(r'SF$_{PD}$ (%$^2$)')
+    ax_sfpd.set_xlabel('Lag (ks)')
+    fig4.tight_layout()
+    figures.append(_save(fig4, 'structure_function',
+                          f'PA/PD structure functions for {", ".join(sf_eligible) or "no eligible ObsID"}'))
+
+    stdout_lines = [f'Wrote {len(figures)} figure(s) with prefix {save_path_prefix} ({fmt}).']
+    stdout_lines.extend(notes)
+    return {
+        'figures': figures,
+        'structure_function': sf_out,
+        'stdout': '\n'.join(stdout_lines),
         'exit_code': 0,
     }

@@ -10,6 +10,7 @@ A Python/Bash toolkit for joint spectro-polarimetric analysis of X-ray binary da
 - **Stokes I/Q/U spectral extraction** for IXPE polarization cubes and PHA spectra
 - **Time-resolved IXPE polarimetry** (`red_ixpe.pcube_timeseg`) for intra-observation PD/PA/Stokes/MDP99 stability, DU1/2/3 merged, exposed as the `ixpe_pcube_timeseg` AI tool
 - **PA/PD constancy analysis** (`pa_pd_stability.pa_pd_stability`) on an existing `pcube_timeseg` CSV: weighted chi-squared constancy tests (PD/PA/QI/UI), the authoritative 2D Stokes variability test, moment-estimator intrinsic scatter, peak-to-peak ranges, structure functions, and cross-source Spearman correlations — pure numpy/scipy, no XSPEC/ixpeobssim, exposed as the `ixpe_pa_pd_stability` AI tool
+- **PA/PD stability diagnostic figures** (`pa_pd_stability.stability_plot`): the four standard reviewer figures (PA/PD time series, Stokes-plane Q/I vs U/I evolution, reduced-chi2 histograms, structure functions) from an `ixpe_pa_pd_stability` catalog — pure matplotlib, no XSPEC/ixpeobssim, exposed as the `ixpe_pa_pd_stability_plot` AI tool
 - **Joint fitting helpers**: multi-panel plotting with model component decomposition, fit-state freezing for snapshotting
 - **Fully customisable epoch management** for multi-observation campaigns, applicable to any source
 
@@ -19,7 +20,7 @@ A Python/Bash toolkit for joint spectro-polarimetric analysis of X-ray binary da
 lib/                        # Python library modules
   xspec_help.py             # Core: data loading, fitting, inspection, rebinning
   red_ixpe.py               # IXPE reduction: PCUBE, PHA1/Q/U extraction, MJD, hardness ratio
-  pa_pd_stability.py        # PA/PD/Stokes constancy statistics on an existing pcube_timeseg CSV (pure numpy/scipy)
+  pa_pd_stability.py        # PA/PD/Stokes constancy statistics + stability_plot diagnostic figures (pure numpy/scipy/matplotlib)
   NICER.py                  # NICER file locators (PHA, RMF, ARF)
   NuSTAR.py                 # NuSTAR file locators (PHA grouped, RMF, ARF)
   find_src.py               # Automated source centroiding and region file generation
@@ -602,6 +603,37 @@ def pa_pd_stability(
 
 ---
 
+#### `pa_pd_stability.stability_plot(obs_db_path, obsids, catalog_csv, ...)`
+
+Pure-matplotlib (Agg backend) companion plotter for `pa_pd_stability`: renders the four standard reviewer diagnostic figures from its outputs. Imports neither `xspec` nor `ixpeobssim`, so — like `pa_pd_stability` itself — it stays in `lib/` and is wired directly into `TOOL_MANIFEST` (`ixpe_pa_pd_stability_plot`), never through `skills/session.py`.
+
+```python
+def stability_plot(
+    obs_db_path: str,
+    obsids: list[str],
+    catalog_csv: str,
+    save_path_prefix: str | None = None,
+    sf_lags_ks: list[float] | None = None,
+    sf_min_segments: int = 10,
+    fmt: str = 'png',
+) -> dict
+```
+
+**Writes exactly four files**, `{save_path_prefix}_<suffix>.{fmt}`:
+
+1. `_pa_pd_timeseries` — per-ObsID stacked panels (PA top, PD bottom) vs time elapsed in kiloseconds from the earliest segment's `t_start_mjd` (mid-segment time `0.5*(t_start_mjd+t_stop_mjd)`, MJD→s via `×86400`), with per-segment errorbars and the catalog's weighted-mean line (`PA_deg_int`/`PD_pct_int`) plus a shaded ±1σ band (`PA_err_int`/`PD_err_int`) overlaid when the ObsID has a row in `catalog_csv`.
+2. `_stokes_plane` — per-ObsID Q/I vs U/I scatter, color-coded by mid-segment elapsed time (kiloseconds, own colorbar per ObsID), 1σ error crosses from `QI_err`/`UI_err`, origin marked.
+3. `_chi2_hist` — histograms of `rchi2_PD`/`rchi2_PA` across **every** row already in `catalog_csv` (not filtered to `obsids`), reference line at 1.0.
+4. `_structure_function` — SF_PA (top) / SF_PD (bottom) vs lag (`sf_lags_ks`, default `[5,10,20]`), one line per ObsID with `>= sf_min_segments` segments. Recomputed via the module's own `mid_time_structure_functions` helper, which itself calls the shared `structure_function` primitive on mid-segment times (seconds) with `wrap=True` for PA and `half_width_s = 0.5*median(diff(sorted mid-times))` — never an independently-invented calculation. An ObsID short of `sf_min_segments` is omitted from this panel only (still drawn in the other three); if none qualify, the panel carries an explicit annotation instead of empty axes.
+
+**Edge cases.** An ObsID with no readable `pcube_timeseg_<obsid>.csv` is skipped and noted in `stdout`; if every requested ObsID is unreadable, nothing is written and `exit_code=1` with `stderr` set (no `figures` key). `catalog_csv` is a **required** upstream product: if it does not exist, or exists but cannot be read as a catalog (e.g. missing the `obsid` column), this is a hard input error — `exit_code=1` with `stderr` set and no files written, checked before any figure is drawn regardless of whether the per-ObsID `pcube_timeseg` CSVs are readable. This is distinct from an ObsID simply *absent from* an otherwise-present, readable `catalog_csv`, which still gets its time-series/Stokes-plane panels — only its weighted-mean overlay is skipped.
+
+**Determinism.** Fixed `dpi=150`, `bbox_inches='tight'`, and explicit `savefig` metadata (a fixed `Software`/`Producer` string for PNG/PDF, `CreationDate=None` for PDF) so repeated calls on unchanged input are byte-identical — no timestamps are baked into the pixels.
+
+**Returns** a dict with `figures` (list of 4 `FigureRef` dicts — `path`, `caption`, `mime_type` (`image/png` or `application/pdf`), `produced_by`, `created_at`, `sha256` of the written bytes), `structure_function` (obsid → `{lags_ks, sf_pa, sf_pd}` for the ObsIDs actually drawn in panel 4 — the exact plotted values, exposed for differential verification), `stdout`, `exit_code`.
+
+---
+
 ### `NICER` — NICER file locators
 
 All three functions share the same signature pattern: `(obs: str, nicer_path: str, chatter=False)`. They glob under `<nicer_path>/<obs>/xti/event_cl/` and raise `ValueError` if exactly one match is not found.
@@ -730,6 +762,12 @@ Instrumental background rejection follows the method described in [Di Marco et a
 - NuSTAR background loading is disabled by default (`nustar_use_bkg=False`) because clean background regions are often unavailable for bright sources like Cyg X-1.
 
 ## Changelog
+
+- **2026-07-02** — Tightened `pa_pd_stability._load_catalog_rows`'s validation: previously a `KeyError` was only raised once a data *row* lacking `obsid` was iterated, so an empty or header-only `catalog_csv` (or one whose header dropped `obsid` but had zero data rows) yielded `{}` silently, and a catalog with `obsid` but missing a field the plotter reads later (`PA_deg_int`/`PA_err_int`/`PD_pct_int`/`PD_err_int`/`rchi2_PD`/`rchi2_PA`) raised mid-plot -- potentially after some of the four figures were already written. `_load_catalog_rows` now validates `DictReader.fieldnames` against the new `_PLOT_REQUIRED_CATALOG_FIELDS` up front and raises `KeyError` naming the missing columns before building any row dict, so every malformed-catalog case (empty, header-only, wrong-schema, or `obsid`-only) is caught by `stability_plot`'s existing `except (OSError, csv.Error, KeyError)` guard *before* any figure is drawn. `CATALOG_FIELDS` is a superset of `_PLOT_REQUIRED_CATALOG_FIELDS`, so a correctly-schema'd catalog with zero rows (as `test_obsid_absent_from_catalog_still_plots` writes) is still accepted. Two more regression tests added (`test_empty_catalog_csv_fails_loudly`, `test_catalog_with_obsid_but_missing_plot_fields_fails_before_writing`, the latter asserting explicitly that no partial figures land on disk).
+
+- **2026-07-02** — Fixed `pa_pd_stability.stability_plot`: a missing or unreadable `catalog_csv` (a required upstream `pa_pd_stability` product) previously fell back silently to an empty catalog (`cat_rows = {}`) and returned `exit_code=0` with four plausible-looking figures — no weighted-mean overlays and an empty chi2-histogram panel — masking a typo'd path or a failed upstream run. `catalog_csv` existence and readability (parseable with an `obsid` column) are now checked before any figure is drawn; either failure now returns `exit_code=1` with `stderr` set and writes no files, the same contract as the all-ObsIDs-unreadable case. This is distinct from — and does not change — the already-correct handling of an ObsID simply *absent from* an otherwise-present, readable catalog, which still gets its time-series/Stokes-plane panels with only the weighted-mean overlay skipped. Two regression tests added (`test_missing_catalog_csv_fails_loudly`, `test_unreadable_catalog_csv_fails_loudly`).
+
+- **2026-07-02** — Added `pa_pd_stability.stability_plot` and the `ixpe_pa_pd_stability_plot` AI tool: the four standard reviewer diagnostic figures for the six-ObsID BH-XRB PA/PD stability workflow (Cyg X-1 01002901/03002599, Swift J1727.8-1613 03005801/03006001, 4U 1630-47 01250401, LMC X-1 02001901), which `ixpe_pa_pd_stability` computes statistics for but does not plot. Pure matplotlib (Agg backend) — no XSPEC/ixpeobssim — so it lives alongside `pa_pd_stability` in `lib/` and is wired directly into `TOOL_MANIFEST`, never through `skills/session.py` (which imports XSPEC). Writes exactly four files per call (`_pa_pd_timeseries`, `_stokes_plane`, `_chi2_hist`, `_structure_function`): per-ObsID PA/PD time series (kiloseconds elapsed from each ObsID's own earliest segment, catalog weighted-mean ±1σ band overlaid), per-ObsID Q/I vs U/I Stokes-plane scatter color-coded by elapsed time, reduced-chi2 histograms across every row of the supplied catalog, and structure functions vs lag (one line per ObsID with enough segments) computed via a `mid_time_structure_functions` helper that itself calls the already-trusted `structure_function` primitive — never an independently-invented calculation. Handles a missing `pcube_timeseg` CSV per ObsID (skipped, noted in `stdout`; all-missing raises `exit_code=1` with no files written) and an ObsID absent from the catalog (still gets its time-series/Stokes-plane panels, only the weighted-mean overlay is skipped) without raising. Deterministic byte output (fixed `dpi`, `bbox_inches`, and `savefig` metadata with no embedded timestamp) verified by a reproducibility test; a differential test confirms the plotted structure-function values against an independent recompute via `structure_function` from the same CSV. Validated on real, already-local data (01002901, 03006001) with the real `pa_pd_stability_catalog.csv` already on disk.
 
 - **2026-07-02** — Added `lib/pa_pd_stability.py` (`pa_pd_stability`) and the `ixpe_pa_pd_stability` AI tool: intra-observation PA/PD/Stokes constancy analysis across one or more local IXPE ObsIDs, computed purely from each ObsID's existing `pcube_timeseg_<obsid>.csv` (all six BH-XRB ObsIDs — 01002901, 01250401, 02001901, 03002599, 03005801, 03006001 — already carry one). Weighted chi-squared constancy tests on PD/PA (mod-180 circular handling)/QI/UI; the authoritative 2D Stokes test (`chi2_2D = chi2_QI + chi2_UI`, `dof_2D = 2(N-1)`, `variable = p_2D < variability_p_threshold`); moment-estimator intrinsic scatter (upper-limit flagged); peak-to-peak ranges; first-order structure functions at configurable lags (`sf_lags_ks`, default `[5,10,20]`, gated on `min_seg_for_sf`); and a cross-source Spearman correlation of mean MDP99 against reduced chi-squared. Pure numpy/scipy — imports neither `xspec` nor `ixpeobssim` (its own small, independently-implemented CSV reader avoids importing `red_ixpe`, which would otherwise pull in the whole science stack) — so `TOOL_MANIFEST` wires it directly to `xspec_utils.lib.pa_pd_stability` (no `skills/session.py` involvement, same pattern as `group_pha`). Validated on real, already-local data: the 2D test correctly separates a known-constant real ObsID (01002901, p_2D ≈ 0.96) from a known-variable one at the default threshold (03006001, p_2D ≈ 0.0079); an independent differential recompute of `chi2_PD` and a differential CSV-parse check against `red_ixpe._read_existing_timeseg_csv` both agree; two independent calls reproduce every catalog number near-exactly (pure arithmetic, no fitting). No `obsdb_catalog` write (a derived summary, not observation data). A companion `plot_pa_pd_stability` plotting tool (consuming this tool's catalog/summary) is the natural next addition.
 

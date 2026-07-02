@@ -19,6 +19,8 @@ Workflow (all steps share the persistent XSPEC session):
   6. group_pha      — pre-process PHA grouping (no XSPEC required)
   7. ixpe_pa_pd_stability — constancy/variability stats on an existing
      pcube_timeseg CSV (no XSPEC/ixpeobssim required)
+  8. ixpe_pa_pd_stability_plot — the four standard PA/PD stability diagnostic
+     figures from an ixpe_pa_pd_stability catalog (no XSPEC/ixpeobssim required)
 """
 
 from __future__ import annotations
@@ -488,6 +490,96 @@ TOOL_MANIFEST: dict = {
                 },
             },
             "required": ["obs_db_path", "obsids", "output_dir"],
+        },
+    },
+
+    # ── PA/PD stability diagnostic figures (companion plotter) ─────────────
+    "research_toolkit.xspec_utils.ixpe_pa_pd_stability_plot": {
+        "module": "xspec_utils.lib.pa_pd_stability",
+        "fn": "stability_plot",
+        "description": (
+            "Renders the four standard IXPE PA/PD stability diagnostic figures from the "
+            "products of ixpe_pa_pd_stability -- run that tool first to get catalog_csv "
+            "(and ixpe_pcube_timeseg before it, to get each ObsID's pcube_timeseg CSV). "
+            "Pure matplotlib (Agg backend); imports no XSPEC/ixpeobssim, so it runs fast "
+            "and needs no science stack. Writes exactly four files, named by appending "
+            "'_pa_pd_timeseries', '_stokes_plane', '_chi2_hist', '_structure_function' "
+            "(plus '.png'/'.pdf') to save_path_prefix: (1) per-ObsID PA (top) / PD (bottom) "
+            "panels vs time elapsed in kiloseconds from the earliest segment's t_start, "
+            "with the catalog's weighted-mean +/-1sigma band overlaid when the ObsID is in "
+            "catalog_csv; (2) per-ObsID Q/I vs U/I Stokes-plane scatter color-coded by "
+            "elapsed time, with 1sigma error crosses and the origin marked; (3) histograms "
+            "of rchi2_PD/rchi2_PA across EVERY row of catalog_csv (not just obsids), with a "
+            "reference line at 1.0; (4) PA/PD structure functions vs lag, one line per "
+            "ObsID with >= sf_min_segments segments (an ObsID short of that is omitted from "
+            "this panel only, still appears in the other three; if none qualify the panel "
+            "carries an explicit annotation instead of empty axes). An ObsID with no "
+            "readable pcube_timeseg CSV is skipped and noted in stdout; if every requested "
+            "ObsID is unreadable, nothing is written and exit_code=1 with stderr set. "
+            "catalog_csv is a REQUIRED upstream product: a missing or unreadable (e.g. "
+            "wrong-schema) catalog_csv is a hard error -- exit_code=1 with stderr set and "
+            "no files written -- it never silently degrades to an empty catalog. This is "
+            "distinct from an ObsID simply absent from an otherwise-present, readable "
+            "catalog_csv, which still gets its time-series/Stokes-plane panels -- only its "
+            "weighted-mean overlay is skipped. Returns 'figures' (4 FigureRef dicts), "
+            "'structure_function' (obsid -> the lags_ks/sf_pa/sf_pd values actually "
+            "plotted, for verification), 'stdout', 'exit_code'."
+        ),
+        "args_schema": {
+            "type": "object",
+            "properties": {
+                "obs_db_path": {
+                    "type": "string",
+                    "description": (
+                        "The IXPE mission's obs-db directory (e.g. "
+                        "'/data/fzhou/XSPEC/Cyg_X-1/IXPE'). Each ObsID's per-segment CSV is "
+                        "read from <obs_db_path>/<obsid>/pcube_timeseg_<obsid>.csv."
+                    ),
+                },
+                "obsids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "ObsIDs to draw the time-series/Stokes-plane/structure-function "
+                        "panels for. The chi2 histogram panel instead covers every row "
+                        "already in catalog_csv, regardless of this list."
+                    ),
+                },
+                "catalog_csv": {
+                    "type": "string",
+                    "description": (
+                        "Path to the pa_pd_stability_catalog.csv written by "
+                        "ixpe_pa_pd_stability."
+                    ),
+                },
+                "save_path_prefix": {
+                    "type": "string",
+                    "description": (
+                        "Base path; '_pa_pd_timeseries', '_stokes_plane', '_chi2_hist', "
+                        "'_structure_function' plus '.{fmt}' are appended per figure. "
+                        "Auto-generated timestamped prefix in the current directory if "
+                        "omitted."
+                    ),
+                },
+                "sf_lags_ks": {
+                    "type": "array",
+                    "items": {"type": "number"},
+                    "description": "Structure-function lags to plot, in kiloseconds. Default [5, 10, 20].",
+                },
+                "sf_min_segments": {
+                    "type": "integer",
+                    "description": (
+                        "Minimum per-segment row count an ObsID needs to appear in the "
+                        "structure-function panel. Default 10."
+                    ),
+                },
+                "fmt": {
+                    "type": "string",
+                    "enum": ["png", "pdf"],
+                    "description": "Output image format for all four figures. Default 'png'.",
+                },
+            },
+            "required": ["obs_db_path", "obsids", "catalog_csv"],
         },
     },
 }
