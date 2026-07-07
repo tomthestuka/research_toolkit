@@ -26,6 +26,11 @@ Workflow (all steps share the persistent XSPEC session):
   10. ixpe_HR — net Stokes-I hardness ratio HR=(H-S)/(H+S) survey across local
       IXPE ObsIDs, read directly from each ObsID's existing per-DU PHA1
       products (no XSPEC AllData loading -- pure PHA1/RMF FITS reads)
+  11. bhxrb_pd_hr_survey — correlates PD (from ixpe_pcube_timeseg's integrated
+      row) against HR (from ixpe_HR's CSV) across a survey of BH-XRB IXPE
+      ObsIDs: detection classification, per-source/combined Spearman, a
+      soft-vs-hard-state KS test, and a detection-bias Mann-Whitney U test
+      (no XSPEC/ixpeobssim required)
 """
 
 from __future__ import annotations
@@ -758,6 +763,117 @@ TOOL_MANIFEST: dict = {
                 },
             },
             "required": ["obs_db_path", "obsids"],
+        },
+    },
+
+    # ── PD-vs-HR correlation/statistics survey (data only; no figures) ─────
+    "research_toolkit.xspec_utils.bhxrb_pd_hr_survey": {
+        "module": "xspec_utils.lib.bhxrb_pd_hr_survey",
+        "fn": "pd_hr_survey",
+        "description": (
+            "Correlates IXPE polarization degree (PD) against hardness ratio (HR) "
+            "across a survey of BH-XRB ObsIDs. For each obsid in obsids_with_sources, "
+            "reads PD_pct/PD_err/MDP99 from that obsid's existing "
+            "<pcube_csv_dir>/<obsid>/pcube_timeseg_<obsid>.csv integrated (segment_id=-1) "
+            "row -- run ixpe_pcube_timeseg first -- and HR/HR_err from hr_csv (the "
+            "bhxrb_hardness_ratios.csv ixpe_HR writes -- run that first). Classifies "
+            "detected=PD_pct>MDP99 and flags mdp_flagged=MDP99>mdp_flag_pct (a data-"
+            "quality note, not an exclusion). An obsid with no readable pcube CSV, or no "
+            "row in hr_csv, gets a recorded note and is excluded from every statistic -- "
+            "never raised, never a dummy value. Over the detected-only rows (a non-"
+            "detection's PD is MDP99-noise-dominated, not a physical measurement): "
+            "per-source Spearman rank correlation (PD_pct vs HR) for every source with "
+            ">= min_n_intra detections (a source short of that is omitted from "
+            "intra_source_correlations.csv, not crashed on); the combined Spearman "
+            "across every detected point regardless of source; a two-sample "
+            "Kolmogorov-Smirnov test between the detected PD_pct of soft_state_sources "
+            "vs hard_state_sources (both passed by the caller -- never hardcoded -- so "
+            "this serves any source-group split). Over every obsid with both a readable "
+            "PD and HR: a two-sided Mann-Whitney U test on HR between the detected and "
+            "non-detected groups (does HR predict whether a detection was made). Every "
+            "statistic is NaN, never an exception, when its input group is empty or -- "
+            "for the two Spearman correlations -- has fewer than 3 finite pairs. Writes "
+            "bhxrb_pd_hardness_survey.csv, intra_source_correlations.csv, "
+            "combined_correlation.csv, ks_test_soft_vs_hard.csv, "
+            "detection_bias_assessment.csv under obs_db_path, and records one "
+            "'pd_hardness_survey' product per obsid with both PD and HR in the mission "
+            "catalog at level 3 via obsdb_catalog.neutral.advance. Returns 'rows' (one "
+            "per requested obsid), 'skipped' (obsids with a note), "
+            "'per_source_correlations', 'spearman_combined', 'ks_result', 'mwu_result', "
+            "the five output CSV paths, 'exit_code' (always 0 -- a per-obsid problem is "
+            "recorded, not raised)."
+        ),
+        "args_schema": {
+            "type": "object",
+            "properties": {
+                "obs_db_path": {
+                    "type": "string",
+                    "description": (
+                        "Directory the five output CSVs are written to and the mission "
+                        "catalog (catalog.json) is recorded in, e.g. "
+                        "'/data/fzhou/XSPEC/Cyg_X-1/IXPE'."
+                    ),
+                },
+                "obsids_with_sources": {
+                    "type": "object",
+                    "additionalProperties": {"type": "string"},
+                    "description": (
+                        "Map of obsid -> source-name label (pass the object directly, "
+                        "do NOT JSON-encode it), e.g. {\"01002901\": \"Cyg X-1\", "
+                        "\"01250401\": \"4U 1630-47\"}. Every obsid appears in "
+                        "bhxrb_pd_hardness_survey.csv (with a note if skipped); the "
+                        "label groups obsids for the intra-source correlations and the "
+                        "soft/hard KS split."
+                    ),
+                },
+                "hr_csv": {
+                    "type": "string",
+                    "description": (
+                        "Path to bhxrb_hardness_ratios.csv written by ixpe_HR. A missing "
+                        "file is a hard error; a missing per-obsid row is a per-obsid note."
+                    ),
+                },
+                "pcube_csv_dir": {
+                    "type": "string",
+                    "description": (
+                        "Directory holding each obsid's "
+                        "<obsid>/pcube_timeseg_<obsid>.csv, written by ixpe_pcube_timeseg "
+                        "(often the same directory as obs_db_path)."
+                    ),
+                },
+                "mdp_flag_pct": {
+                    "type": "number",
+                    "description": (
+                        "MDP99 (percent) above this flags the obsid mdp_flagged in the "
+                        "survey CSV -- a data-quality note, not an exclusion. Default 15.0."
+                    ),
+                },
+                "min_n_intra": {
+                    "type": "integer",
+                    "description": (
+                        "Minimum detected-obsid count a source needs before its "
+                        "intra-source Spearman correlation is computed at all. Default 4."
+                    ),
+                },
+                "soft_state_sources": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Source-name labels (matched against obsids_with_sources' "
+                        "values) forming the KS test's soft-state group. Default empty "
+                        "-- the KS test is NaN until both groups are supplied."
+                    ),
+                },
+                "hard_state_sources": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Source-name labels forming the KS test's hard/intermediate-"
+                        "state group. Default empty."
+                    ),
+                },
+            },
+            "required": ["obs_db_path", "obsids_with_sources", "hr_csv", "pcube_csv_dir"],
         },
     },
 }

@@ -13,6 +13,7 @@ A Python/Bash toolkit for joint spectro-polarimetric analysis of X-ray binary da
 - **Net Stokes-I hardness ratio survey** (`red_ixpe.HR`): community-normalized `HR=(H-S)/(H+S)` read directly from each ObsID's existing per-DU PHA1 products (no XSPEC `AllData` loading), attempting DU1/DU2/DU3 independently so a genuinely-absent DU is dropped gracefully while a present-but-unreduced DU is never silently skipped; closed-form Gaussian error propagation from PHA `RATE`/`STAT_ERR`; soft/hard bands resolved per PHA from its own RMF EBOUNDS (falling back to an installed CALDB RMF for the same DU when a PHA's `RESPFILE` predates an environment migration); exposed as the `ixpe_HR` AI tool, which surveys a list of ObsIDs and writes `bhxrb_hardness_ratios.csv`
 - **PA/PD constancy analysis** (`pa_pd_stability.pa_pd_stability`) on an existing `pcube_timeseg` CSV: weighted chi-squared constancy tests (PD/PA/QI/UI), the authoritative 2D Stokes variability test, moment-estimator intrinsic scatter, peak-to-peak ranges, structure functions, and cross-source Spearman correlations — pure numpy/scipy, no XSPEC/ixpeobssim, exposed as the `ixpe_pa_pd_stability` AI tool
 - **PA/PD stability diagnostic figures** (`pa_pd_stability.stability_plot`): the four standard reviewer figures (PA/PD time series, Stokes-plane Q/I vs U/I evolution, reduced-chi2 histograms, structure functions) from an `ixpe_pa_pd_stability` catalog — pure matplotlib, no XSPEC/ixpeobssim, exposed as the `ixpe_pa_pd_stability_plot` AI tool
+- **PD-vs-HR correlation survey** (`bhxrb_pd_hr_survey.pd_hr_survey`): correlates PD (an `ixpe_pcube_timeseg` integrated row) against HR (an `ixpe_HR` CSV) across a BH-XRB ObsID survey — detection classification (`PD>MDP99`), per-source/combined Spearman, a caller-defined soft-vs-hard-state KS test, and a detection-bias Mann-Whitney U test — pure numpy/scipy, no XSPEC/ixpeobssim, exposed as the `bhxrb_pd_hr_survey` AI tool
 - **Joint fitting helpers**: multi-panel plotting with model component decomposition, fit-state freezing for snapshotting
 - **Fully customisable epoch management** for multi-observation campaigns, applicable to any source
 
@@ -23,6 +24,7 @@ lib/                        # Python library modules
   xspec_help.py             # Core: data loading, fitting, inspection, rebinning
   red_ixpe.py               # IXPE reduction: PCUBE, PHA1/Q/U extraction, MJD, hardness ratio
   pa_pd_stability.py        # PA/PD/Stokes constancy statistics + stability_plot diagnostic figures (pure numpy/scipy/matplotlib)
+  bhxrb_pd_hr_survey.py     # PD-vs-HR correlation/statistics survey (pure numpy/scipy)
   NICER.py                  # NICER file locators (PHA, RMF, ARF)
   NuSTAR.py                 # NuSTAR file locators (PHA grouped, RMF, ARF)
   find_src.py               # Automated source centroiding and region file generation
@@ -684,6 +686,48 @@ def stability_plot(
 
 ---
 
+### `bhxrb_pd_hr_survey` — PD-vs-HR correlation/statistics survey
+
+---
+
+#### `bhxrb_pd_hr_survey.pd_hr_survey(obs_db_path, obsids_with_sources, hr_csv, pcube_csv_dir, ...)`
+
+Correlates IXPE polarization degree (PD) against hardness ratio (HR) across a survey of BH-XRB ObsIDs, from two already-written upstream products — each ObsID's `pcube_timeseg_<obsid>.csv` integrated row (`ixpe_pcube_timeseg`) and the survey's `bhxrb_hardness_ratios.csv` (`ixpe_HR`). Same module family as `red_ixpe.HR`/`pa_pd_stability.pa_pd_stability`: pure numpy/scipy, imports neither `xspec` nor `ixpeobssim`, so `TOOL_MANIFEST` wires it directly to `xspec_utils.lib.bhxrb_pd_hr_survey` (no `skills/session.py` involvement).
+
+```python
+def pd_hr_survey(
+    obs_db_path: str,
+    obsids_with_sources: dict[str, str],
+    hr_csv: str,
+    pcube_csv_dir: str,
+    mdp_flag_pct: float = 15.0,
+    min_n_intra: int = 4,
+    soft_state_sources: Sequence[str] = (),
+    hard_state_sources: Sequence[str] = (),
+) -> dict
+```
+
+**Per-obsid assembly.** For each `obsid` in `obsids_with_sources` (obsid → source-name label), `PD_pct`/`PD_err`/`MDP99` are read from `<pcube_csv_dir>/<obsid>/pcube_timeseg_<obsid>.csv`'s integrated (`segment_id=-1`) row via `_read_pcube_integrated` — an independent reimplementation of the provenance-header/`segment_id=-1` convention `pa_pd_stability._read_timeseg_csv`/`red_ixpe._read_existing_timeseg_csv` already follow (not a shared helper, so this module never imports either), and `HR`/`HR_err` from `hr_csv` via `_read_hr_rows`. `detected = PD_pct > MDP99`; `mdp_flagged = MDP99 > mdp_flag_pct` (a data-quality note, never an exclusion). An obsid with no readable pcube CSV, or absent from `hr_csv`, gets a recorded `note` and is excluded from every statistic below — never raised, never a dummy value. `hr_csv` itself missing entirely is a hard `ValueError` (a required upstream product); a single obsid's row being absent from an otherwise-present file is only a per-obsid note.
+
+**Statistics, computed over the detected-only rows** (a non-detection's PD is MDP99-noise-dominated, not a physical measurement):
+1. **Per-source Spearman** (`PD_pct` vs `HR`, `scipy.stats.spearmanr`) for every source with `>= min_n_intra` detections — a source short of that is omitted from `intra_source_correlations.csv` and `per_source_correlations`, never crashed on.
+2. **Combined Spearman** across every detected point, regardless of source.
+3. **Two-sample Kolmogorov-Smirnov** (`scipy.stats.ks_2samp`) between the detected `PD_pct` of `soft_state_sources` vs `hard_state_sources` — both passed by the caller, never hardcoded, so the same tool serves any source-group split.
+
+**Statistics, computed over every obsid with both a readable PD and HR** (detected and non-detected together):
+
+4. **Two-sided Mann-Whitney U** (`scipy.stats.mannwhitneyu`) on `HR` between the detected and non-detected groups — a detection-bias check (does HR predict whether a polarization detection was made).
+
+**NaN, never an exception**, when a Spearman correlation's finite-pair count is `< 3` (`_spearman`), or when the KS/Mann-Whitney input group is empty (`_ks_two_sample`/`_mann_whitney`) — computed by hand rather than letting the underlying `scipy.stats` call raise on an empty array.
+
+**Writes** (to `obs_db_path`, created if absent): `bhxrb_pd_hardness_survey.csv` (one row per requested obsid: `obsid, source, PD_pct, PD_err, MDP99, detected, mdp_flagged, HR, HR_err, note`), `intra_source_correlations.csv` (`source, n, rho, p`), `combined_correlation.csv` (`n, rho, p`), `ks_test_soft_vs_hard.csv` (`n_soft, n_hard, statistic, p`), `detection_bias_assessment.csv` (`n_detected, n_non_detected, statistic, p`). Records one `kind='pd_hardness_survey'` product per obsid with both a readable PD and HR via `obsdb_catalog.neutral.advance` (mission `'ixpe'`, level 3), pointing at the shared survey CSV with that obsid's own `source`/`PD_pct`/`MDP99`/`detected`/`mdp_flagged`/`HR`/`mdp_flag_pct` in `params`.
+
+**Returns** a dict with `rows` (one per requested obsid, per `SURVEY_FIELDS`), `skipped` (obsids with a note), `per_source_correlations` (source → `_spearman` result, only sources meeting `min_n_intra`), `spearman_combined`, `ks_result`, `mwu_result` (each a dict per the statistics above), `survey_csv`/`intra_csv`/`combined_csv`/`ks_csv`/`bias_csv` (output paths), `exit_code` (always 0 — a per-obsid problem is recorded, not raised).
+
+**No figures.** This tool is data-only, per its brief — a companion plotter (consuming `bhxrb_pd_hardness_survey.csv`) is the natural next chain link, mirroring how `pa_pd_stability.stability_plot` sits alongside `pa_pd_stability.pa_pd_stability`.
+
+---
+
 ### `NICER` — NICER file locators
 
 All three functions share the same signature pattern: `(obs: str, nicer_path: str, chatter=False)`. They glob under `<nicer_path>/<obs>/xti/event_cl/` and raise `ValueError` if exactly one match is not found.
@@ -812,6 +856,8 @@ Instrumental background rejection follows the method described in [Di Marco et a
 - NuSTAR background loading is disabled by default (`nustar_use_bkg=False`) because clean background regions are often unavailable for bright sources like Cyg X-1.
 
 ## Changelog
+
+- **2026-07-07** — Added `lib/bhxrb_pd_hr_survey.py` (`pd_hr_survey`) and the `bhxrb_pd_hr_survey` AI tool: correlates PD (each ObsID's `pcube_timeseg_<obsid>.csv` integrated `segment_id=-1` row, from `ixpe_pcube_timeseg`) against HR (`bhxrb_hardness_ratios.csv`, from `ixpe_HR`) across a survey of BH-XRB IXPE ObsIDs — the survey step downstream of both tools per the BH-XRB polarization-hardness campaign brief. Classifies `detected=PD_pct>MDP99` and flags `mdp_flagged=MDP99>mdp_flag_pct` (default 15.0); over the detected-only rows, computes per-source Spearman (`>= min_n_intra` detections, default 4, else omitted rather than crashed on), the combined Spearman across all detected points, and a two-sample KS test between caller-supplied `soft_state_sources`/`hard_state_sources` groups (never hardcoded); over every obsid with both a readable PD and HR, a two-sided Mann-Whitney U test on HR between detected and non-detected groups. Same module family as `red_ixpe.HR`/`pa_pd_stability.pa_pd_stability`: pure numpy/scipy, no `xspec`/`ixpeobssim` import, wired directly into `TOOL_MANIFEST`. `_read_pcube_integrated` is an independent reimplementation of the provenance-header/`segment_id=-1` reader convention (never imports `pa_pd_stability`/`red_ixpe`). An obsid with no readable pcube CSV, or missing from `hr_csv`, is recorded with a `note` and excluded from every statistic rather than raised; every statistic is NaN (never an exception) on an empty input group or a Spearman pair-count `< 3`. Writes five CSVs (`bhxrb_pd_hardness_survey.csv`, `intra_source_correlations.csv`, `combined_correlation.csv`, `ks_test_soft_vs_hard.csv`, `detection_bias_assessment.csv`) and records one `pd_hardness_survey` product per successful obsid via `obsdb_catalog.neutral.advance` (level 3). Validated on four real, already-local Cyg X-1 IXPE ObsIDs (01002901, 01250401, 02250901, 03005101): their real integrated rows give a genuine 3-detected/1-non-detected split (PD>MDP99 for the first three, PD<MDP99 for 03005101), independently confirmed against a direct CSV read before writing the tests; HR came from running the real `ixpe_HR` skill against each ObsID's real, already-local per-DU PHA1 products, copied into an isolated scratch mission directory so the shared mission `catalog.json` is never touched by the test suite. Differential tests confirm the combined Spearman/KS/Mann-Whitney statistics against direct, independent `scipy.stats` recomputation (not the tool's own helpers); a reproducibility test confirms two calls agree exactly (pure arithmetic, no fitting). No figures — a companion plotter is the natural next addition, per the brief's own "figures are the next chain link" note.
 
 - **2026-07-07** — Fixed a second `red_ixpe.HR` silent-wrong-result mode found in co-lead review: `file_list` carrying more than one Level-2 event file for the same DU (two processing versions, e.g. `..._det1_evt2_v02.fits` and `..._det1_evt2_v03.fits`, or a mixed plain+`_rej` set) produced duplicate `du_labels`, so `HR` zipped over the duplicated PHA paths and double-counted that DU into an inflated `soft_rate`/`hard_rate` (and a `dus_used` list carrying a repeated label) -- silently, no error. `HR` now detects duplicate DU labels immediately after parsing `du_labels` (before any PHA existence check or read, regardless of `bkg`) and raises `ValueError` naming the duplicated DU(s) and the offending event files; it never auto-selects a "preferred" version -- that choice belongs to the caller/wrapper. Two regression tests added: `test_hr_raises_on_duplicate_du_versions` (a manufactured second DU1 version fed directly to `HR` raises) and `test_skill_wrapper_glob_duplicate_du_versions_recorded_as_error` (a real event_l2 directory carrying two DU1 versions, with no `_rej` variant so the `ixpe_HR` wrapper's plain-glob fallback matches both, is caught by the new guard and recorded in the survey's `errors` dict -- no inflated row, and the rest of the survey still succeeds).
 
