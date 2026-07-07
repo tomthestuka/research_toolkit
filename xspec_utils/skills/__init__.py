@@ -650,7 +650,7 @@ TOOL_MANIFEST: dict = {
                     "type": "string",
                     "description": (
                         "Base path; '_pa_pd_timeseries', '_stokes_plane', '_chi2_hist', "
-                        "'_structure_function' plus '.{fmt}' are appended per figure. "
+                        "'_structure_function' plus '.png' are appended per figure. "
                         "Auto-generated timestamped prefix in the current directory if "
                         "omitted."
                     ),
@@ -666,11 +666,6 @@ TOOL_MANIFEST: dict = {
                         "Minimum per-segment row count an ObsID needs to appear in the "
                         "structure-function panel. Default 10."
                     ),
-                },
-                "fmt": {
-                    "type": "string",
-                    "enum": ["png", "pdf"],
-                    "description": "Output image format for all four figures. Default 'png'.",
                 },
             },
             "required": ["obs_db_path", "obsids", "catalog_csv"],
@@ -891,7 +886,7 @@ TOOL_MANIFEST: dict = {
             "so it runs fast and needs no science stack. Writes exactly five files, "
             "named by appending 'pd_vs_hr_combined', 'pd_vs_hr_per_source', "
             "'pd_distribution_comparison', 'hr_detection_bias', "
-            "'feasibility_mdp99_exposure' (plus '.{fmt}') to save_path_prefix: "
+            "'feasibility_mdp99_exposure' (plus '.png') to save_path_prefix: "
             "(1) PD_pct vs HR scatter over every detected row, color-coded by source, "
             "annotated with the combined Spearman rho/p; (2) the same scatter split "
             "one panel per source (every source with a usable row), each annotated "
@@ -938,15 +933,10 @@ TOOL_MANIFEST: dict = {
                     "description": (
                         "Base path; 'pd_vs_hr_combined', 'pd_vs_hr_per_source', "
                         "'pd_distribution_comparison', 'hr_detection_bias', "
-                        "'feasibility_mdp99_exposure' plus '.{fmt}' are appended per "
+                        "'feasibility_mdp99_exposure' plus '.png' are appended per "
                         "figure. Auto-generated timestamped prefix in the current "
                         "directory if omitted."
                     ),
-                },
-                "fmt": {
-                    "type": "string",
-                    "enum": ["png", "pdf"],
-                    "description": "Output image format for all five figures. Default 'png'.",
                 },
                 "soft_state_sources": {
                     "type": "array",

@@ -70,19 +70,6 @@ def test_produces_four_named_files(tmp_path):
     assert len(written) == 4
 
 
-def test_pdf_format_written_with_correct_mime(tmp_path):
-    _require_real_fixtures()
-    prefix = str(tmp_path / "stability_pdf")
-    result = pps.stability_plot(REAL_IXPE_DIR, [OBSID_A], REAL_CATALOG_CSV,
-                                 save_path_prefix=prefix, fmt="pdf")
-    assert result["exit_code"] == 0
-    assert len(result["figures"]) == 4
-    for fig in result["figures"]:
-        assert fig["path"].endswith(".pdf")
-        assert fig["mime_type"] == "application/pdf"
-        assert os.path.getsize(fig["path"]) > 0
-
-
 # --------------------------------------------------------------------------- #
 # Reproducibility: identical calls -> byte-identical figures
 # --------------------------------------------------------------------------- #
@@ -272,14 +259,6 @@ def test_tool_manifest_wired_to_lib_directly_no_science_stack():
     assert entry["fn"] == "stability_plot"
     props = entry["args_schema"]["properties"]
     for name in ("obs_db_path", "obsids", "catalog_csv", "save_path_prefix",
-                 "sf_lags_ks", "sf_min_segments", "fmt"):
+                 "sf_lags_ks", "sf_min_segments"):
         assert name in props, f"{name} missing from args_schema.properties"
     assert entry["args_schema"]["required"] == ["obs_db_path", "obsids", "catalog_csv"]
-    assert props["fmt"]["enum"] == ["png", "pdf"]
-
-
-def test_invalid_fmt_rejected(tmp_path):
-    _require_real_fixtures()
-    with pytest.raises(ValueError):
-        pps.stability_plot(REAL_IXPE_DIR, [OBSID_A], REAL_CATALOG_CSV,
-                            save_path_prefix=str(tmp_path / "bad"), fmt="svg")

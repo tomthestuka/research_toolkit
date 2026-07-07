@@ -486,7 +486,6 @@ def pa_pd_stability(
 # stability_plot -- pure-matplotlib companion plotter (no xspec/ixpeobssim)
 # --------------------------------------------------------------------------- #
 
-_MIME_BY_FMT = {'png': 'image/png', 'pdf': 'application/pdf'}
 
 _PLOT_REQUIRED_CATALOG_FIELDS = (
     'obsid',
@@ -554,14 +553,13 @@ def stability_plot(
     save_path_prefix: str | None = None,
     sf_lags_ks: list[float] | None = None,
     sf_min_segments: int = 10,
-    fmt: str = 'png',
 ) -> dict:
     """Render the four standard IXPE PA/PD stability diagnostic figures.
 
     Reads each requested ObsID's `pcube_timeseg_<obsid>.csv` (written by
     `ixpe_pcube_timeseg`) and the `pa_pd_stability_catalog.csv` (written by
     `pa_pd_stability`, fields per `CATALOG_FIELDS`), and writes exactly four
-    files, `{save_path_prefix}_<suffix>.{fmt}`:
+    files, `{save_path_prefix}_<suffix>.png`:
 
     - `_pa_pd_timeseries`: per-ObsID PA (top) / PD (bottom) vs time-elapsed
       (kiloseconds from the earliest segment's `t_start_mjd`), with the
@@ -602,15 +600,13 @@ def stability_plot(
         Path to the `pa_pd_stability_catalog.csv` written by
         `pa_pd_stability`.
     save_path_prefix : str or None
-        Base path; the four suffixes above plus `.{fmt}` are appended.
+        Base path; the four suffixes above plus `.png` are appended.
         Auto-generated timestamped prefix in `os.getcwd()` when None.
     sf_lags_ks : list[float] or None
         Structure-function lags in kiloseconds. Default [5, 10, 20].
     sf_min_segments : int
         Minimum per-segment row count an ObsID needs to appear in the
         structure-function panel. Default 10.
-    fmt : str
-        Output image format, 'png' or 'pdf'. Default 'png'.
 
     Returns
     -------
@@ -621,9 +617,6 @@ def stability_plot(
     no files written when `catalog_csv` is missing/unreadable, or when every
     requested ObsID is unreadable).
     """
-    if fmt not in _MIME_BY_FMT:
-        raise ValueError(f"fmt must be one of {sorted(_MIME_BY_FMT)}, got {fmt!r}")
-
     # catalog_csv is a required upstream product (from pa_pd_stability) -- a
     # missing or malformed file is a hard input error, not an empty catalog,
     # regardless of whether any pcube_timeseg CSV below is readable.
@@ -669,14 +662,11 @@ def stability_plot(
         save_path_prefix = os.path.join(os.getcwd(), f'stability_plot_{ts}')
     os.makedirs(os.path.dirname(os.path.abspath(save_path_prefix)) or '.', exist_ok=True)
 
-    mime = _MIME_BY_FMT[fmt]
-    savefig_kwargs = ({'metadata': {'Software': 'xspec_utils.lib.pa_pd_stability.stability_plot'}}
-                       if fmt == 'png' else
-                       {'metadata': {'CreationDate': None,
-                                     'Producer': 'xspec_utils.lib.pa_pd_stability.stability_plot'}})
+    mime = 'image/png'
+    savefig_kwargs = {'metadata': {'Software': 'xspec_utils.lib.pa_pd_stability.stability_plot'}}
 
     def _save(fig, suffix: str, caption: str) -> dict:
-        path = f'{save_path_prefix}_{suffix}.{fmt}'
+        path = f'{save_path_prefix}_{suffix}.png'
         fig.savefig(path, dpi=150, bbox_inches='tight', **savefig_kwargs)
         plt.close(fig)
         sha = hashlib.sha256(Path(path).read_bytes()).hexdigest()
@@ -786,7 +776,7 @@ def stability_plot(
     figures.append(_save(fig4, 'structure_function',
                           f'PA/PD structure functions for {", ".join(sf_eligible) or "no eligible ObsID"}'))
 
-    stdout_lines = [f'Wrote {len(figures)} figure(s) with prefix {save_path_prefix} ({fmt}).']
+    stdout_lines = [f'Wrote {len(figures)} figure(s) with prefix {save_path_prefix} (png).']
     stdout_lines.extend(notes)
     return {
         'figures': figures,

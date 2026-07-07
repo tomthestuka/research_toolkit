@@ -322,7 +322,6 @@ def pd_hr_survey(
 # pd_hr_survey_plot -- pure-matplotlib companion plotter (no xspec/ixpeobssim)
 # --------------------------------------------------------------------------- #
 
-_MIME_BY_FMT = {'png': 'image/png', 'pdf': 'application/pdf'}
 _PRODUCED_BY = 'xspec_utils.lib.bhxrb_pd_hr_survey.pd_hr_survey_plot'
 
 
@@ -379,7 +378,6 @@ def pd_hr_survey_plot(
     obs_db_path: str,
     survey_csv: str,
     save_path_prefix: str | None = None,
-    fmt: str = 'png',
     soft_state_sources: Sequence[str] = (),
     hard_state_sources: Sequence[str] = (),
     mdp_flag_pct: float = 15.0,
@@ -390,7 +388,7 @@ def pd_hr_survey_plot(
     `pd_hr_survey`) and, for the feasibility panel only, each usable obsid's
     own `<obs_db_path>/<obsid>/pcube_timeseg_<obsid>.csv` integrated row (for
     `exposure_s`, which `survey_csv` does not carry). Writes exactly five
-    files, `{save_path_prefix}_<suffix>.{fmt}`:
+    files, `{save_path_prefix}_<suffix>.png`:
 
     - `pd_vs_hr_combined`: PD_pct vs HR scatter (with PD_err/HR_err
       crosses), color-coded by source, over every detected row; annotated
@@ -427,10 +425,8 @@ def pd_hr_survey_plot(
     survey_csv : str
         Path to `bhxrb_pd_hardness_survey.csv`, written by `pd_hr_survey`.
     save_path_prefix : str or None
-        Base path; the five suffixes above plus `.{fmt}` are appended.
+        Base path; the five suffixes above plus `.png` are appended.
         Auto-generated timestamped prefix in `os.getcwd()` when None.
-    fmt : str
-        Output image format, 'png' or 'pdf'. Default 'png'.
     soft_state_sources, hard_state_sources : Sequence[str]
         Source-name labels (matched against `survey_csv`'s `source` column)
         forming the `pd_distribution_comparison` groups -- the same
@@ -448,9 +444,6 @@ def pd_hr_survey_plot(
     differential verification), 'stdout', 'exit_code' (1 with 'stderr' and
     no files written when `survey_csv` is missing/unreadable/all-skipped).
     """
-    if fmt not in _MIME_BY_FMT:
-        raise ValueError(f"fmt must be one of {sorted(_MIME_BY_FMT)}, got {fmt!r}")
-
     if not os.path.exists(survey_csv):
         return {
             'exit_code': 1, 'stdout': '',
@@ -477,12 +470,11 @@ def pd_hr_survey_plot(
         save_path_prefix = os.path.join(os.getcwd(), f'pd_hr_survey_plot_{ts}')
     os.makedirs(os.path.dirname(os.path.abspath(save_path_prefix)) or '.', exist_ok=True)
 
-    mime = _MIME_BY_FMT[fmt]
-    savefig_kwargs = ({'metadata': {'Software': _PRODUCED_BY}} if fmt == 'png' else
-                       {'metadata': {'CreationDate': None, 'Producer': _PRODUCED_BY}})
+    mime = 'image/png'
+    savefig_kwargs = {'metadata': {'Software': _PRODUCED_BY}}
 
     def _save(fig, suffix: str, caption: str) -> dict:
-        path = f'{save_path_prefix}_{suffix}.{fmt}'
+        path = f'{save_path_prefix}_{suffix}.png'
         fig.savefig(path, dpi=150, bbox_inches='tight', **savefig_kwargs)
         plt.close(fig)
         sha = hashlib.sha256(Path(path).read_bytes()).hexdigest()
@@ -624,7 +616,7 @@ def pd_hr_survey_plot(
     fig5.tight_layout()
     figures.append(_save(fig5, 'feasibility_mdp99_exposure', f'MDP99 vs exposure for {len(mdp_exp_points)} obsid(s)'))
 
-    stdout_lines = [f'Wrote {len(figures)} figure(s) with prefix {save_path_prefix} ({fmt}).']
+    stdout_lines = [f'Wrote {len(figures)} figure(s) with prefix {save_path_prefix} (png).']
     stdout_lines.extend(notes)
     return {
         'figures': figures,

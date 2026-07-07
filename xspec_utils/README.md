@@ -668,11 +668,10 @@ def stability_plot(
     save_path_prefix: str | None = None,
     sf_lags_ks: list[float] | None = None,
     sf_min_segments: int = 10,
-    fmt: str = 'png',
 ) -> dict
 ```
 
-**Writes exactly four files**, `{save_path_prefix}_<suffix>.{fmt}`:
+**Writes exactly four files**, `{save_path_prefix}_<suffix>.png`:
 
 1. `_pa_pd_timeseries` — per-ObsID stacked panels (PA top, PD bottom) vs time elapsed in kiloseconds from the earliest segment's `t_start_mjd` (mid-segment time `0.5*(t_start_mjd+t_stop_mjd)`, MJD→s via `×86400`), with per-segment errorbars and the catalog's weighted-mean line (`PA_deg_int`/`PD_pct_int`) plus a shaded ±1σ band (`PA_err_int`/`PD_err_int`) overlaid when the ObsID has a row in `catalog_csv`.
 2. `_stokes_plane` — per-ObsID Q/I vs U/I scatter, color-coded by mid-segment elapsed time (kiloseconds, own colorbar per ObsID), 1σ error crosses from `QI_err`/`UI_err`, origin marked.
@@ -681,9 +680,9 @@ def stability_plot(
 
 **Edge cases.** An ObsID with no readable `pcube_timeseg_<obsid>.csv` is skipped and noted in `stdout`; if every requested ObsID is unreadable, nothing is written and `exit_code=1` with `stderr` set (no `figures` key). `catalog_csv` is a **required** upstream product: if it does not exist, or exists but cannot be read as a catalog (e.g. missing the `obsid` column), this is a hard input error — `exit_code=1` with `stderr` set and no files written, checked before any figure is drawn regardless of whether the per-ObsID `pcube_timeseg` CSVs are readable. This is distinct from an ObsID simply *absent from* an otherwise-present, readable `catalog_csv`, which still gets its time-series/Stokes-plane panels — only its weighted-mean overlay is skipped.
 
-**Determinism.** Fixed `dpi=150`, `bbox_inches='tight'`, and explicit `savefig` metadata (a fixed `Software`/`Producer` string for PNG/PDF, `CreationDate=None` for PDF) so repeated calls on unchanged input are byte-identical — no timestamps are baked into the pixels.
+**Determinism.** Fixed `dpi=150`, `bbox_inches='tight'`, and explicit `savefig` metadata (a fixed `Software` string) so repeated calls on unchanged input are byte-identical — no timestamps are baked into the pixels.
 
-**Returns** a dict with `figures` (list of 4 `FigureRef` dicts — `path`, `caption`, `mime_type` (`image/png` or `application/pdf`), `produced_by`, `created_at`, `sha256` of the written bytes), `structure_function` (obsid → `{lags_ks, sf_pa, sf_pd}` for the ObsIDs actually drawn in panel 4 — the exact plotted values, exposed for differential verification), `stdout`, `exit_code`.
+**Returns** a dict with `figures` (list of 4 `FigureRef` dicts — `path`, `caption`, `mime_type` (`image/png`), `produced_by`, `created_at`, `sha256` of the written bytes), `structure_function` (obsid → `{lags_ks, sf_pa, sf_pd}` for the ObsIDs actually drawn in panel 4 — the exact plotted values, exposed for differential verification), `stdout`, `exit_code`.
 
 ---
 
@@ -738,14 +737,13 @@ def pd_hr_survey_plot(
     obs_db_path: str,
     survey_csv: str,
     save_path_prefix: str | None = None,
-    fmt: str = 'png',
     soft_state_sources: Sequence[str] = (),
     hard_state_sources: Sequence[str] = (),
     mdp_flag_pct: float = 15.0,
 ) -> dict
 ```
 
-**Writes exactly five files**, `{save_path_prefix}_<suffix>.{fmt}`:
+**Writes exactly five files**, `{save_path_prefix}_<suffix>.png`:
 
 1. `pd_vs_hr_combined` — PD_pct-vs-HR scatter (with PD_err/HR_err crosses) over every **detected** row, color-coded by source, annotated with the combined Spearman rho/p (`_spearman`, same helper `pd_hr_survey` uses — same module, reused directly).
 2. `pd_vs_hr_per_source` — the same scatter split one panel per source (every source with a usable row, not just ones with detections); each panel annotated with its own Spearman rho/p when it has `>= 3` detections, else an explicit "No detected obsids" annotation.

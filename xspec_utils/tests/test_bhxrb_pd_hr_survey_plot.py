@@ -117,17 +117,6 @@ def test_produces_five_named_files(tmp_path, real_survey_csv):
     assert len(written) == 5
 
 
-def test_pdf_format_written_with_correct_mime(tmp_path, real_survey_csv):
-    prefix = str(tmp_path / "pdhr_pdf")
-    result = survey.pd_hr_survey_plot(REAL_IXPE_DIR, real_survey_csv, save_path_prefix=prefix, fmt="pdf")
-    assert result["exit_code"] == 0
-    assert len(result["figures"]) == 5
-    for fig in result["figures"]:
-        assert fig["path"].endswith(".pdf")
-        assert fig["mime_type"] == "application/pdf"
-        assert os.path.getsize(fig["path"]) > 0
-
-
 # --------------------------------------------------------------------------- #
 # Reproducibility: identical calls -> byte-identical figures
 # --------------------------------------------------------------------------- #
@@ -278,12 +267,6 @@ def test_soft_hard_groups_populate_distribution_panel(tmp_path, real_survey_csv)
     assert groups["hard"] == []
 
 
-def test_invalid_fmt_rejected(tmp_path, real_survey_csv):
-    with pytest.raises(ValueError):
-        survey.pd_hr_survey_plot(REAL_IXPE_DIR, real_survey_csv,
-                                  save_path_prefix=str(tmp_path / "bad"), fmt="svg")
-
-
 # --------------------------------------------------------------------------- #
 # Manifest wiring (AI-facing half) + no science-stack import
 # --------------------------------------------------------------------------- #
@@ -293,11 +276,10 @@ def test_tool_manifest_wired_to_lib_directly_no_science_stack():
     assert entry["module"] == "xspec_utils.lib.bhxrb_pd_hr_survey"
     assert entry["fn"] == "pd_hr_survey_plot"
     props = entry["args_schema"]["properties"]
-    for name in ("obs_db_path", "survey_csv", "save_path_prefix", "fmt",
+    for name in ("obs_db_path", "survey_csv", "save_path_prefix",
                  "soft_state_sources", "hard_state_sources", "mdp_flag_pct"):
         assert name in props, f"{name} missing from args_schema.properties"
     assert entry["args_schema"]["required"] == ["obs_db_path", "survey_csv"]
-    assert props["fmt"]["enum"] == ["png", "pdf"]
 
 
 def test_lib_module_imports_no_xspec_or_ixpeobssim():
