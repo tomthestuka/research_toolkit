@@ -9,6 +9,7 @@ A Python/Bash toolkit for joint spectro-polarimetric analysis of X-ray binary da
 - **Unified data loader** that assigns XSPEC data groups across instruments in a single call (`xspec_help.load_data`), extensible to new instruments
 - **Stokes I/Q/U spectral extraction** for IXPE polarization cubes and PHA spectra
 - **Time-resolved IXPE polarimetry** (`red_ixpe.pcube_timeseg`) for intra-observation PD/PA/Stokes/MDP99 stability, DU1/2/3 merged, exposed as the `ixpe_pcube_timeseg` AI tool
+- **Per-DU IXPE PHA1 reduction, reuse-or-reduce** (`red_ixpe.reduce_pha`): reuses an ObsID's existing per-DU Stokes-I PHA1 src+bkg products when already on disk, otherwise centroids the source position from the Level-2 event file via `find_src.run_extraction` (writing DS9 `src.reg`/`bkg.reg`) and runs `red_ixpe.pha`; exposed as the `ixpe_reduce_pha` AI tool -- the input `red_ixpe.HR` (hardness ratio) and `xspec_help.load_data` need, kept as its own tool rather than folded into an HR tool since HR reads PHA
 - **PA/PD constancy analysis** (`pa_pd_stability.pa_pd_stability`) on an existing `pcube_timeseg` CSV: weighted chi-squared constancy tests (PD/PA/QI/UI), the authoritative 2D Stokes variability test, moment-estimator intrinsic scatter, peak-to-peak ranges, structure functions, and cross-source Spearman correlations — pure numpy/scipy, no XSPEC/ixpeobssim, exposed as the `ixpe_pa_pd_stability` AI tool
 - **PA/PD stability diagnostic figures** (`pa_pd_stability.stability_plot`): the four standard reviewer figures (PA/PD time series, Stokes-plane Q/I vs U/I evolution, reduced-chi2 histograms, structure functions) from an `ixpe_pa_pd_stability` catalog — pure matplotlib, no XSPEC/ixpeobssim, exposed as the `ixpe_pa_pd_stability_plot` AI tool
 - **Joint fitting helpers**: multi-panel plotting with model component decomposition, fit-state freezing for snapshotting
@@ -490,6 +491,31 @@ Same `changes` toggle as `pcube`. When `changes=True`, runs `xpselect` + `xpbin 
 
 ---
 
+#### `red_ixpe.reduce_pha(obs, file_list, ...)`
+
+Reuses an observation's on-disk per-DU PHA1 (Stokes I) src+bkg products, or derives them. This is the tool wrapped as the `ixpe_reduce_pha` AI-facing entry (`skills/session.py`).
+
+```python
+def reduce_pha(
+    obs: str,
+    file_list: list[str],
+    src_rad: float = 1.0,
+    bkg_inner_rad: float = 3.0,
+    bkg_outer_rad: float = 5.0,
+    irf_date: str = '20230702',
+    overwrite: bool = True,
+    chatter: bool = False,
+) -> dict
+```
+
+Verifies exactly one Level-2 event file per DU1/DU2/DU3 (`_validate_du_files`), then checks whether the src+bkg PHA1 paths `pha(..., changes=False)` derives already exist on disk. If so, they are reused as-is: no reduction, no source centroiding, `ra`/`dec`/`src_reg`/`bkg_reg` are `None`. Otherwise the source position is centroided from the DU1 event file via `find_src.run_extraction` (writing `src.reg`/`bkg.reg` into the observation's own directory, one level above `event_l2/` -- **not** read from a FITS header, and **not** from the fixed `src_pos.SRC_COORD` table), and `pha()` is run (`xpselect` + `xpbin PHA1`) with a circular source region of radius `src_rad` and an annular background (`bkg_inner_rad`-`bkg_outer_rad`) centred there, at `irf_date`.
+
+**Returns** a dict with `src_pha`, `bkg_pha` (each a 3-element DU1/DU2/DU3 list of Stokes-I PHA1 paths), `ra`, `dec` (`None` when reused), `reused` (bool), `src_reg`, `bkg_reg` (paths when freshly reduced, `None` when reused).
+
+**`skills/session.py`'s `ixpe_reduce_pha` wrapper** locates the ObsID's Level-2 event files under `<obs_db_path>/<obsid>/event_l2/` (preferring `_rej` files, falling back to plain `evt2_v*.fits`, the same convention as `ixpe_pcube_timeseg`), calls `reduce_pha`, and records every PHA1 product on disk after the call (3 DUs x src/bkg) in the mission catalog at level 3 via `obsdb_catalog.neutral.advance` -- one `kind='pha'` product per file, `params` carrying `du`, `stokes='I'`, `region` (`'src'`/`'bkg'`), the region radii, `irf_date`, and `reused` -- whether the call reused existing products or ran a fresh reduction. Nothing is recorded on failure (e.g. no local Level-2 files, or other than one file per DU).
+
+---
+
 #### `red_ixpe.get_pha_q(pha_path)` / `red_ixpe.get_pha_u(pha_path)`
 
 Derive the Stokes Q or U PHA path from the Stokes I PHA path by replacing the first occurrence of `pha1` with `pha1q` or `pha1u` in the filename.
@@ -762,6 +788,8 @@ Instrumental background rejection follows the method described in [Di Marco et a
 - NuSTAR background loading is disabled by default (`nustar_use_bkg=False`) because clean background regions are often unavailable for bright sources like Cyg X-1.
 
 ## Changelog
+
+- **2026-07-06** — Added `red_ixpe.reduce_pha` and the `ixpe_reduce_pha` AI tool: surfaces the existing `red_ixpe.pha()` reduction (previously used only internally by `xspec_help.load_data`) as its own standalone tool, per the BH-XRB polarization-hardness survey brief's design (PHA reduction kept separate from an HR tool, since HR reads PHA). For each ObsID, reuses on-disk per-DU Stokes-I PHA1 src+bkg products when present (no re-reduction); otherwise centroids the source position from the Level-2 DU1 event file via `find_src.run_extraction` (writing DS9 `src.reg`/`bkg.reg` -- per the human's steer, coordinates come from `find_src`, never from FITS headers or the Cyg-X-1-only `src_pos.SRC_COORD` table) and runs `xpselect`+`xpbin PHA1` with a circular source region (`src_rad`, default 1.0 arcmin) and annular background (`bkg_inner_rad`-`bkg_outer_rad`, default 3.0-5.0 arcmin) at the caller's `irf_date`. Every PHA1 product on disk after the call is recorded in the mission catalog at level 3 via `obsdb_catalog.neutral.advance`, whether reused or freshly reduced. `_validate_du_files` gained an optional `caller` parameter (default `'pcube_timeseg'`, unchanged for existing callers) so its raised messages name the actual entry point instead of always crediting `pcube_timeseg`. Validated on real, already-local IXPE ObsID 01002901 (one of the twelve Cyg X-1 ObsIDs with PHA already on disk): the reuse path resolves the real on-disk PHA1 products (non-zero net `RATE`, not just well-shaped metadata); a differential test confirms the fresh-reduction path's centroided RA/Dec against an independent direct call to `find_src.run_extraction` on the same event file; a reproducibility test confirms two independent fresh reductions agree on RA/Dec and net PHA1 rates. `tool_config.yaml` gained a `call_timeout_s` entry (900s) for the tool's own sandbox backstop.
 
 - **2026-07-02** — Tightened `pa_pd_stability._load_catalog_rows`'s validation: previously a `KeyError` was only raised once a data *row* lacking `obsid` was iterated, so an empty or header-only `catalog_csv` (or one whose header dropped `obsid` but had zero data rows) yielded `{}` silently, and a catalog with `obsid` but missing a field the plotter reads later (`PA_deg_int`/`PA_err_int`/`PD_pct_int`/`PD_err_int`/`rchi2_PD`/`rchi2_PA`) raised mid-plot -- potentially after some of the four figures were already written. `_load_catalog_rows` now validates `DictReader.fieldnames` against the new `_PLOT_REQUIRED_CATALOG_FIELDS` up front and raises `KeyError` naming the missing columns before building any row dict, so every malformed-catalog case (empty, header-only, wrong-schema, or `obsid`-only) is caught by `stability_plot`'s existing `except (OSError, csv.Error, KeyError)` guard *before* any figure is drawn. `CATALOG_FIELDS` is a superset of `_PLOT_REQUIRED_CATALOG_FIELDS`, so a correctly-schema'd catalog with zero rows (as `test_obsid_absent_from_catalog_still_plots` writes) is still accepted. Two more regression tests added (`test_empty_catalog_csv_fails_loudly`, `test_catalog_with_obsid_but_missing_plot_fields_fails_before_writing`, the latter asserting explicitly that no partial figures land on disk).
 

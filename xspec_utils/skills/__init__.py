@@ -21,6 +21,8 @@ Workflow (all steps share the persistent XSPEC session):
      pcube_timeseg CSV (no XSPEC/ixpeobssim required)
   8. ixpe_pa_pd_stability_plot — the four standard PA/PD stability diagnostic
      figures from an ixpe_pa_pd_stability catalog (no XSPEC/ixpeobssim required)
+  9. ixpe_reduce_pha — reuse or reduce per-DU IXPE PHA1 (Stokes I) src+bkg
+     spectra for one local ObsID, the input HR() and load_data need
 """
 
 from __future__ import annotations
@@ -396,6 +398,87 @@ TOOL_MANIFEST: dict = {
                         "call with different arguments) deletes the stale CSV and "
                         "rebuilds from scratch rather than mixing rows from different "
                         "configurations; set false to always force a full rebuild."
+                    ),
+                },
+            },
+            "required": ["obs_db_path", "obsid"],
+        },
+    },
+
+    # ── Per-DU IXPE PHA1 reduction (reuse-or-reduce) ───────────────────────
+    "research_toolkit.xspec_utils.ixpe_reduce_pha": {
+        "module": "xspec_utils.skills.session",
+        "fn": "ixpe_reduce_pha",
+        "description": (
+            "Reuse or reduce per-DU IXPE PHA1 (Stokes I) source+background spectra "
+            "for one local ObsID -- the input HR() (hardness ratio) and load_data need, "
+            "surfaced as its own tool rather than folded into an HR tool since HR reads "
+            "PHA. Locates Level-2 DU1/DU2/DU3 event files under "
+            "<obs_db_path>/<obsid>/event_l2/ (preferring '_rej' instrumental-background- "
+            "rejected files, falling back to plain evt2_v*.fits); this tool does not "
+            "download data, so check ObsID locality with a data-catalog tool first. "
+            "If the per-DU src+bkg PHA1 files already exist on disk, they are reused "
+            "as-is -- no re-reduction, no region files written, 'reused'=true, 'ra'/'dec' "
+            "null. Otherwise the source RA/Dec is centroided from the DU1 event file via "
+            "find_src.run_extraction (writing DS9 'src.reg'/'bkg.reg' under "
+            "<obs_db_path>/<obsid>/ -- NOT read from FITS headers, NOT from a fixed "
+            "source-coordinate table), and xpselect+xpbin PHA1 is run per DU with a "
+            "circular source region (src_rad) and annular background (bkg_inner_rad- "
+            "bkg_outer_rad) centred there, at irf_date. Every PHA1 product on disk after "
+            "the call (3 DUs x src/bkg) is recorded in the mission catalog at level 3 via "
+            "obsdb_catalog.neutral.advance, whether reused or freshly reduced -- so a "
+            "downstream HR/load_data call always has real, catalogued products to read. "
+            "Returns 'src_pha'/'bkg_pha' (each a 3-element DU1/DU2/DU3 list of Stokes-I "
+            "PHA1 paths), 'ra'/'dec' (null when reused), 'reused' (bool), 'src_reg'/ "
+            "'bkg_reg' (null when reused), 'stdout', 'exit_code' (1 with 'stderr' on "
+            "failure -- e.g. no local Level-2 files, or fewer/more than one file per DU -- "
+            "nothing is recorded on failure)."
+        ),
+        "args_schema": {
+            "type": "object",
+            "properties": {
+                "obs_db_path": {
+                    "type": "string",
+                    "description": (
+                        "The IXPE mission's obs-db directory (e.g. "
+                        "'/data/fzhou/XSPEC/Cyg_X-1/IXPE'). Event files are expected at "
+                        "<obs_db_path>/<obsid>/event_l2/; src.reg/bkg.reg and the PHA1 "
+                        "products (when freshly reduced) land under "
+                        "<obs_db_path>/<obsid>/."
+                    ),
+                },
+                "obsid": {
+                    "type": "string",
+                    "description": "9-digit IXPE Observation ID, as a string, e.g. '01002901'.",
+                },
+                "src_rad": {
+                    "type": "number",
+                    "description": (
+                        "Source region radius in arcminutes. Default 1.0. Used only "
+                        "when a fresh reduction is required (ignored when PHA1 products "
+                        "are reused)."
+                    ),
+                },
+                "bkg_inner_rad": {
+                    "type": "number",
+                    "description": (
+                        "Background annulus inner radius in arcminutes. Default 3.0. "
+                        "Used only when a fresh reduction is required."
+                    ),
+                },
+                "bkg_outer_rad": {
+                    "type": "number",
+                    "description": (
+                        "Background annulus outer radius in arcminutes. Default 5.0. "
+                        "Used only when a fresh reduction is required."
+                    ),
+                },
+                "irf_date": {
+                    "type": "string",
+                    "description": (
+                        "IRF calibration date 'YYYYMMDD', resolved to "
+                        "'ixpe:obssim{irf_date}_alpha075:v13'. Default '20230702'. "
+                        "Used only when a fresh reduction is required."
                     ),
                 },
             },

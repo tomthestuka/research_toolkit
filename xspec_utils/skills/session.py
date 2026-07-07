@@ -382,3 +382,87 @@ def ixpe_pcube_timeseg(
                    f"resumed={result['resumed']} -> {csv_path}"),
         "exit_code": 0,
     }
+
+
+def ixpe_reduce_pha(
+    obs_db_path: str,
+    obsid: str,
+    src_rad: float = 1.0,
+    bkg_inner_rad: float = 3.0,
+    bkg_outer_rad: float = 5.0,
+    irf_date: str = "20230702",
+) -> dict:
+    """Reuse or reduce per-DU IXPE PHA1 (Stokes I) spectra for one local ObsID.
+
+    Locates the ObsID's Level-2 DU1/2/3 event files under
+    ``<obs_db_path>/<obsid>/event_l2/`` (preferring the instrumental-background-
+    rejected ``_rej`` files; falling back to plain ``evt2_v*.fits``). If the
+    per-DU src+bkg PHA1 files already exist on disk, they are reused as-is --
+    no reduction, no region files written. Otherwise the source position is
+    centroided from the DU1 event file via ``find_src.run_extraction``
+    (writing ``src.reg``/``bkg.reg`` under ``<obs_db_path>/<obsid>/``), and
+    ``red_ixpe.pha`` is run (``xpselect`` + ``xpbin PHA1`` per DU) with a
+    circular source region (``src_rad``) and annular background
+    (``bkg_inner_rad``-``bkg_outer_rad``) at that position, using ``irf_date``.
+
+    Every PHA1 product on disk after this call (3 DUs x src/bkg, Stokes I) is
+    recorded in the mission catalog at level 3 via
+    ``obsdb_catalog.neutral.advance``, whether reused or freshly reduced.
+
+    Returns
+    -------
+    dict with 'src_pha', 'bkg_pha' (each a 3-element list, DU1/DU2/DU3
+    Stokes-I PHA1 paths), 'ra', 'dec' (None when reused), 'reused' (bool),
+    'src_reg', 'bkg_reg' (None when reused), 'stdout', 'exit_code' (1 with
+    'stderr' on failure -- nothing is recorded on failure).
+    """
+    evt_dir = os.path.join(obs_db_path, obsid, "event_l2")
+    file_list = sorted(glob.glob(os.path.join(evt_dir, f"ixpe{obsid}_det[123]_evt2_v[0-9][0-9]_rej.fits")))
+    if not file_list:
+        file_list = sorted(glob.glob(os.path.join(evt_dir, f"ixpe{obsid}_det[123]_evt2_v[0-9][0-9].fits")))
+    if not file_list:
+        return {"exit_code": 1, "stdout": "",
+                "stderr": f"No Level-2 event files found for {obsid} under {evt_dir}"}
+
+    try:
+        result = red_ixpe.reduce_pha(
+            obsid, file_list, src_rad=src_rad, bkg_inner_rad=bkg_inner_rad,
+            bkg_outer_rad=bkg_outer_rad, irf_date=irf_date,
+        )
+    except (Exception, SystemExit) as exc:
+        return {"exit_code": 1, "stdout": "", "stderr": str(exc)}
+
+    src_pha, bkg_pha = result["src_pha"], result["bkg_pha"]
+    missing = [f for f in src_pha + bkg_pha if not os.path.exists(f)]
+    if missing:
+        return {"exit_code": 1, "stdout": "",
+                "stderr": f"reduce_pha did not produce: {missing}"}
+
+    du_labels = ("DU1", "DU2", "DU3")
+    products = [
+        {
+            "kind": "pha",
+            "path": os.path.relpath(path, obs_db_path),
+            "produced_by": "xspec_utils.red_ixpe.pha",
+            "params": {"du": du, "stokes": "I", "region": region,
+                       "src_rad": src_rad, "bkg_inner_rad": bkg_inner_rad,
+                       "bkg_outer_rad": bkg_outer_rad, "irf_date": irf_date,
+                       "reused": result["reused"]},
+        }
+        for du, s, b in zip(du_labels, src_pha, bkg_pha)
+        for region, path in (("src", s), ("bkg", b))
+    ]
+    neutral.advance(obs_db_path, "ixpe", obsid, level=3, products=products)
+
+    return {
+        "src_pha": src_pha,
+        "bkg_pha": bkg_pha,
+        "ra": result["ra"],
+        "dec": result["dec"],
+        "reused": result["reused"],
+        "src_reg": result["src_reg"],
+        "bkg_reg": result["bkg_reg"],
+        "stdout": (f"ixpe_reduce_pha {obsid}: reused={result['reused']} "
+                   f"src_pha={src_pha} bkg_pha={bkg_pha}"),
+        "exit_code": 0,
+    }

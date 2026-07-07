@@ -16,6 +16,14 @@ call_timeout_s:
   # calls if needed -- rather than raising this backstop further.
   ixpe_pcube_timeseg: 5400
 
+  # ixpe_reduce_pha has no internal timeout knob either: one xpselect + one
+  # xpbin PHA1/PHA1Q/PHA1U pair (src, bkg) per call, all 3 DUs passed
+  # together (not looped per-DU), plus one find_src centroid pass on the
+  # ~200-270MB DU1 event file when a fresh reduction is needed. Comfortably
+  # faster than a single ixpe_pcube_timeseg segment loop, but still well
+  # above the 300s orchestration default on a cold CALDB cache.
+  ixpe_reduce_pha: 900
+
 # Per-package Layer-B (pytest) budget, applied to EACH of the gate's two runs.
 # ixpe_pcube_timeseg's tests exercise several real xpselect+xpbin PCUBE
 # reductions on real, already-local IXPE Level-2 event files (01250401,

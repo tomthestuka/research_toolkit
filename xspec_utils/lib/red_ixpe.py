@@ -279,6 +279,90 @@ def pha(obs: str,
 
     return src_pha_file_list, bkg_pha_file_list
 
+def reduce_pha(obs: str,
+               file_list: list[str],
+               src_rad: float = 1.0,
+               bkg_inner_rad: float = 3.0,
+               bkg_outer_rad: float = 5.0,
+               irf_date: str = '20230702',
+               overwrite: bool = True,
+               chatter: bool = False,
+               ) -> dict:
+    """Reuse an observation's on-disk per-DU PHA1 (Stokes I) products, or derive them.
+
+    Verifies exactly one Level-2 event file per DU1/DU2/DU3 (`_validate_du_files`),
+    then checks whether the src+bkg PHA1 files `pha(..., changes=False)` would
+    point at already exist on disk. If so they are reused as-is -- no reduction,
+    no source centroiding. Otherwise the source position is centroided from the
+    DU1 event file via `find_src.run_extraction` (writing `src.reg`/`bkg.reg`
+    into the observation's own directory, one level above `event_l2/`), and
+    `pha()` is run (`xpselect` + `xpbin PHA1` per DU) with a circular source
+    region of radius `src_rad` and an annular background
+    (`bkg_inner_rad`-`bkg_outer_rad`) centred there, at `irf_date`.
+
+    Parameters
+    ----------
+    obs: str
+        9-digit Observation ID, as a string.
+
+    file_list: list[str]
+        List of file paths to filter for the given observation.
+
+    src_rad, bkg_inner_rad, bkg_outer_rad: float
+        Source region radius / background annulus radii, in arcminutes.
+        Used only when a fresh reduction is required.
+
+    irf_date: str
+        IRF date string ('YYYYMMDD'); resolves to 'ixpe:obssim{irf_date}_alpha075:v13'.
+        Used only when a fresh reduction is required.
+
+    overwrite: bool
+        Passed through to `pha()`/`xpselect`/`xpbin` when a fresh reduction is run.
+
+    Returns
+    -------
+    dict with 'src_pha', 'bkg_pha' (each a 3-element list, DU1/DU2/DU3 Stokes-I
+    PHA1 paths), 'ra', 'dec' (None when reused), 'reused' (bool), 'src_reg',
+    'bkg_reg' (paths written when a fresh reduction ran; None when reused).
+
+    Raises
+    ------
+    ValueError
+        `file_list` does not resolve to exactly one Level-2 event file per
+        DU1/DU2/DU3 for `obs`, or the centroided source region cannot be parsed.
+    """
+    obs_file_list = _get_obs_file_list(obs, file_list, chatter=chatter)
+    obs_file_list = _validate_du_files(obs, obs_file_list, caller='reduce_pha')
+
+    src_pha, bkg_pha = pha(obs, file_list, changes=False, chatter=chatter)
+    if all(os.path.exists(f) for f in src_pha + bkg_pha):
+        if chatter:
+            print(f'reduce_pha: reusing existing PHA1 products for {obs}')
+        return {'src_pha': src_pha, 'bkg_pha': bkg_pha, 'ra': None, 'dec': None,
+                'reused': True, 'src_reg': None, 'bkg_reg': None}
+
+    obs_dir = Path(obs_file_list[0]).resolve().parent.parent
+    src_reg = str(obs_dir / 'src.reg')
+    bkg_reg = str(obs_dir / 'bkg.reg')
+    with open(os.devnull, 'w') as fnull:
+        with redirect_stdout(fnull):
+            find_src.run_extraction(obs_file_list[0], src_reg, bkg_reg, None,
+                                     src_rad, bkg_inner_rad, bkg_outer_rad)
+    with open(src_reg) as f:
+        region_line = f.readlines()[1]
+    m = re.match(r'circle\(\s*([-\d.]+)\s*,\s*([-\d.]+)\s*,', region_line)
+    if not m:
+        raise ValueError(f'reduce_pha: could not parse source region from {src_reg}: {region_line!r}')
+    ra, dec = float(m.group(1)), float(m.group(2))
+
+    src_pha, bkg_pha = pha(obs, file_list, src_rad=src_rad, bkg_inner_rad=bkg_inner_rad,
+                            bkg_outer_rad=bkg_outer_rad, ra=ra, dec=dec, irf_date=irf_date,
+                            changes=True, overwrite=overwrite, chatter=chatter)
+    if chatter:
+        print(f'reduce_pha: reduced fresh PHA1 products for {obs} at RA={ra:.6f}, Dec={dec:.6f}')
+    return {'src_pha': src_pha, 'bkg_pha': bkg_pha, 'ra': ra, 'dec': dec,
+            'reused': False, 'src_reg': src_reg, 'bkg_reg': bkg_reg}
+
 def get_pha_q(pha_path: str) -> str:
     """
     Convert PHA1 file path to corresponding PHA1Q file path.
@@ -451,32 +535,33 @@ def _gti_overlap(gti_start, gti_stop, t0: float, t1: float) -> tuple[float, floa
         return None
     return clipped_start, clipped_stop, overlap_s
 
-def _validate_du_files(obs: str, obs_file_list: list[str]) -> list[str]:
+def _validate_du_files(obs: str, obs_file_list: list[str], caller: str = 'pcube_timeseg') -> list[str]:
     """Guarantee exactly one Level-2 event file per DU1/DU2/DU3, in DU order.
 
     Raises ``ValueError`` naming the offending file(s) on any filename that
     doesn't carry a recognisable DU number, a missing DU, or more than one
     file for the same DU (e.g. two calibration versions, or a ``_rej`` and
     plain variant) — callers must resolve the ambiguity rather than have one
-    silently picked for them.
+    silently picked for them. ``caller`` is prefixed onto every message so it
+    names the actual entry point (e.g. ``'reduce_pha'``), not just its first user.
     """
     by_du: dict[int, list[str]] = {}
     for f in obs_file_list:
         m = re.search(r'_det([123])_evt2_', os.path.basename(f))
         if not m:
-            raise ValueError(f'pcube_timeseg: could not parse a DU number (_det[123]_evt2_) from {f}')
+            raise ValueError(f'{caller}: could not parse a DU number (_det[123]_evt2_) from {f}')
         by_du.setdefault(int(m.group(1)), []).append(f)
 
     present = set(by_du)
     if present != {1, 2, 3}:
         raise ValueError(
-            f'pcube_timeseg: expected Level-2 event files for DU1, DU2 and DU3 for obs {obs}; '
+            f'{caller}: expected Level-2 event files for DU1, DU2 and DU3 for obs {obs}; '
             f'found DUs {sorted(present)} in: {obs_file_list}')
 
     for n in (1, 2, 3):
         if len(by_du[n]) > 1:
             raise ValueError(
-                f'pcube_timeseg: multiple Level-2 files for DU{n} (obs {obs}): '
+                f'{caller}: multiple Level-2 files for DU{n} (obs {obs}): '
                 f'{by_du[n]}; pass exactly one file per DU')
 
     return [by_du[1][0], by_du[2][0], by_du[3][0]]
