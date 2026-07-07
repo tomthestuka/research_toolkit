@@ -31,6 +31,9 @@ Workflow (all steps share the persistent XSPEC session):
       ObsIDs: detection classification, per-source/combined Spearman, a
       soft-vs-hard-state KS test, and a detection-bias Mann-Whitney U test
       (no XSPEC/ixpeobssim required)
+  12. bhxrb_pd_hr_survey_plot — the five standard PD-hardness survey
+      reviewer figures from a bhxrb_pd_hr_survey CSV (no XSPEC/ixpeobssim
+      required)
 """
 
 from __future__ import annotations
@@ -874,6 +877,104 @@ TOOL_MANIFEST: dict = {
                 },
             },
             "required": ["obs_db_path", "obsids_with_sources", "hr_csv", "pcube_csv_dir"],
+        },
+    },
+
+    # ── PD-vs-HR survey diagnostic figures (companion plotter) ─────────────
+    "research_toolkit.xspec_utils.bhxrb_pd_hr_survey_plot": {
+        "module": "xspec_utils.lib.bhxrb_pd_hr_survey",
+        "fn": "pd_hr_survey_plot",
+        "description": (
+            "Renders the five standard PD-hardness survey reviewer figures from "
+            "bhxrb_pd_hardness_survey.csv -- run bhxrb_pd_hr_survey first to get "
+            "survey_csv. Pure matplotlib (Agg backend); imports no XSPEC/ixpeobssim, "
+            "so it runs fast and needs no science stack. Writes exactly five files, "
+            "named by appending 'pd_vs_hr_combined', 'pd_vs_hr_per_source', "
+            "'pd_distribution_comparison', 'hr_detection_bias', "
+            "'feasibility_mdp99_exposure' (plus '.{fmt}') to save_path_prefix: "
+            "(1) PD_pct vs HR scatter over every detected row, color-coded by source, "
+            "annotated with the combined Spearman rho/p; (2) the same scatter split "
+            "one panel per source (every source with a usable row), each annotated "
+            "with its own Spearman rho/p when it has >= 3 detections; (3) detected "
+            "PD_pct histograms for soft_state_sources vs hard_state_sources (both "
+            "caller-supplied, never hardcoded -- the same grouping "
+            "bhxrb_pd_hr_survey's KS test uses), annotated with the KS statistic/p; "
+            "(4) HR histograms for the detected vs non-detected groups (every usable "
+            "row), annotated with the Mann-Whitney U/p; (5) MDP99 (percent) vs "
+            "exposure (kiloseconds) scatter, color-coded by detection, with a "
+            "mdp_flag_pct reference line -- exposure is read per obsid from its own "
+            "<obs_db_path>/<obsid>/pcube_timeseg_<obsid>.csv integrated row (not "
+            "carried by survey_csv itself), so an obsid whose pcube_timeseg CSV "
+            "isn't locally readable is skipped from this panel only and noted in "
+            "stdout. An empty group (no detections, no soft/hard match, no readable "
+            "exposure data, ...) never degrades to a misleading empty plot -- the "
+            "affected panel carries an explicit annotation instead. survey_csv is a "
+            "REQUIRED upstream product: missing, wrong-schema, or entirely-skipped "
+            "(every row carries a note, i.e. every requested obsid failed upstream) "
+            "is a hard error -- exit_code=1 with stderr set and no files written. "
+            "Returns 'figures' (5 FigureRef dicts), 'plotted' (the exact per-panel "
+            "values drawn -- 'combined_points', 'per_source_points', "
+            "'distribution_groups', 'detection_bias_hr', 'mdp99_exposure' -- for "
+            "verification), 'stdout', 'exit_code'."
+        ),
+        "args_schema": {
+            "type": "object",
+            "properties": {
+                "obs_db_path": {
+                    "type": "string",
+                    "description": (
+                        "The IXPE mission's obs-db directory (e.g. "
+                        "'/data/fzhou/XSPEC/Cyg_X-1/IXPE'). Only used for the "
+                        "feasibility panel: each usable obsid's exposure is read from "
+                        "<obs_db_path>/<obsid>/pcube_timeseg_<obsid>.csv."
+                    ),
+                },
+                "survey_csv": {
+                    "type": "string",
+                    "description": "Path to bhxrb_pd_hardness_survey.csv written by bhxrb_pd_hr_survey.",
+                },
+                "save_path_prefix": {
+                    "type": "string",
+                    "description": (
+                        "Base path; 'pd_vs_hr_combined', 'pd_vs_hr_per_source', "
+                        "'pd_distribution_comparison', 'hr_detection_bias', "
+                        "'feasibility_mdp99_exposure' plus '.{fmt}' are appended per "
+                        "figure. Auto-generated timestamped prefix in the current "
+                        "directory if omitted."
+                    ),
+                },
+                "fmt": {
+                    "type": "string",
+                    "enum": ["png", "pdf"],
+                    "description": "Output image format for all five figures. Default 'png'.",
+                },
+                "soft_state_sources": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Source-name labels (matched against survey_csv's 'source' "
+                        "column) forming the pd_distribution_comparison panel's "
+                        "soft-state group -- the same split passed as "
+                        "bhxrb_pd_hr_survey's own soft_state_sources. Default empty "
+                        "-- the panel is annotated 'no groups supplied' until both "
+                        "this and hard_state_sources are given."
+                    ),
+                },
+                "hard_state_sources": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Source-name labels forming the panel's hard/intermediate-state group. Default empty.",
+                },
+                "mdp_flag_pct": {
+                    "type": "number",
+                    "description": (
+                        "MDP99 (percent) reference line drawn on "
+                        "feasibility_mdp99_exposure -- the same data-quality "
+                        "threshold bhxrb_pd_hr_survey flags rows with. Default 15.0."
+                    ),
+                },
+            },
+            "required": ["obs_db_path", "survey_csv"],
         },
     },
 }
