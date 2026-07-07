@@ -7,11 +7,12 @@ import re
 import tempfile
 import warnings
 from pathlib import Path
+import numpy as np
 from astropy.io import fits
+import ixpeobssim
 import ixpeobssim.core.pipeline as pipeline
 from ixpeobssim.binning.polarization import xBinnedPolarizationCube
 from contextlib import redirect_stdout, redirect_stderr
-from xspec import AllData, Spectrum, AllModels
 
 import find_src
 
@@ -405,102 +406,228 @@ def get_mjd(obs, file_list) -> tuple[float, float, float]:
         mjd_mid = mjdref + 0.5*(tstart + tstop)/86400.0
     return mjd_start, mjd_stop, mjd_mid
 
-def _sum_counts(obs, src_pha_file_list, bkg_pha_file_list, e_bin: tuple[float, float]) -> tuple[float, float]:
+def _parse_du(filename: str) -> int:
+    """Parse the DU number (1/2/3) out of a Level-2 event filename's ``_det[123]_evt2_`` tag."""
+    m = re.search(r'_det([123])_evt2_', os.path.basename(filename))
+    if not m:
+        raise ValueError(f'HR: could not parse a DU number (_det[123]_evt2_) from {filename}')
+    return int(m.group(1))
+
+def _installed_du_rmf(du: int) -> str:
+    """Path to an installed CALDB RMF for DU ``du`` in the currently-active
+    ixpeobssim installation (any IRF date). IXPE's EBOUNDS channel-to-energy
+    grid is a fixed instrumental characteristic shared across every IRF date
+    and DU -- only the RESPONSE matrix itself varies with date/DU -- so any
+    installed RMF for this DU carries the same channel grid a PHA1's own
+    (possibly stale) RESPFILE would.
     """
-    sum count rate in energy bin for a given observation, returns [count_rate, error].
+    rmf_dir = os.path.join(os.path.dirname(os.path.abspath(ixpeobssim.__file__)),
+                            'caldb', 'ixpe', 'gpd', 'cpf', 'rmf')
+    matches = sorted(glob.glob(os.path.join(rmf_dir, f'ixpe_d{du}_obssim*_alpha075_v0*.rmf')))
+    if not matches:
+        raise ValueError(f'HR: no installed CALDB RMF found for DU{du} under {rmf_dir}')
+    return matches[0]
 
-    obs: str
-        9-digit Observation ID, as a string.
+def _resolve_rmf_ebounds(pha_path: str, du: int) -> tuple[np.ndarray, np.ndarray]:
+    """Resolve the (E_MIN, E_MAX) EBOUNDS arrays (keV) for ``pha_path``.
 
-    src_pha_file_list: list[str]
-        List of paths to the source PHA files.
-
-    bkg_pha_file_list: list[str]
-        List of paths to the background PHA files.
-
-    e_bin: tuple[float, float]
-        Energy range (keV) for which to sum the counts.
+    Primary path: ``pha_path``'s own RESPFILE header keyword. Fallback (an
+    already-reduced PHA1 whose RESPFILE was baked in under a reduction
+    environment that no longer exists on this machine): an installed CALDB
+    RMF for the same DU in the currently-active ixpeobssim installation --
+    the identical EBOUNDS grid, since it is a fixed instrumental
+    characteristic invariant across IRF date/DU (never hardcoded here --
+    E_MIN/E_MAX are always read live from whichever RMF resolves). Raises
+    ``ValueError`` if the fallback grid's channel count does not match the
+    PHA's own channel count (a real mismatch, never silently accepted), or
+    if neither the literal RESPFILE nor any installed DU RMF resolves.
     """
+    with fits.open(pha_path) as hdul:
+        spec = hdul['SPECTRUM']
+        rmf = spec.header['RESPFILE']
+        if not os.path.isabs(rmf):
+            rmf = os.path.join(os.path.dirname(os.path.abspath(pha_path)), rmf)
+        n_channels = len(spec.data)
 
-    # Filter files for the given observation
-    src_pha_file_list = _get_obs_file_list(obs, src_pha_file_list)
-    bkg_pha_file_list = _get_obs_file_list(obs, bkg_pha_file_list)
-    if len(src_pha_file_list) == 0 or len(bkg_pha_file_list) == 0:
-        raise ValueError(f'No files found in file_list matching obs: {obs}')
-    
-    # Clear XSPEC and warn user
-    AllData.clear(); AllModels.clear()
-    warnings.warn("XSPEC has been reset. All previous data and models have been cleared.")
+    if not os.path.exists(rmf):
+        rmf = _installed_du_rmf(du)
 
-    # XSPEC loads
-    spec_cnt = 0
-    with open(os.devnull, 'w') as fnull:
-            with redirect_stdout(fnull):
-                for src_pha, bkg_pha in zip(src_pha_file_list, bkg_pha_file_list):
-                    spec_cnt += 1
-                    AllData(f"{spec_cnt}:{spec_cnt} {src_pha}")
-                    AllData(spec_cnt).background = bkg_pha
+    with fits.open(rmf) as rmf_hdul:
+        e_lo = rmf_hdul['EBOUNDS'].data['E_MIN'].astype(float)
+        e_hi = rmf_hdul['EBOUNDS'].data['E_MAX'].astype(float)
 
-    # obtain overall rate and error
-    AllData.ignore(f"**-{e_bin[0]}  {e_bin[1]}-**")
-    rate, var = 0.0, 0.0
-    for i in range(1, spec_cnt):
-        spec = AllData(i)
-        this_rate, this_var, *_ = spec.rate
-        rate += this_rate
-        var += this_var
+    if len(e_lo) != n_channels:
+        raise ValueError(
+            f'HR: fallback RMF {rmf} has {len(e_lo)} EBOUNDS channels but '
+            f'{pha_path} (DU{du}) has {n_channels} PHA channels -- refusing a mismatched grid.')
 
-    err = var**0.5
+    return e_lo, e_hi
 
-    return rate, err
+def _ebounds_channel_mask(e_lo: np.ndarray, e_hi: np.ndarray, band: tuple[float, float]) -> np.ndarray:
+    """Boolean channel mask selecting EBOUNDS bins whose midpoint falls in ``[lo, hi)`` keV."""
+    e_mid = 0.5 * (e_lo + e_hi)
+    lo, hi = band
+    return (e_mid >= lo) & (e_mid < hi)
 
-def HR(obs, src_pha_file_list, bkg_pha_file_list, s_bin: tuple[float, float], h_bin: tuple[float, float], chatter=False) -> tuple[float, float]:
+def _pha_band_rate(pha_path: str, band: tuple[float, float], du: int) -> tuple[float, float]:
+    """Sum one PHA1 file's own RATE/STAT_ERR columns over the channels its
+    (resolved, see ``_resolve_rmf_ebounds``) RMF's EBOUNDS places inside
+    ``band`` (keV). RATE is already in cts/s and summed directly; STAT_ERR is
+    summed in quadrature over the selected channels.
     """
-    Calculate the hardness ratio for a given observation and PHA file list. returns [HR, HR_error].
+    with fits.open(pha_path) as hdul:
+        spec = hdul['SPECTRUM']
+        rate = spec.data['RATE'].astype(float)
+        stat_err = spec.data['STAT_ERR'].astype(float)
+    e_lo, e_hi = _resolve_rmf_ebounds(pha_path, du)
+    mask = _ebounds_channel_mask(e_lo, e_hi, band)
+    return float(np.nansum(rate[mask])), float(np.sqrt(np.nansum(stat_err[mask] ** 2)))
 
-    obs: str
-        9-digit Observation ID, as a string.
+def _pha_backscal(pha_path: str) -> float:
+    with fits.open(pha_path) as hdul:
+        return float(hdul['SPECTRUM'].header['BACKSCAL'])
 
-    src_pha_file_list: list[str]
-        List of paths to the source PHA files.
+def _du_net_band_rate(src_pha: str, bkg_pha: str, band: tuple[float, float], bkg: bool, du: int) -> tuple[float, float]:
+    """Net (optionally background-subtracted) band rate and 1-sigma error for one DU.
 
-    bkg_pha_file_list: list[str]
-        List of paths to the background PHA files.
-
-    s_bin: tuple[float, float]
-        Energy range for the soft band.
-
-    h_bin: tuple[float, float]
-        Energy range for the hard band.
+    When ``bkg=True``, the background PHA1's rate is scaled by
+    ``src_BACKSCAL/bkg_BACKSCAL`` before subtraction, and its (scaled) error is added
+    in quadrature. When ``bkg=False`` the background file is never read.
     """
+    s_rate, s_err = _pha_band_rate(src_pha, band, du)
+    if not bkg:
+        return s_rate, s_err
+    b_rate, b_err = _pha_band_rate(bkg_pha, band, du)
+    scale = _pha_backscal(src_pha) / _pha_backscal(bkg_pha)
+    net = s_rate - scale * b_rate
+    err = (s_err ** 2 + (scale * b_err) ** 2) ** 0.5
+    return net, err
 
-    # Filter files for the given observation
-    src_pha_file_list = _get_obs_file_list(obs, src_pha_file_list)
-    bkg_pha_file_list = _get_obs_file_list(obs, bkg_pha_file_list)
-    if len(src_pha_file_list) == 0 or len(bkg_pha_file_list) == 0:
-        raise ValueError(f'No files found in file_list matching obs: {obs}')
+def hr_from_bands(hard_rate: float, hard_err: float, soft_rate: float, soft_err: float) -> tuple[float, float]:
+    """Community-normalized hardness ratio ``HR=(H-S)/(H+S)``, bounded in ``[-1, +1]``,
+    and its closed-form first-order Gaussian-propagated 1-sigma error
+    ``sigma_HR = (2/(H+S)^2) * sqrt(S^2*sigma_H^2 + H^2*sigma_S^2)`` for independent
+    net band rates H, S carrying 1-sigma errors sigma_H, sigma_S.
 
-    if chatter:
-        print(f'Calculating hardness ratio for observation {obs} with {len(src_pha_file_list)} source files and {len(bkg_pha_file_list)} background files.')
-
-    # Get rates and errors for soft and hard bands
-    s_rate, s_err = _sum_counts(obs, src_pha_file_list, bkg_pha_file_list, s_bin)
-    h_rate, h_err = _sum_counts(obs, src_pha_file_list, bkg_pha_file_list, h_bin)
-
-    if chatter:
-        print(f'Soft band rate: {s_rate:.4f} +/- {s_err:.4f}')
-        print(f'Hard band rate: {h_rate:.4f} +/- {h_err:.4f}')
-
-    # Calculate hardness ratio and error
-    if s_rate <= 0 or h_rate <= 0:
-        raise ValueError(f'Non-positive count rate for observation {obs}: soft rate = {s_rate}, hard rate = {h_rate}. Cannot calculate hardness ratio.')
-    hr = h_rate/s_rate
-    hr_err = (h_err**2 + (hr*s_err)**2)**0.5 / s_rate
-
-    if chatter:
-        print(f'Hardness Ratio: {hr:.4f} +/- {hr_err:.4f}')
-
+    Returns ``(nan, nan)`` when ``hard_rate + soft_rate <= 0`` -- the ratio is
+    undefined for a non-positive net band-rate sum, so this returns an honest NaN
+    rather than an invented division result.
+    """
+    denom = hard_rate + soft_rate
+    if denom <= 0:
+        return float('nan'), float('nan')
+    hr = (hard_rate - soft_rate) / denom
+    hr_err = (2.0 / denom ** 2) * (soft_rate ** 2 * hard_err ** 2 + hard_rate ** 2 * soft_err ** 2) ** 0.5
     return hr, hr_err
+
+def HR(obs: str,
+       file_list: list[str],
+       soft_band: tuple[float, float] = (2.0, 4.0),
+       hard_band: tuple[float, float] = (4.0, 8.0),
+       bkg: bool = False,
+       chatter: bool = False) -> dict:
+    """Net Stokes-I hardness ratio ``HR=(H-S)/(H+S)`` for one IXPE observation, read
+    directly from its existing per-DU PHA1 (Stokes I) src(+bkg) products -- the same
+    PHA1 geometry ``pha()``/``reduce_pha`` produce.
+
+    Attempts DU1, DU2 and DU3 independently via ``pha(..., changes=False)``'s existing
+    file-path locators: whichever DUs' Level-2 event files are present in
+    ``file_list`` contribute (IXPE can genuinely fly with a DU off -- this never
+    hard-fails on a truly absent DU), and every DU that IS present must have its PHA1
+    product on disk (a present-but-unreduced DU raises rather than being silently
+    dropped). Net per-band rate sums over the contributing DUs; errors add in
+    quadrature over those DUs. Each PHA1 file's own RESPFILE RMF EBOUNDS resolves
+    ``soft_band``/``hard_band`` to channels -- never a hardcoded channel grid; if a
+    PHA1's RESPFILE predates a reduction-environment migration and no longer
+    resolves on disk, ``_resolve_rmf_ebounds`` falls back to an installed CALDB RMF
+    for the same DU (the EBOUNDS grid is a fixed instrumental characteristic shared
+    across every IRF date/DU, so this is the identical grid, not an approximation).
+
+    Background: ``bkg=True`` subtracts each DU's background PHA1 scaled by
+    ``src_BACKSCAL/bkg_BACKSCAL``; ``bkg=False`` (default) uses the source PHA1 alone
+    and never reads the background file.
+
+    Parameters
+    ----------
+    obs: str
+        9-digit Observation ID, as a string.
+
+    file_list: list[str]
+        Level-2 event file paths to filter for ``obs`` (see ``_get_obs_file_list``).
+        ``pha(obs, file_list, changes=False)``'s locators derive this observation's
+        existing per-DU PHA1 src/bkg paths from these same file paths, so passing
+        fewer than 3 DUs' event files here is how a caller expresses "DU off".
+
+    soft_band, hard_band: tuple[float, float]
+        Soft/hard energy bands in keV. Defaults (2.0, 4.0) / (4.0, 8.0).
+
+    bkg: bool
+        Apply background subtraction per DU. Default False.
+
+    Returns
+    -------
+    dict with 'HR', 'HR_err' (nan/nan if soft_rate+hard_rate <= 0), 'soft_rate',
+    'soft_err', 'hard_rate', 'hard_err' (net, DU-summed cts/s and 1-sigma error), and
+    'dus_used' (sorted list of the DU numbers that contributed).
+
+    Raises
+    ------
+    ValueError
+        A DU present in ``file_list`` has no PHA1 product on disk (run
+        ``ixpe_reduce_pha``/``reduce_pha`` first); no DU contributes at all; or
+        ``file_list`` carries more than one Level-2 event file for the same DU
+        (e.g. two processing versions, or a mixed plain+``_rej`` set) -- this is
+        never resolved automatically (no "preferred version" is picked), since
+        silently picking one would double-count or silently drop data; the
+        caller must pass exactly one event file per DU.
+    """
+    obs_file_list = _get_obs_file_list(obs, file_list, chatter=chatter)
+    du_labels = [_parse_du(f) for f in obs_file_list]
+    if not du_labels:
+        raise ValueError(f'HR: no DU contributes for obs {obs}; file_list resolved to no files.')
+
+    dups = {du for du in du_labels if du_labels.count(du) > 1}
+    if dups:
+        offending_files = [f for f, du in zip(obs_file_list, du_labels) if du in dups]
+        raise ValueError(
+            f'HR: obs {obs} has more than one Level-2 event file for DU(s) {sorted(dups)}: '
+            f'{offending_files}. Pass exactly one event file per DU (one processing '
+            f'version/variant).')
+
+    src_pha_list, bkg_pha_list = pha(obs, file_list, changes=False, chatter=chatter)
+
+    for du, s_pha, b_pha in zip(du_labels, src_pha_list, bkg_pha_list):
+        if not os.path.exists(s_pha):
+            raise ValueError(
+                f'HR: DU{du} is present in file_list for obs {obs} but its source PHA1 '
+                f'product is missing: {s_pha}. Run ixpe_reduce_pha/reduce_pha first.')
+        if bkg and not os.path.exists(b_pha):
+            raise ValueError(
+                f'HR: DU{du} is present in file_list for obs {obs} but its background '
+                f'PHA1 product is missing: {b_pha} (bkg=True).')
+
+    def _band_sum(band: tuple[float, float]) -> tuple[float, float]:
+        total_rate, total_var = 0.0, 0.0
+        for du, s_pha, b_pha in zip(du_labels, src_pha_list, bkg_pha_list):
+            r, e = _du_net_band_rate(s_pha, b_pha, band, bkg, du)
+            total_rate += r
+            total_var += e ** 2
+        return total_rate, total_var ** 0.5
+
+    soft_rate, soft_err = _band_sum(soft_band)
+    hard_rate, hard_err = _band_sum(hard_band)
+    hr, hr_err = hr_from_bands(hard_rate, hard_err, soft_rate, soft_err)
+
+    if chatter:
+        print(f'HR {obs}: DUs {sorted(du_labels)}  soft={soft_rate:.4f}+/-{soft_err:.4f}  '
+              f'hard={hard_rate:.4f}+/-{hard_err:.4f}  HR={hr:.4f}+/-{hr_err:.4f}')
+
+    return {
+        'HR': hr, 'HR_err': hr_err,
+        'soft_rate': soft_rate, 'soft_err': soft_err,
+        'hard_rate': hard_rate, 'hard_err': hard_err,
+        'dus_used': sorted(du_labels),
+    }
 
 _TIMESEG_FIELDS = ['segment_id', 't_start_mjd', 't_stop_mjd', 'exposure_s',
                    'PD_pct', 'PD_err', 'PA_deg', 'PA_err',

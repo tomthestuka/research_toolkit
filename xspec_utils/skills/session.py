@@ -11,6 +11,7 @@ matplotlib objects never cross the subprocess boundary.
 
 from __future__ import annotations
 
+import csv
 import glob
 import hashlib
 import os
@@ -464,5 +465,111 @@ def ixpe_reduce_pha(
         "bkg_reg": result["bkg_reg"],
         "stdout": (f"ixpe_reduce_pha {obsid}: reused={result['reused']} "
                    f"src_pha={src_pha} bkg_pha={bkg_pha}"),
+        "exit_code": 0,
+    }
+
+
+def ixpe_HR(
+    obs_db_path: str,
+    obsids: list,
+    soft_band: list | None = None,
+    hard_band: list | None = None,
+    bkg: bool = False,
+) -> dict:
+    """Net Stokes-I hardness ratio HR=(H-S)/(H+S) for a survey of local IXPE ObsIDs.
+
+    Reads directly from each ObsID's existing per-DU PHA1 (Stokes I) src(+bkg)
+    products under ``<obs_db_path>/<obsid>/event_l2/`` (preferring the
+    instrumental-background-rejected ``_rej`` files, falling back to plain
+    ``evt2_v*.fits`` -- the same convention as ``ixpe_reduce_pha``/
+    ``ixpe_pcube_timeseg``) via ``red_ixpe.HR``, so PD (from ``ixpe_pcube_timeseg``)
+    and HR share identical extraction regions. This never re-reduces PHA -- run
+    ``ixpe_reduce_pha`` first for any ObsID missing its PHA1 products.
+
+    An ObsID with no local Level-2 event files, or whose ``red_ixpe.HR`` call raises
+    (e.g. a DU present in the local event files has no reduced PHA1 product), is
+    recorded in the returned ``errors`` dict and excluded from the CSV -- never a
+    dummy row, and never a crash of the rest of the survey.
+
+    Writes ``bhxrb_hardness_ratios.csv`` (columns obsid, soft_rate, soft_err,
+    hard_rate, hard_err, HR, HR_err) at ``<obs_db_path>/bhxrb_hardness_ratios.csv``,
+    overwriting any previous run, and records one ``kind='hardness_ratio'`` product
+    per successful ObsID via ``obsdb_catalog.neutral.advance`` (level 3), with
+    ``params`` carrying the real ``soft_band``/``hard_band``/``bkg``/``dus_used``
+    used for that ObsID.
+
+    Parameters
+    ----------
+    obs_db_path : str
+        The IXPE mission's obs-db directory.
+    obsids : list[str]
+        9-digit IXPE Observation IDs to include in the survey.
+    soft_band, hard_band : list[float] or None
+        [lo, hi] energy band edges in keV. Default [2.0, 4.0] / [4.0, 8.0].
+    bkg : bool
+        Apply background subtraction (per DU, BACKSCAL-scaled) for every ObsID in
+        the survey. Default False (bright source-dominated targets); set True only
+        where background is a non-negligible fraction of the source aperture.
+
+    Returns
+    -------
+    dict with 'csv_path', 'rows' (the successful per-obsid row dicts written to the
+    CSV), 'errors' (obsid -> error message, for ObsIDs that failed), 'stdout',
+    'exit_code' (1 with 'stderr' set only if EVERY ObsID failed -- nothing is
+    written or recorded in that case; 0 otherwise, with any per-ObsID failures
+    surfaced in 'errors').
+    """
+    soft = tuple(soft_band) if soft_band else (2.0, 4.0)
+    hard = tuple(hard_band) if hard_band else (4.0, 8.0)
+
+    rows, errors = [], {}
+    for obsid in obsids:
+        evt_dir = os.path.join(obs_db_path, obsid, "event_l2")
+        file_list = sorted(glob.glob(os.path.join(evt_dir, f"ixpe{obsid}_det[123]_evt2_v[0-9][0-9]_rej.fits")))
+        if not file_list:
+            file_list = sorted(glob.glob(os.path.join(evt_dir, f"ixpe{obsid}_det[123]_evt2_v[0-9][0-9].fits")))
+        if not file_list:
+            errors[obsid] = f"No Level-2 event files found for {obsid} under {evt_dir}"
+            continue
+        try:
+            result = red_ixpe.HR(obsid, file_list, soft_band=soft, hard_band=hard, bkg=bkg)
+        except (Exception, SystemExit) as exc:
+            errors[obsid] = str(exc)
+            continue
+        rows.append({
+            "obsid": obsid,
+            "soft_rate": result["soft_rate"], "soft_err": result["soft_err"],
+            "hard_rate": result["hard_rate"], "hard_err": result["hard_err"],
+            "HR": result["HR"], "HR_err": result["HR_err"],
+            "_dus_used": result["dus_used"],
+        })
+
+    if not rows:
+        return {"exit_code": 1, "stdout": "",
+                "stderr": f"No ObsID produced a hardness ratio; errors={errors}"}
+
+    csv_path = os.path.join(obs_db_path, "bhxrb_hardness_ratios.csv")
+    fieldnames = ["obsid", "soft_rate", "soft_err", "hard_rate", "hard_err", "HR", "HR_err"]
+    with open(csv_path, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({k: row[k] for k in fieldnames})
+
+    for row in rows:
+        neutral.advance(obs_db_path, "ixpe", row["obsid"], level=3, products=[{
+            "kind": "hardness_ratio",
+            "path": os.path.relpath(csv_path, obs_db_path),
+            "produced_by": "xspec_utils.red_ixpe.HR",
+            "params": {"soft_band": list(soft), "hard_band": list(hard), "bkg": bkg,
+                       "dus_used": row["_dus_used"], "HR": row["HR"], "HR_err": row["HR_err"]},
+        }])
+
+    return {
+        "csv_path": csv_path,
+        "rows": [{k: v for k, v in row.items() if k != "_dus_used"} for row in rows],
+        "errors": errors,
+        "stdout": (f"ixpe_HR: {len(rows)}/{len(obsids)} ObsID(s) -> {csv_path} "
+                   f"({len(errors)} error(s))"),
         "exit_code": 0,
     }

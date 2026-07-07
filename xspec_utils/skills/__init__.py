@@ -23,6 +23,9 @@ Workflow (all steps share the persistent XSPEC session):
      figures from an ixpe_pa_pd_stability catalog (no XSPEC/ixpeobssim required)
   9. ixpe_reduce_pha — reuse or reduce per-DU IXPE PHA1 (Stokes I) src+bkg
      spectra for one local ObsID, the input HR() and load_data need
+  10. ixpe_HR — net Stokes-I hardness ratio HR=(H-S)/(H+S) survey across local
+      IXPE ObsIDs, read directly from each ObsID's existing per-DU PHA1
+      products (no XSPEC AllData loading -- pure PHA1/RMF FITS reads)
 """
 
 from __future__ import annotations
@@ -663,6 +666,98 @@ TOOL_MANIFEST: dict = {
                 },
             },
             "required": ["obs_db_path", "obsids", "catalog_csv"],
+        },
+    },
+
+    # ── Net Stokes-I hardness ratio survey (fix + surface) ─────────────────
+    "research_toolkit.xspec_utils.ixpe_HR": {
+        "module": "xspec_utils.skills.session",
+        "fn": "ixpe_HR",
+        "description": (
+            "Net Stokes-I hardness ratio HR=(H-S)/(H+S) for a survey of local IXPE "
+            "ObsIDs, read directly from each ObsID's existing per-DU PHA1 (Stokes I) "
+            "src(+bkg) products -- the SAME PHA1 geometry ixpe_reduce_pha produces and "
+            "that feeds ixpe_pcube_timeseg's PD, so PD and HR share identical "
+            "extraction regions. This never re-reduces PHA -- run ixpe_reduce_pha "
+            "first for any ObsID missing its PHA1 products. "
+            "Fixes three defects in the prior red_ixpe.HR: (1) DU3 was silently "
+            "dropped from the summed rate by an off-by-one loop bound over the loaded "
+            "XSPEC spectra -- this version attempts DU1/DU2/DU3 independently via "
+            "pha()'s existing file locators, sums net rate over every DU actually "
+            "present (never silently dropping a present DU -- a present DU whose PHA1 "
+            "is missing on disk is reported as this ObsID's error instead), and drops "
+            "only a genuinely-missing DU (IXPE can fly with a DU off) without raising; "
+            "(2) HR was H/S -- now the community-normalized (H-S)/(H+S), bounded "
+            "[-1,+1]; (3) the returned error came from misreading XSPEC's "
+            "Spectrum.rate tuple as (rate, variance) when it is actually (total, "
+            "background, net, net_error) -- now a closed-form first-order Gaussian "
+            "propagation sigma_HR=(2/(H+S)^2)*sqrt(S^2*sigma_H^2+H^2*sigma_S^2), with "
+            "each band's net rate and error read straight from the PHA RATE/STAT_ERR "
+            "columns (summed over in-band channels and over contributing DUs) -- no "
+            "XSPEC AllData loading at all. soft_band/hard_band channels are resolved "
+            "per PHA file from its own RESPFILE RMF EBOUNDS -- never a hardcoded "
+            "channel grid -- so any band works, not just the survey's default 2-4/"
+            "4-8 keV; when a PHA1's RESPFILE predates a reduction-environment "
+            "migration and no longer resolves on disk (the real state of most "
+            "already-reduced Cyg X-1 IXPE PHA1 products), the same DU's installed "
+            "CALDB RMF is used instead -- the identical EBOUNDS grid, since it is a "
+            "fixed instrumental characteristic shared across every IRF date/DU. "
+            "bkg=True subtracts each DU's background PHA1 scaled by "
+            "(src_BACKSCAL/bkg_BACKSCAL) before summing; bkg=False (default, right "
+            "for source-dominated bright BH-XRBs) uses the source PHA1 alone and "
+            "never reads the background file. An ObsID with no local Level-2 event "
+            "files, or that red_ixpe.HR raises on, is recorded in the returned "
+            "'errors' dict and excluded from the CSV -- never a dummy row, "
+            "never a crash of the rest of the survey. Writes bhxrb_hardness_ratios.csv "
+            "(columns obsid, soft_rate, soft_err, hard_rate, hard_err, HR, HR_err) at "
+            "<obs_db_path>/bhxrb_hardness_ratios.csv (overwriting any previous run), "
+            "and records one 'hardness_ratio' product per successful ObsID in the "
+            "mission catalog at level 3 via obsdb_catalog.neutral.advance, with "
+            "'params' carrying the real soft_band/hard_band/bkg/dus_used used for "
+            "that ObsID. Returns 'csv_path', 'rows' (the successful per-obsid rows), "
+            "'errors' (obsid -> message), 'stdout', 'exit_code' (1 with 'stderr' only "
+            "if EVERY ObsID failed -- nothing written or recorded in that case; 0 "
+            "otherwise, with per-ObsID failures surfaced in 'errors')."
+        ),
+        "args_schema": {
+            "type": "object",
+            "properties": {
+                "obs_db_path": {
+                    "type": "string",
+                    "description": (
+                        "The IXPE mission's obs-db directory (e.g. "
+                        "'/data/fzhou/XSPEC/Cyg_X-1/IXPE'). Event files are expected "
+                        "at <obs_db_path>/<obsid>/event_l2/; bhxrb_hardness_ratios.csv "
+                        "is written at <obs_db_path>/."
+                    ),
+                },
+                "obsids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "9-digit IXPE Observation IDs to include in the survey.",
+                },
+                "soft_band": {
+                    "type": "array",
+                    "items": {"type": "number"},
+                    "description": "[lo, hi] soft-band energy edges in keV. Default [2.0, 4.0].",
+                },
+                "hard_band": {
+                    "type": "array",
+                    "items": {"type": "number"},
+                    "description": "[lo, hi] hard-band energy edges in keV. Default [4.0, 8.0].",
+                },
+                "bkg": {
+                    "type": "boolean",
+                    "description": (
+                        "Subtract each DU's background PHA1 (scaled by "
+                        "src_BACKSCAL/bkg_BACKSCAL) before summing band rates. Default "
+                        "false, appropriate for source-dominated bright BH-XRBs; set "
+                        "true only where background is a non-negligible aperture "
+                        "fraction."
+                    ),
+                },
+            },
+            "required": ["obs_db_path", "obsids"],
         },
     },
 }
