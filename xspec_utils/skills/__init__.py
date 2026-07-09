@@ -38,6 +38,8 @@ Workflow (all steps share the persistent XSPEC session):
       ObsID, or a native multi-ObsID combination (one xpselect/xpbin call
       across every listed ObsID's Level-2 files), background-subtracted,
       per caller-supplied energy bin edges
+  14. ixpe_pcube_plot — PD(E)/PA(E) and Q-U plane companion figure for an
+      ixpe_pcube CSV (no XSPEC/ixpeobssim required)
 """
 
 from __future__ import annotations
@@ -1066,6 +1068,58 @@ TOOL_MANIFEST: dict = {
                 },
             },
             "required": ["obs_db_path", "survey_csv"],
+        },
+    },
+
+    # ── Energy-resolved IXPE polarimetry figures (companion plotter) ───────
+    "research_toolkit.xspec_utils.ixpe_pcube_plot": {
+        "module": "xspec_utils.lib.ixpe_pcube_plot",
+        "fn": "ixpe_pcube_plot",
+        "description": (
+            "Renders the PD(E)/PA(E) and Q-U-plane reviewer figure for an ixpe_pcube "
+            "CSV -- run ixpe_pcube first to get csv_path (Krawczynski+2022 Fig. S5 "
+            "style). Pure matplotlib (Agg backend); imports no XSPEC/ixpeobssim, so it "
+            "runs fast and needs no science stack. Writes exactly ONE PNG with three "
+            "panels: PD vs band-centre energy (top left), PA vs band-centre energy "
+            "(bottom left, sharing the energy axis), and QN vs UN -- the normalized "
+            "Stokes/Q-U plane (right, color-coded by band-centre energy) -- each with "
+            "1-sigma error bars read straight from csv_path's own columns (PD, PD_err, "
+            "PA, PA_err, QN, QN_err, UN, UN_err are plotted exactly as ixpe_pcube wrote "
+            "them -- dimensionless fractions for PD/QN/UN, degrees for PA -- never "
+            "recomputed). A single-band CSV still renders (one marker; no line to "
+            "connect). A band with any non-finite value in the plotted columns is "
+            "skipped -- never drawn as zero. Raises (no PNG written) if csv_path does "
+            "not exist, is missing the ixpe_pcube provenance header, carries zero band "
+            "rows, or every band is skipped for non-finite values. Returns 'figures' "
+            "(one FigureRef dict), 'plotted' (the exact E_LO/E_HI/E_ctr/PD/PD_err/PA/"
+            "PA_err/QN/QN_err/UN/UN_err arrays drawn, plus n_bands/n_skipped -- for "
+            "differential verification against csv_path), 'stdout', 'exit_code' "
+            "(always 0 -- failures raise instead of degrading to an empty plot)."
+        ),
+        "args_schema": {
+            "type": "object",
+            "properties": {
+                "csv_path": {
+                    "type": "string",
+                    "description": (
+                        "Path to the ixpe_pcube_<obsid(s)>.csv written by ixpe_pcube "
+                        "(one row per energy band, with the '# ixpe_pcube provenance: "
+                        "...' header line)."
+                    ),
+                },
+                "save_path": {
+                    "type": "string",
+                    "description": "Full output PNG path. Auto-generated timestamped file if omitted.",
+                },
+                "title": {
+                    "type": "string",
+                    "description": (
+                        "Figure suptitle. Defaults to the CSV provenance's obsids "
+                        "joined by '+'."
+                    ),
+                },
+            },
+            "required": ["csv_path"],
         },
     },
 }
