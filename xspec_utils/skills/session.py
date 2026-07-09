@@ -473,6 +473,138 @@ def ixpe_reduce_pha(
     }
 
 
+def ixpe_pcube(
+    obs_db_path: str,
+    obs,
+    ra: float,
+    dec: float,
+    ebinning: list | None = None,
+    src_rad: float = 1.0,
+    bkg_inner_rad: float = 3.0,
+    bkg_outer_rad: float = 5.0,
+    irf_date: str | None = None,
+) -> dict:
+    """Energy-resolved IXPE PCUBE polarimetry for one ObsID, or a native
+    multi-ObsID combination, background-subtracted.
+
+    Resolves the mission's full Level-2 event file list via
+    ``red_ixpe.get_all_file_list(obs_db_path)``, then calls ``red_ixpe.pcube``
+    -- ``obs`` a single 9-digit ObsID string reduces just that observation;
+    ``obs`` a list of ObsID strings filters and concatenates every listed
+    ObsID's Level-2 files and passes them into ONE xpselect/xpbin PCUBE call,
+    so the returned cube is the native directly-combined reduction (raw
+    Stokes I/Q/U/COUNTS summed across every DU *and* every listed ObsID before
+    PD/PA are derived), not a post-hoc merge of separately-computed per-ObsID
+    PD/PA. ``ra``/``dec`` are required (no auto-centroid here -- unlike
+    ``ixpe_pcube_timeseg``, this tool always needs an explicit region centre,
+    especially for a multi-ObsID combination). The IRF calibration epoch is
+    auto-selected as the installed epoch nearest the midpoint across every
+    requested ObsID -- no epoch argument is AI-facing.
+
+    Reads PD, PD_err, PA, PA_err, QN, QN_err, UN, UN_err, MDP99, SIGNIF,
+    E_LO, E_HI straight off the background-subtracted source cube's
+    ``polarization()``/attribute accessors (``red_ixpe.pcube_bands`` -- never
+    hand-rolled Stokes arithmetic). PD/PD_err/QN/QN_err/UN/UN_err/MDP99 are
+    dimensionless fractions (not percent); PA/PA_err are degrees.
+
+    Writes a provenance-headed CSV, one row per energy band (band_id, E_LO,
+    E_HI, PD, PD_err, PA, PA_err, QN, QN_err, UN, UN_err, MDP99, SIGNIF) --
+    there is no separate "integrated" row (unlike ``ixpe_pcube_timeseg``'s
+    ``segment_id=-1``); a single-edge-pair ``ebinning`` (e.g. ``[2, 8]``)
+    naturally yields exactly one row spanning the full requested band. A
+    single ObsID's CSV is written to
+    ``<obs_db_path>/<obsid>/ixpe_pcube_<obsid>.csv``; a combined request's CSV
+    is written to ``<obs_db_path>/ixpe_pcube_<obsid1>_<obsid2>_....csv`` (no
+    single ObsID directory owns a combined product, mirroring
+    ``bhxrb_hardness_ratios.csv``'s placement at the mission root). Records
+    one ``kind='pcube'`` product per contributing ObsID via
+    ``obsdb_catalog.neutral.advance`` (level 3), all pointing at the same CSV
+    for a combined request.
+
+    Parameters
+    ----------
+    obs_db_path : str
+        The IXPE mission's obs-db directory (e.g.
+        '/data/fzhou/XSPEC/Cyg_X-1/IXPE'). Passed directly to
+        ``red_ixpe.get_all_file_list``.
+    obs : str or list[str]
+        A single 9-digit IXPE ObsID, or a list of such ObsIDs to natively
+        combine.
+    ra, dec : float
+        Source position in decimal degrees, shared across every listed ObsID.
+    ebinning : list[float] or None
+        Energy bin edges in keV, ebinalg='LIST'. Default [2, 3, 4, 6, 8]
+        (4 bands). Must carry >= 2 edges; a 2-edge list yields one broadband
+        row.
+    src_rad, bkg_inner_rad, bkg_outer_rad : float
+        Source region radius / background annulus radii, in arcminutes.
+        Defaults 1.0 / 3.0 / 5.0.
+
+    Returns
+    -------
+    dict with 'bands' (list of per-band dicts, one per energy bin),
+    'provenance' (obsids, ebinning, src_rad, bkg_inner_rad, bkg_outer_rad, ra,
+    dec, irf_date, combined), 'csv_path', 'stdout', 'exit_code' (1 with
+    'stderr' on failure -- e.g. a requested ObsID has no local event files, is
+    missing a DU, or ebinning has fewer than 2 edges -- nothing is written or
+    recorded on failure).
+    """
+    obs_list = [obs] if isinstance(obs, str) else list(obs)
+    if not obs_list:
+        return {"exit_code": 1, "stdout": "",
+                "stderr": "obs resolved to an empty list of ObsIDs"}
+
+    _ebinning = [2.0, 3.0, 4.0, 6.0, 8.0] if ebinning is None else list(ebinning)
+
+    try:
+        file_list = red_ixpe.get_all_file_list(obs_db_path)
+    except (Exception, SystemExit) as exc:
+        return {"exit_code": 1, "stdout": "", "stderr": str(exc)}
+
+    try:
+        src_pcube, _bkg_pcube, resolved_irf_date = red_ixpe.pcube(
+            obs_list[0] if len(obs_list) == 1 else obs_list, file_list,
+            ebinning=_ebinning, src_rad=src_rad, bkg_inner_rad=bkg_inner_rad,
+            bkg_outer_rad=bkg_outer_rad, ra=ra, dec=dec, irf_date=irf_date,
+        )
+    except (Exception, SystemExit) as exc:
+        return {"exit_code": 1, "stdout": "", "stderr": str(exc)}
+
+    bands = red_ixpe.pcube_bands(src_pcube)
+    combined = len(obs_list) > 1
+    provenance = {
+        "obsids": sorted(obs_list), "ebinning": _ebinning, "src_rad": src_rad,
+        "bkg_inner_rad": bkg_inner_rad, "bkg_outer_rad": bkg_outer_rad,
+        "ra": ra, "dec": dec, "irf_date": resolved_irf_date, "combined": combined,
+    }
+
+    if combined:
+        csv_path = os.path.join(obs_db_path, f"ixpe_pcube_{'_'.join(sorted(obs_list))}.csv")
+    else:
+        csv_dir = os.path.join(obs_db_path, obs_list[0])
+        os.makedirs(csv_dir, exist_ok=True)
+        csv_path = os.path.join(csv_dir, f"ixpe_pcube_{obs_list[0]}.csv")
+
+    red_ixpe.write_pcube_csv(csv_path, provenance, bands)
+
+    for obsid in obs_list:
+        neutral.advance(obs_db_path, "ixpe", obsid, level=3, products=[{
+            "kind": "pcube",
+            "path": os.path.relpath(csv_path, obs_db_path),
+            "produced_by": "xspec_utils.red_ixpe.pcube",
+            "params": dict(provenance),
+        }])
+
+    return {
+        "bands": bands,
+        "provenance": provenance,
+        "csv_path": csv_path,
+        "stdout": (f"ixpe_pcube: {len(bands)} band(s) for "
+                   f"{'+'.join(sorted(obs_list))} -> {csv_path}"),
+        "exit_code": 0,
+    }
+
+
 def ixpe_HR(
     obs_db_path: str,
     obsids: list,

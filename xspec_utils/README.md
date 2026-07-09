@@ -9,6 +9,7 @@ A Python/Bash toolkit for joint spectro-polarimetric analysis of X-ray binary da
 - **Unified data loader** that assigns XSPEC data groups across instruments in a single call (`xspec_help.load_data`), extensible to new instruments
 - **Stokes I/Q/U spectral extraction** for IXPE polarization cubes and PHA spectra
 - **Time-resolved IXPE polarimetry** (`red_ixpe.pcube_timeseg`) for intra-observation PD/PA/Stokes/MDP99 stability, DU1/2/3 merged, exposed as the `ixpe_pcube_timeseg` AI tool
+- **Energy-resolved / multi-ObsID-combined IXPE polarimetry** (`red_ixpe.pcube`, extended): a caller-supplied energy `ebinning` per band, and `obs` as either one ObsID or a list of ObsIDs natively combined into a single `xpselect`/`xpbin PCUBE` call (raw Stokes I/Q/U/COUNTS summed across every DU *and* ObsID, not a post-hoc PD/PA merge) — exposed as the `ixpe_pcube` AI tool
 - **Per-DU IXPE PHA1 reduction, reuse-or-reduce** (`red_ixpe.reduce_pha`): reuses an ObsID's existing per-DU Stokes-I PHA1 src+bkg products when already on disk, otherwise centroids the source position from the Level-2 event file via `find_src.run_extraction` (writing DS9 `src.reg`/`bkg.reg`) and runs `red_ixpe.pha`; exposed as the `ixpe_reduce_pha` AI tool -- the input `red_ixpe.HR` (hardness ratio) and `xspec_help.load_data` need, kept as its own tool rather than folded into an HR tool since HR reads PHA
 - **Net Stokes-I hardness ratio survey** (`red_ixpe.HR`): community-normalized `HR=(H-S)/(H+S)` read directly from each ObsID's existing per-DU PHA1 products (no XSPEC `AllData` loading), attempting DU1/DU2/DU3 independently so a genuinely-absent DU is dropped gracefully while a present-but-unreduced DU is never silently skipped; closed-form Gaussian error propagation from PHA `RATE`/`STAT_ERR`; soft/hard bands resolved per PHA from its own RMF EBOUNDS (falling back to an installed CALDB RMF for the same DU when a PHA's `RESPFILE` predates an environment migration); exposed as the `ixpe_HR` AI tool, which surveys a list of ObsIDs and writes `bhxrb_hardness_ratios.csv`
 - **PA/PD constancy analysis** (`pa_pd_stability.pa_pd_stability`) on an existing `pcube_timeseg` CSV: weighted chi-squared constancy tests (PD/PA/QI/UI), the authoritative 2D Stokes variability test, moment-estimator intrinsic scatter, peak-to-peak ranges, structure functions, and cross-source Spearman correlations — pure numpy/scipy, no XSPEC/ixpeobssim, exposed as the `ixpe_pa_pd_stability` AI tool
@@ -448,11 +449,11 @@ ixpeobssim has no concept of IRF validity dates (its own `irf/caldb.py`: *"we do
 
 #### `red_ixpe.pcube(obs, file_list, ...)`
 
-Extracts an IXPE polarization cube (PCUBE) for one observation, background-subtracts it, and returns both.
+Extracts an IXPE polarization cube (PCUBE) for one observation, **or a native multi-ObsID combination**, background-subtracts it, and returns both plus the `irf_date` used.
 
 ```python
 def pcube(
-    obs: str,
+    obs: str | list[str],
     file_list: list[str],
     ebinning: list[float] | None = None,
     src_rad: float | None = None,
@@ -464,12 +465,56 @@ def pcube(
     changes: bool = True,
     overwrite: bool = True,
     chatter: bool = False,
-) -> tuple[xBinnedPolarizationCube, xBinnedPolarizationCube]
+) -> tuple[xBinnedPolarizationCube, xBinnedPolarizationCube, str | None]
 ```
 
-When `changes=False` only `obs` and `file_list` are required; existing `_src_pcube` / `_bkg_pcube` FITS files on disk are read directly. When `changes=True` the spatial parameters (`ebinning`, `src_rad`, `bkg_inner_rad`, `bkg_outer_rad`, `ra`, `dec`) are required and the full `ixpeobssim` pipeline (`xpselect` → `xpbin PCUBE`) is re-run; `irf_date` is auto-selected when `None` (see **IRF calibration epoch** above). Background scaling is applied as `bkg_pcube *= src_pcube.backscal() / bkg_pcube.backscal()` before subtraction.
+`obs` is a single 9-digit ObsID, or a **list** of ObsIDs to natively combine: every listed ObsID's Level-2 files are filtered from `file_list` (DU-validated per ObsID via `_validate_du_files` -- each must resolve to exactly one file per DU1/DU2/DU3), concatenated, and passed into **one** `xpselect`/`xpbin PCUBE` call, so the returned cube sums raw Stokes I/Q/U/COUNTS across every DU *and* every listed ObsID before PD/PA are derived -- a native directly-combined reduction, not a post-hoc merge of separately-computed per-ObsID PD/PA (this falls out of `xBinnedPolarizationCube.from_file_list` itself: it `__iadd__`s every file `xpbin` returns, regardless of which DU/ObsID produced it).
 
-**Returns** `(src_pcube, bkg_pcube)` as `xBinnedPolarizationCube` objects.
+When `changes=False` only `obs` and `file_list` are required (and `obs` must be a single ObsID -- reuse of on-disk products is not defined for a combined multi-ObsID request); existing `_src_pcube` / `_bkg_pcube` FITS files on disk are read directly. When `changes=True` the spatial parameters (`ebinning`, `src_rad`, `bkg_inner_rad`, `bkg_outer_rad`, `ra`, `dec`) are required, `ebinning` must carry >= 2 edges, and the full `ixpeobssim` pipeline (`xpselect` → `xpbin PCUBE`) is re-run; `irf_date` is auto-selected when `None` -- the midpoint of the earliest start to the latest stop across every listed ObsID (see **IRF calibration epoch** above; for a single ObsID this is unchanged). Background scaling is applied as `bkg_pcube *= src_pcube.backscal() / bkg_pcube.backscal()` before subtraction.
+
+**Returns** `(src_pcube, bkg_pcube, irf_date)` -- the last element is the epoch actually used (resolved when `changes=True`; whatever was passed, possibly `None`, when `changes=False`).
+
+**`red_ixpe.pcube_bands(spc)`** reads the per-energy-band PD/PA/Stokes/MDP99/SIGNIF fields off a PCUBE (one dict per bin in `spc`'s own `ENERG_LO`/`ENERG_HI` grid) via `polarization()` and direct attribute access -- never hand-rolled Stokes arithmetic. `PD`, `PD_err`, `QN`, `QN_err`, `UN`, `UN_err`, `MDP99` are dimensionless fractions (the units `xBinnedPolarizationCube` itself stores them in, not percent); `PA`, `PA_err` are degrees.
+
+**`red_ixpe.write_pcube_csv`/`read_pcube_csv`** write/read a provenance-headed CSV (`# ixpe_pcube provenance: {...}` first line, mirroring `pcube_timeseg`'s convention), one row per energy band. There is no separate "integrated" sentinel row (unlike `pcube_timeseg`'s `segment_id=-1`): a 2-edge `ebinning` naturally yields exactly one row spanning the full requested band.
+
+---
+
+#### `_get_obs_file_list` matches by observation directory, not substring
+
+`_get_obs_file_list(obs, file_list)` (used internally by `pcube`/`pha`/`reduce_pha`/`HR`/`pcube_timeseg`) filters `file_list` by each file's own observation directory (the parent of its `event_l2/`, i.e. `.../<obs>/event_l2/<file>` -- the layout `get_all_file_list` itself builds), not a raw substring test. This matters once `file_list` spans more than one ObsID's directory (as `get_all_file_list`'s mission-wide file_list does, e.g. for `ixpe_pcube`'s combined-ObsID case): a substring filter for `obs='01002901'` also matched `01002901_picorr`'s files (a differently-processed variant stored under its own suffixed directory, whose filenames still literally embed the same 9-digit ObsID), which then read as a spurious "two files for the same DU" ambiguity and made `_validate_du_files` raise on a perfectly good request. Requesting `obs='01002901_picorr'` explicitly still resolves to that variant's own files, unaffected.
+
+---
+
+#### `red_ixpe.pcube`/`ixpe_pcube` -- energy-resolved and multi-ObsID-combined polarimetry
+
+The `ixpe_pcube` AI tool (`skills/session.py`) surfaces `red_ixpe.pcube` for **energy-resolved** polarimetry (a caller-supplied `ebinning` list, default `[2, 3, 4, 6, 8]` keV -- 4 bands, the Krawczynski+2022 Table S2 grid) of one local IXPE ObsID, or a **native multi-ObsID combination**, e.g. reproducing Krawczynski+2022's Cyg X-1 Fig. S5/Table S2 and its combined May (`01002901`) + June (`01250101`) cube.
+
+```python
+def ixpe_pcube(
+    obs_db_path: str,
+    obs: str | list,
+    ra: float,
+    dec: float,
+    ebinning: list | None = None,
+    src_rad: float = 1.0,
+    bkg_inner_rad: float = 3.0,
+    bkg_outer_rad: float = 5.0,
+    irf_date: str | None = None,
+) -> dict
+```
+
+Resolves the mission's full Level-2 event file list via `red_ixpe.get_all_file_list(obs_db_path)`, then calls `red_ixpe.pcube` (`obs` a string reduces just that ObsID; `obs` a list combines every listed ObsID's files into one `xpselect`/`xpbin` call, per `pcube`'s own contract above). `ra`/`dec` are **required** -- unlike `ixpe_pcube_timeseg`, this tool never auto-centroids, since a multi-ObsID combination especially needs one explicit, shared region centre. The IRF epoch is auto-selected (not AI-facing) as the installed epoch nearest the midpoint across every requested ObsID.
+
+Reads `PD`, `PD_err`, `PA`, `PA_err`, `QN`, `QN_err`, `UN`, `UN_err`, `MDP99`, `SIGNIF`, `E_LO`, `E_HI` per band via `red_ixpe.pcube_bands` on the background-subtracted source cube. `PD`/`PD_err`/`QN`/`QN_err`/`UN`/`UN_err`/`MDP99` are dimensionless fractions (not percent, unlike `ixpe_pcube_timeseg`'s `PD_pct`/`MDP99`); `PA`/`PA_err` are degrees.
+
+**Raises** (surfaced by the wrapper as `exit_code=1`/`stderr`, nothing written or recorded) if a requested ObsID has no local Level-2 event files, is missing DU1/DU2/DU3 (or carries more than one file for a DU), or `ebinning` has fewer than 2 edges.
+
+**Writes** a provenance-headed CSV, one row per energy band -- a single ObsID's CSV at `<obs_db_path>/<obsid>/ixpe_pcube_<obsid>.csv`; a combined request's CSV at `<obs_db_path>/ixpe_pcube_<obsid1>_<obsid2>_....csv` (mission root -- no single ObsID directory owns a combined product, mirroring `bhxrb_hardness_ratios.csv`'s placement). Records one `kind='pcube'` product per contributing ObsID via `obsdb_catalog.neutral.advance` (level 3), all pointing at the same CSV for a combined request.
+
+**Returns** a dict with `bands` (list of per-band dicts), `provenance` (`obsids`, `ebinning`, `src_rad`, `bkg_inner_rad`, `bkg_outer_rad`, `ra`, `dec`, `irf_date`, `combined`:bool), `csv_path`, `stdout`, `exit_code`.
+
+**No figures.** This is a data-only tool, per its brief; a companion plotter (mirroring `plot_iqu`/`stability_plot`) is the natural next addition.
 
 ---
 
@@ -891,6 +936,8 @@ Instrumental background rejection follows the method described in [Di Marco et a
 - NuSTAR background loading is disabled by default (`nustar_use_bkg=False`) because clean background regions are often unavailable for bright sources like Cyg X-1.
 
 ## Changelog
+
+- **2026-07-09** — Surfaced `red_ixpe.pcube` as the `ixpe_pcube` AI tool, per the Krawczynski+2022 Cyg X-1 energy-resolved-polarimetry (Fig. S5/Table S2) and native multi-ObsID-combination brief: the prior worker had only `ixpe_pcube_timeseg` (a fixed single 2-8 keV band) to mis-call for both the energy-resolved and combined-ObsID cases. Extended `pcube` itself (no other caller existed) so `obs` accepts either a single ObsID or a **list** of ObsIDs -- a list is filtered/DU-validated per ObsID via the existing `_validate_du_files`, concatenated, and passed into **one** `xpselect`/`xpbin PCUBE` call, so the returned cube is the native directly-combined reduction (raw Stokes I/Q/U/COUNTS summed across every DU *and* ObsID before PD/PA are derived), never an inverse-variance approximation built from separately-computed per-ObsID PD/PA -- this falls out for free from `xBinnedPolarizationCube.from_file_list`'s own `__iadd__` reduction over whatever files `xpbin` returns. `pcube` also gained an `ebinning`-length guard (`>= 2` edges) and now returns the `irf_date` actually used (`_resolve_irf_date` extended to average the earliest-start/latest-stop MJD span across every listed ObsID, reducing to the prior single-ObsID behaviour unchanged). Added `pcube_bands` (per-band PD/PA/Stokes/MDP99/SIGNIF via `polarization()`/attribute access -- never hand-rolled Stokes arithmetic) and `write_pcube_csv`/`read_pcube_csv` (a provenance-headed CSV, one row per band, no separate "integrated" sentinel row -- a 2-edge `ebinning` naturally yields that single broadband row instead). While building the wrapper (which the brief specifies must resolve `file_list` via `get_all_file_list(obs_db_path)` rather than a narrow per-ObsID glob), found and fixed a latent `_get_obs_file_list` defect this exposed: its raw substring match on the mission-wide file list collided plain `01002901` with `01002901_picorr` (a differently-processed variant whose filenames still embed the same 9-digit ObsID), making `_validate_du_files` see two files per DU and raise on a perfectly good request -- `_get_obs_file_list` now matches by each file's own observation directory instead. `ixpe_pcube` (`skills/session.py`) requires `ra`/`dec` explicitly (no auto-centroid, unlike `ixpe_pcube_timeseg` -- a combined request especially needs one shared region centre), auto-selects the IRF epoch (not AI-facing), returns `PD`/`PD_err`/`QN`/`QN_err`/`UN`/`UN_err`/`MDP99` as dimensionless fractions (not percent, documented explicitly since this differs from `ixpe_pcube_timeseg`'s `PD_pct`/`MDP99` convention) and `PA`/`PA_err` in degrees, writes a single ObsID's CSV under `<obs_db_path>/<obsid>/` and a combined request's CSV at the mission root (mirroring `bhxrb_hardness_ratios.csv`'s placement), and records one `kind='pcube'` product per contributing ObsID via `obsdb_catalog.neutral.advance` (level 3). Data-only tool, no figures, per the brief. `tool_config.yaml` gained a `call_timeout_s` entry (1800s, above `ixpe_reduce_pha`'s single-ObsID 900s, since a combined request's single `xpselect`/`xpbin` pair scales with total combined event volume). Validated on the real, already-local Cyg X-1 IXPE ObsIDs `01002901` (May 2022) and `01250101` (June 2022) -- the brief's own example combination: a capability test confirms the combined cube's raw per-DU-per-ObsID FITS products (independently read straight off disk, bypassing `pcube_bands`/`xBinnedPolarizationCube`) sum to the combined total, proving the merge used both ObsIDs' real events; a differential test recomputes PD/PA from the tool's own returned QN/UN (`PD=sqrt(QN^2+UN^2)`, `PA=0.5*atan2(UN,QN)`) against the tool's separately-returned PD/PA; a reproducibility test confirms two independent single-ObsID calls agree on every band's PD/PA within tolerance; a dedicated regression test confirms the `_get_obs_file_list`/`01002901_picorr` fix directly against the real, unmodified mission directory (read-only).
 
 - **2026-07-07** — Added `bhxrb_pd_hr_survey.pd_hr_survey_plot` and the `bhxrb_pd_hr_survey_plot` AI tool: the five prescription figures the PD-hardness survey brief calls for (`pd_vs_hr_combined`, `pd_vs_hr_per_source`, `pd_distribution_comparison`, `hr_detection_bias`, `feasibility_mdp99_exposure`), consuming `bhxrb_pd_hardness_survey.csv` (written by `pd_hr_survey`, added earlier the same day) — the companion plotter that tool's own changelog entry flagged as the natural next chain link, following the established `pa_pd_stability`/`stability_plot` data/plot split exactly: pure matplotlib (Agg backend), no `xspec`/`ixpeobssim` import, wired directly into `TOOL_MANIFEST` (never through `skills/session.py`), one `FigureRef` per file with `path`/`caption`/`mime_type`/`produced_by`/`created_at`/`sha256` matching the written bytes. Lives in the same module as `pd_hr_survey` (mirroring how `stability_plot` lives alongside `pa_pd_stability` in one file) and reuses its `_spearman`/`_ks_two_sample`/`_mann_whitney` helpers directly rather than reimplementing them. The feasibility panel needs `exposure_s`, which `survey_csv` does not carry, so it reads each usable obsid's own `pcube_timeseg_<obsid>.csv` integrated row via a new `_read_integrated_row` helper — kept independent from the existing `_read_pcube_integrated` (whose return value a regression test pins to exactly `PD_pct`/`PD_err`/`MDP99`) rather than widening that contract. `soft_state_sources`/`hard_state_sources` (the distribution-comparison grouping) and `mdp_flag_pct` (the feasibility reference line) are caller arguments, not hardcoded, matching `pd_hr_survey`'s own overridable knobs, per the brief's requirement that every survey-CSV-exposed override stay overridable in the plotter too. `survey_csv` missing, wrong-schema, or carrying zero usable rows (every row's `note` set) is a hard `exit_code=1` with no files written — mirroring `stability_plot`'s `catalog_csv`/all-obsids-unreadable contract exactly; within an otherwise-usable CSV, an empty per-panel group (no detections, no soft/hard match, no obsid with a readable `pcube_timeseg` CSV) is annotated rather than rendered as a misleading empty plot. Validated on the real, already-local four-ObsID Cyg X-1 survey CSV built by running the real `ixpe_HR` and `pd_hr_survey` chain (same fixture pattern as `test_bhxrb_pd_hr_survey.py`): capability tests confirm exactly five named, non-empty, correctly-`sha256`'d files; differential tests confirm the plotted PD/HR scatter points, the detected/non-detected HR split (cross-checked against a direct `scipy.stats.mannwhitneyu` recompute), and the MDP99/exposure feasibility points all match an independent direct CSV read — never the plotter's own helpers; a reproducibility test confirms two calls are byte-identical.
 

@@ -24,6 +24,15 @@ call_timeout_s:
   # above the 300s orchestration default on a cold CALDB cache.
   ixpe_reduce_pha: 900
 
+  # ixpe_pcube has no internal timeout knob either: one xpselect + one xpbin
+  # PCUBE pair (src, bkg) per call, same shape as ixpe_reduce_pha's pha()
+  # core but with no find_src centroiding step (ra/dec are required inputs).
+  # A multi-ObsID combined request concatenates every listed ObsID's DU
+  # event files into that same single xpselect/xpbin pair, so runtime scales
+  # with total combined event volume rather than ObsID count; set well above
+  # ixpe_reduce_pha's single-ObsID 900s to absorb a several-ObsID combination.
+  ixpe_pcube: 1800
+
 # Per-package Layer-B (pytest) budget, applied to EACH of the gate's two runs.
 # ixpe_pcube_timeseg's tests exercise several real xpselect+xpbin PCUBE
 # reductions on real, already-local IXPE Level-2 event files (01250401,

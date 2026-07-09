@@ -34,6 +34,10 @@ Workflow (all steps share the persistent XSPEC session):
   12. bhxrb_pd_hr_survey_plot — the five standard PD-hardness survey
       reviewer figures from a bhxrb_pd_hr_survey CSV (no XSPEC/ixpeobssim
       required)
+  13. ixpe_pcube — energy-resolved IXPE PCUBE polarimetry for one local
+      ObsID, or a native multi-ObsID combination (one xpselect/xpbin call
+      across every listed ObsID's Level-2 files), background-subtracted,
+      per caller-supplied energy bin edges
 """
 
 from __future__ import annotations
@@ -655,6 +659,117 @@ TOOL_MANIFEST: dict = {
                 },
             },
             "required": ["obs_db_path", "obsids", "catalog_csv"],
+        },
+    },
+
+    # ── Energy-resolved / multi-ObsID-combined IXPE polarimetry ────────────
+    "research_toolkit.xspec_utils.ixpe_pcube": {
+        "module": "xspec_utils.skills.session",
+        "fn": "ixpe_pcube",
+        "description": (
+            "Energy-resolved IXPE PCUBE polarimetry for one local ObsID, OR a native "
+            "multi-ObsID combination, background-subtracted -- e.g. reproducing "
+            "Krawczynski+2022 Cyg X-1 energy-resolved polarimetry (Fig. S5/Table S2) or "
+            "its native multi-ObsID (e.g. May 01002901 + June 01250101) combined cube. "
+            "Locates the mission's full Level-2 event file list via "
+            "red_ixpe.get_all_file_list(obs_db_path); this tool does not download data, so "
+            "check ObsID locality with a data-catalog tool first. "
+            "'obs' as a single 9-digit ObsID string reduces just that observation. 'obs' as "
+            "a LIST of ObsID strings filters and concatenates every listed ObsID's Level-2 "
+            "files and passes them into ONE xpselect/xpbin PCUBE call, so the returned cube "
+            "sums raw Stokes I/Q/U/COUNTS across every DU *and* every listed ObsID before "
+            "PD/PA are derived -- the native directly-combined reduction, NOT an inverse-"
+            "variance approximation built by merging separately-computed per-ObsID PD/PA. "
+            "'ebinning' is the caller's energy bin edges in keV (ebinalg='LIST' unchanged), "
+            "default [2,3,4,6,8] (4 bands); pass e.g. 11 equal-width edges over 2-8 keV for "
+            "a finer energy grid; a 2-edge list yields a single broadband row. 'ra'/'dec' "
+            "are REQUIRED (no auto-centroid here -- unlike ixpe_pcube_timeseg -- since a "
+            "multi-ObsID combination especially needs one explicit, shared region centre). "
+            "The IRF calibration epoch is auto-selected as the installed epoch nearest the "
+            "midpoint across every requested ObsID -- no epoch argument is accepted here. "
+            "Reads PD, PD_err, PA, PA_err, QN, QN_err, UN, UN_err, MDP99, SIGNIF, E_LO, E_HI "
+            "straight off the background-subtracted source cube's polarization()/attribute "
+            "accessors -- never hand-rolled Stokes arithmetic. PD, PD_err, QN, QN_err, UN, "
+            "UN_err, MDP99 are DIMENSIONLESS FRACTIONS (not percent, unlike "
+            "ixpe_pcube_timeseg's PD_pct/MDP99) -- the same units the cube itself stores "
+            "them in; PA, PA_err are degrees. Raises (returned as exit_code=1, nothing "
+            "written or recorded) if a requested ObsID has no local Level-2 event files, is "
+            "missing DU1/DU2/DU3 (or carries more than one file for a DU), or ebinning has "
+            "fewer than 2 edges. Writes a provenance-headed CSV, one row per energy band -- "
+            "there is no separate 'integrated' sentinel row (unlike ixpe_pcube_timeseg's "
+            "segment_id=-1); a single-edge-pair ebinning naturally yields that one broadband "
+            "row instead. A single ObsID's CSV lands at "
+            "<obs_db_path>/<obsid>/ixpe_pcube_<obsid>.csv; a combined request's CSV lands at "
+            "<obs_db_path>/ixpe_pcube_<obsid1>_<obsid2>_....csv (mission root -- no single "
+            "ObsID directory owns a combined product, mirroring bhxrb_hardness_ratios.csv's "
+            "placement). Records one kind='pcube' product per contributing ObsID via "
+            "obsdb_catalog.neutral.advance (level 3), all pointing at the same CSV for a "
+            "combined request. Returns 'bands' (list of per-band dicts), 'provenance' "
+            "(obsids, ebinning, src_rad, bkg_inner_rad, bkg_outer_rad, ra, dec, irf_date, "
+            "combined:bool), 'csv_path', 'stdout', 'exit_code'. This is a data tool -- it "
+            "writes no plot; pair it with a separate plotter tool for figures."
+        ),
+        "args_schema": {
+            "type": "object",
+            "properties": {
+                "obs_db_path": {
+                    "type": "string",
+                    "description": (
+                        "The IXPE mission's obs-db directory (e.g. "
+                        "'/data/fzhou/XSPEC/Cyg_X-1/IXPE'). Event files are expected at "
+                        "<obs_db_path>/<obsid>/event_l2/ for every requested ObsID."
+                    ),
+                },
+                "obs": {
+                    "oneOf": [
+                        {"type": "string"},
+                        {"type": "array", "items": {"type": "string"}, "minItems": 1},
+                    ],
+                    "description": (
+                        "A single 9-digit IXPE ObsID string, OR a list of ObsID strings to "
+                        "natively combine into one xpselect/xpbin PCUBE call (e.g. "
+                        "[\"01002901\", \"01250101\"]). A list of one ObsID behaves like "
+                        "passing that ObsID as a plain string."
+                    ),
+                },
+                "ra": {
+                    "type": "number",
+                    "description": (
+                        "Source RA in decimal degrees, shared across every listed ObsID. "
+                        "Required -- this tool never auto-centroids."
+                    ),
+                },
+                "dec": {
+                    "type": "number",
+                    "description": (
+                        "Source Dec in decimal degrees, shared across every listed ObsID. "
+                        "Required -- this tool never auto-centroids."
+                    ),
+                },
+                "ebinning": {
+                    "type": "array",
+                    "items": {"type": "number"},
+                    "minItems": 2,
+                    "description": (
+                        "Energy bin edges in keV, e.g. [2,3,4,6,8]. Default [2,3,4,6,8] "
+                        "(4 bands, the Krawczynski+2022 Table S2 grid). Must carry >= 2 "
+                        "edges; a 2-edge list (e.g. [2,8]) yields a single broadband row."
+                    ),
+                },
+                "src_rad": {
+                    "type": "number",
+                    "description": "Source region radius in arcminutes. Default 1.0.",
+                },
+                "bkg_inner_rad": {
+                    "type": "number",
+                    "description": "Background annulus inner radius in arcminutes. Default 3.0.",
+                },
+                "bkg_outer_rad": {
+                    "type": "number",
+                    "description": "Background annulus outer radius in arcminutes. Default 5.0.",
+                },
+            },
+            "required": ["obs_db_path", "obs", "ra", "dec"],
         },
     },
 

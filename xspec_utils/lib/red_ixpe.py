@@ -57,15 +57,28 @@ def get_all_file_list(ixpe_path: str, chatter=False) -> list[str]:
 
 def _get_obs_file_list(obs: str, file_list: list[str], chatter=False) -> list[str]:
     """
-    Filter the file list for files matching the given observation ID.
+    Filter the file list for files belonging to the given observation ID.
+
+    Matches by each file's own observation directory -- the parent of its
+    ``event_l2/`` directory, i.e. ``.../<obs>/event_l2/<file>``, the layout
+    ``get_all_file_list`` itself builds -- rather than a raw substring test.
+    A plain 9-digit ``obs`` must not also pick up a differently-processed
+    variant stored under its own suffixed directory (e.g. ``01002901_picorr``,
+    whose filenames still literally embed the same 9-digit ObsID): a
+    substring filter matches both wherever ``file_list`` spans more than one
+    ObsID's directory (as ``get_all_file_list``'s mission-wide file_list
+    does), which then reads as a spurious "two files for the same DU"
+    ambiguity. Requesting ``obs='01002901_picorr'`` explicitly still resolves
+    to that variant's own files, unaffected.
 
     obs: str
-        9-digit Observation ID, as a string.
+        9-digit Observation ID, as a string (or a special-case directory name
+        such as '01002901_picorr').
 
     file_list: list[str]
         List of file paths to filter.
     """
-    obs_file_list = [f for f in file_list if obs in f]
+    obs_file_list = [f for f in file_list if Path(f).parent.parent.name == obs]
     if len(obs_file_list) == 0:
         raise ValueError(f'No files found in file_list matching obs: {obs}')
     if chatter:
@@ -74,7 +87,7 @@ def _get_obs_file_list(obs: str, file_list: list[str], chatter=False) -> list[st
             print(f)
     return obs_file_list
 
-def pcube(obs: str,
+def pcube(obs: str | list[str],
           file_list: list[str],
           ebinning: list[float] | None=None,
           src_rad: float | None=None,
@@ -86,25 +99,36 @@ def pcube(obs: str,
           changes: bool=True,
           overwrite: bool=True,
           chatter: bool=False
-          ) -> tuple[xBinnedPolarizationCube, xBinnedPolarizationCube]:
+          ) -> tuple[xBinnedPolarizationCube, xBinnedPolarizationCube, str | None]:
     """
-    Reduce to IXPE PCUBE data for a given observation and args. returns cleaned src PCUBE, and corresponding bkg PCUBE.
-    
+    Reduce to IXPE PCUBE data for one observation, or a native multi-ObsID
+    combination, and args. Returns cleaned src PCUBE, corresponding bkg PCUBE,
+    and the irf_date actually used.
+
     When changes=False: only obs and file_list are required.
     When changes=True: ebinning, src_rad, bkg_inner_rad, bkg_outer_rad, ra, dec are required.
 
     Parameters
     ----------
-    obs: str
-        9-digit Observation ID, as a string.
+    obs: str | list[str]
+        A 9-digit Observation ID, or a list of such IDs. When a list is given,
+        every listed ObsID's Level-2 event files are filtered from file_list,
+        concatenated (DU-validated per ObsID via _validate_du_files), and
+        passed into ONE xpselect/xpbin PCUBE call -- the returned cube sums
+        raw Stokes I/Q/U/COUNTS across every DU *and* every listed ObsID
+        before PD/PA are derived, i.e. a native directly-combined reduction,
+        not a post-hoc merge of separately-computed per-ObsID PD/PA.
+        changes=False (reuse on-disk products) is only supported for a single
+        ObsID -- see Raises.
 
     file_list: list[str]
-        List of file paths to filter for the given observation.
+        List of file paths to filter for the given observation(s).
 
     Required if changes=True:
 
     ebinning: list[float]
-        Energy binning scheme to use for PCUBE reduction. Required if changes=True.
+        Energy bin edges (keV) for PCUBE reduction (ebinalg='LIST'), >= 2
+        edges (>= 1 band). Required if changes=True.
 
     src_rad: float
         Radius of the source region in arcmin. Required if changes=True.
@@ -124,29 +148,52 @@ def pcube(obs: str,
     irf_date: str | None
         IRF calibration epoch 'YYYYMMDD', resolving to 'ixpe:obssim{irf_date}_alpha075:v13'.
         Leave None (default) to auto-select the installed epoch nearest the observation
-        date (irf_epoch.resolve_irf_date); pass a value only to override.
+        date (irf_epoch.resolve_irf_date, midpoint of the earliest start to the latest
+        stop across every listed ObsID); pass a value only to override.
 
     Returns
     -------
-    tuple[xBinnedPolarizationCube, xBinnedPolarizationCube]
-        A tuple containing the source PCUBE and background PCUBE as xBinnedPolarizationCube objects.
-    """
+    tuple[xBinnedPolarizationCube, xBinnedPolarizationCube, str | None]
+        The source PCUBE and background PCUBE as xBinnedPolarizationCube
+        objects, and the irf_date used (resolved when changes=True; whatever
+        was passed in, possibly None, when changes=False).
 
-    # Filter files for the given observation
-    obs_file_list = _get_obs_file_list(obs, file_list)
-    if len(obs_file_list) == 0:
-        raise ValueError(f'No files found in file_list matching obs: {obs}')
+    Raises
+    ------
+    ValueError
+        obs resolves to an empty list; any requested ObsID has no matching
+        files in file_list; any requested ObsID is missing DU1/DU2/DU3 or
+        carries more than one Level-2 file for a DU; changes=True and
+        ebinning has fewer than 2 edges; or changes=False with more than one
+        ObsID requested (reuse of on-disk products is not defined for a
+        combined multi-ObsID request).
+    """
+    obs_list = [obs] if isinstance(obs, str) else list(obs)
+    if not obs_list:
+        raise ValueError('pcube: obs resolved to an empty list of ObsIDs')
+
+    # Filter (and DU-validate) files per requested ObsID, then concatenate --
+    # this is what makes the subsequent xpselect/xpbin calls below span every
+    # listed ObsID's events in one shot.
+    obs_file_list = []
+    for o in obs_list:
+        o_files = _get_obs_file_list(o, file_list, chatter=chatter)
+        o_files = _validate_du_files(o, o_files, caller='pcube')
+        obs_file_list.extend(o_files)
+    label = obs if isinstance(obs, str) else '+'.join(obs_list)
     if chatter:
-        print(f'Found {len(obs_file_list)} files for observation {obs}:')
+        print(f'Found {len(obs_file_list)} files for observation(s) {label}:')
         for f in obs_file_list:
             print(f)
 
     if changes:
-        # irf_date=None -> auto-select the installed epoch nearest the observation.
+        # irf_date=None -> auto-select the installed epoch nearest the observation(s).
         irf_date = _resolve_irf_date(obs, file_list, irf_date, chatter)
         # Validate that all required parameters are provided when changes=True
         if any(param is None for param in [ebinning, src_rad, bkg_inner_rad, bkg_outer_rad, ra, dec]):
             raise ValueError('When changes=True, all parameters (ebinning, src_rad, bkg_inner_rad, bkg_outer_rad, ra, dec) must be provided.')
+        if len(ebinning) < 2:
+            raise ValueError(f'pcube: ebinning must carry at least 2 edges (>= 1 band), got {ebinning}')
         '''
         If changes were made to input params, redo reduction
         '''
@@ -161,6 +208,9 @@ def pcube(obs: str,
                 src_pcube_file_list = pipeline.xpbin(*src_pcube_file_list, **kwargs)
                 bkg_pcube_file_list = pipeline.xpbin(*bkg_pcube_file_list, **kwargs)
     else:
+        if len(obs_list) > 1:
+            raise ValueError('pcube: changes=False (reuse existing products) is not '
+                              'supported for a combined multi-ObsID obs list.')
         '''
         Use existing reduction results
         '''
@@ -171,7 +221,7 @@ def pcube(obs: str,
             bkg_pcube_file_list.append(f"{Path(obs_file_list[i]).with_suffix('')}_bkg_pcube{Path(obs_file_list[i]).suffix}")
 
     if chatter:
-            print(f'Selected {len(src_pcube_file_list)} source files and {len(bkg_pcube_file_list)} background files for observation {obs}.')
+            print(f'Selected {len(src_pcube_file_list)} source files and {len(bkg_pcube_file_list)} background files for observation(s) {label}.')
 
     src_pcube = xBinnedPolarizationCube.from_file_list(src_pcube_file_list)
     bkg_pcube = xBinnedPolarizationCube.from_file_list(bkg_pcube_file_list)
@@ -179,7 +229,76 @@ def pcube(obs: str,
     bkg_pcube *= src_pcube.backscal() / bkg_pcube.backscal()
     src_pcube -= bkg_pcube
 
-    return src_pcube, bkg_pcube
+    return src_pcube, bkg_pcube, irf_date
+
+
+def pcube_bands(spc: xBinnedPolarizationCube) -> list[dict]:
+    """Per-energy-band PD/PA/Stokes/MDP99/SIGNIF fields from a PCUBE, one dict
+    per energy bin in spc's own grid (ENERG_LO/ENERG_HI) -- read via
+    polarization() and direct attribute access, never hand-rolled Stokes
+    arithmetic. Works for a PCUBE binned with any number of energy bins
+    (ebinalg='LIST' with >= 2 edges), including the single-bin (broadband) case.
+
+    Units: PD, PD_err, QN, QN_err, UN, UN_err, MDP99 are dimensionless
+    fractions -- the same units xBinnedPolarizationCube itself stores them in
+    (not percent). PA, PA_err are degrees (as stored). SIGNIF is dimensionless.
+    """
+    pd, pd_err, pa, pa_err = spc.polarization()
+    return [
+        {
+            'E_LO': float(spc.ENERG_LO[i]), 'E_HI': float(spc.ENERG_HI[i]),
+            'PD': float(pd[i]), 'PD_err': float(pd_err[i]),
+            'PA': float(pa[i]), 'PA_err': float(pa_err[i]),
+            'QN': float(spc.QN[i]), 'QN_err': float(spc.QN_ERR[i]),
+            'UN': float(spc.UN[i]), 'UN_err': float(spc.UN_ERR[i]),
+            'MDP99': float(spc.MDP_99[i]), 'SIGNIF': float(spc.SIGNIF[i]),
+        }
+        for i in range(len(pd))
+    ]
+
+
+_PCUBE_HEADER_PREFIX = '# ixpe_pcube provenance: '
+_PCUBE_FIELDS = ['band_id', 'E_LO', 'E_HI', 'PD', 'PD_err', 'PA', 'PA_err',
+                  'QN', 'QN_err', 'UN', 'UN_err', 'MDP99', 'SIGNIF']
+
+
+def write_pcube_csv(csv_path: str, provenance: dict, bands: list[dict]) -> None:
+    """Write one provenance-headed CSV row per energy band (pcube_bands' output).
+
+    Mirrors pcube_timeseg's provenance-comment-header convention (first line
+    '# ixpe_pcube provenance: {json}'), but writes the whole table in one shot
+    -- there is no resume/checkpoint state, since one ixpe_pcube call runs a
+    single xpselect/xpbin reduction, not a segment loop. There is no separate
+    "integrated" sentinel row (unlike pcube_timeseg's segment_id=-1): a caller
+    wanting a single broadband measurement passes a 2-edge ebinning, which
+    naturally yields exactly one row spanning the full requested range.
+    """
+    with open(csv_path, 'w', newline='') as f:
+        f.write(_PCUBE_HEADER_PREFIX + json.dumps(provenance, sort_keys=True) + '\n')
+        writer = csv.DictWriter(f, fieldnames=_PCUBE_FIELDS)
+        writer.writeheader()
+        for i, band in enumerate(bands):
+            writer.writerow({'band_id': i, **band})
+
+
+def read_pcube_csv(csv_path: str) -> tuple[dict, list[dict]]:
+    """Read a write_pcube_csv CSV back into (provenance, bands).
+
+    Raises ValueError if the provenance header is missing/unrecognised --
+    mirrors _read_existing_timeseg_csv's "unrecognised means absent" contract,
+    but raises here (there is no resume mode to silently fall back to).
+    """
+    with open(csv_path, newline='') as f:
+        header_line = f.readline()
+        if not header_line.startswith(_PCUBE_HEADER_PREFIX):
+            raise ValueError(f'{csv_path}: missing ixpe_pcube provenance header')
+        provenance = json.loads(header_line[len(_PCUBE_HEADER_PREFIX):])
+        rows = list(csv.DictReader(f))
+    bands = [{k: (int(v) if k == 'band_id' else float(v)) for k, v in r.items()}
+              for r in rows]
+    for band in bands:
+        del band['band_id']
+    return provenance, bands
 
 def pha(obs: str,
         file_list: list[str],
@@ -392,7 +511,7 @@ def get_pha_u(pha_path: str) -> str:
     name = path.name.replace("pha1", "pha1u", 1)
     return str(path.with_name(name))
 
-def _resolve_irf_date(obs: str, file_list: list[str], irf_date: str | None,
+def _resolve_irf_date(obs: str | list[str], file_list: list[str], irf_date: str | None,
                       chatter: bool = False) -> str:
     """Return ``irf_date`` when the caller pinned one, else auto-select it.
 
@@ -401,14 +520,27 @@ def _resolve_irf_date(obs: str, file_list: list[str], irf_date: str | None,
     nearest that date. Centralised here so ``pcube``/``pha``/``reduce_pha``/
     ``pcube_timeseg`` share one policy; the hardcoded ``'YYYYMMDD'`` default is
     gone (a wrong epoch silently biased a live reproduction -- see irf_epoch).
+
+    ``obs`` may be a single ObsID or a list (a native multi-ObsID ``pcube``
+    combination): the midpoint used is 0.5*(earliest start + latest stop)
+    across every listed ObsID, so one irf_date is resolved for the whole
+    combined reduction. For a single ObsID this reduces to that ObsID's own
+    midpoint, unchanged.
     """
     if irf_date is not None:
         return irf_date
-    _, _, mjd_mid = get_mjd(obs, file_list)
+    obs_list = [obs] if isinstance(obs, str) else list(obs)
+    starts, stops = [], []
+    for o in obs_list:
+        s, e, _ = get_mjd(o, file_list)
+        starts.append(s)
+        stops.append(e)
+    mjd_mid = 0.5 * (min(starts) + max(stops))
     resolved = irf_epoch.resolve_irf_date(mjd_mid)
     if chatter:
+        label = obs if isinstance(obs, str) else '+'.join(obs_list)
         print(f'irf_date auto-resolved to {resolved} '
-              f'(installed epoch nearest MJD {mjd_mid:.1f}) for {obs}')
+              f'(installed epoch nearest MJD {mjd_mid:.1f}) for {label}')
     return resolved
 
 
