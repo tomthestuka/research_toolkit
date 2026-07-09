@@ -194,8 +194,12 @@ def test_tool_manifest_exposes_class_parameters():
     assert entry["module"] == "xspec_utils.skills.session"
     assert entry["fn"] == "ixpe_reduce_pha"
     props = entry["args_schema"]["properties"]
-    for name in ("obs_db_path", "obsid", "src_rad", "bkg_inner_rad", "bkg_outer_rad", "irf_date"):
+    for name in ("obs_db_path", "obsid", "src_rad", "bkg_inner_rad", "bkg_outer_rad"):
         assert name in props, f"{name} missing from args_schema.properties"
+    # The IRF epoch is auto-selected inside the tool and is NOT an AI-facing knob
+    # (the human-half red_ixpe.reduce_pha keeps an override); the minimal interface
+    # is 'pcube -> gets them pcube'.
+    assert "irf_date" not in props
     assert entry["args_schema"]["required"] == ["obs_db_path", "obsid"]
     assert "1.0" in props["src_rad"]["description"]
     assert "3.0" in props["bkg_inner_rad"]["description"]
@@ -213,7 +217,7 @@ def test_skill_wrapper_reuse_records_catalog(tmp_path):
     _copy_event_files(obs_db_path)
     _copy_existing_pha1(obs_db_path)
 
-    result = ixpe_session.ixpe_reduce_pha(obs_db_path, OBSID, irf_date=IRF_DATE)
+    result = ixpe_session.ixpe_reduce_pha(obs_db_path, OBSID)
 
     assert result["exit_code"] == 0, result.get("stderr")
     assert result["reused"] is True
@@ -236,7 +240,7 @@ def test_skill_wrapper_fresh_reduction_records_catalog_with_derived_position(tmp
     obs_db_path = str(tmp_path)
     _copy_event_files(obs_db_path)
 
-    result = ixpe_session.ixpe_reduce_pha(obs_db_path, OBSID, irf_date=IRF_DATE)
+    result = ixpe_session.ixpe_reduce_pha(obs_db_path, OBSID)
 
     assert result["exit_code"] == 0, result.get("stderr")
     assert result["reused"] is False
@@ -251,7 +255,10 @@ def test_skill_wrapper_fresh_reduction_records_catalog_with_derived_position(tmp
     assert dus == {"DU1", "DU2", "DU3"}
     for p in pha_products:
         assert p["params"]["reused"] is False
-        assert p["params"]["irf_date"] == IRF_DATE
+        # Provenance records the AUTO-selected epoch (no irf_date passed). ObsID
+        # 01002901 is a 2022 May observation, so the installed epoch nearest its
+        # date is 20220702 (not the old hardcoded 20230702 default).
+        assert p["params"]["irf_date"] == "20220702"
 
 
 def test_skill_wrapper_missing_event_files_fails_loudly_no_record(tmp_path):

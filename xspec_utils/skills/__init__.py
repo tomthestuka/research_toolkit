@@ -330,13 +330,6 @@ TOOL_MANIFEST: dict = {
                     "type": "string",
                     "description": "9-digit IXPE Observation ID, as a string, e.g. '01250401'.",
                 },
-                "irf_date": {
-                    "type": "string",
-                    "description": (
-                        "IRF calibration date 'YYYYMMDD', resolved to "
-                        "'ixpe:obssim{irf_date}_alpha075:v13'. Default '20230702'."
-                    ),
-                },
                 "ra": {
                     "type": "number",
                     "description": (
@@ -435,7 +428,8 @@ TOOL_MANIFEST: dict = {
             "<obs_db_path>/<obsid>/ -- NOT read from FITS headers, NOT from a fixed "
             "source-coordinate table), and xpselect+xpbin PHA1 is run per DU with a "
             "circular source region (src_rad) and annular background (bkg_inner_rad- "
-            "bkg_outer_rad) centred there, at irf_date. Every PHA1 product on disk after "
+            "bkg_outer_rad) centred there, at the IRF epoch auto-selected as the installed "
+            "epoch nearest the observation date. Every PHA1 product on disk after "
             "the call (3 DUs x src/bkg) is recorded in the mission catalog at level 3 via "
             "obsdb_catalog.neutral.advance, whether reused or freshly reduced -- so a "
             "downstream HR/load_data call always has real, catalogued products to read. "
@@ -481,14 +475,6 @@ TOOL_MANIFEST: dict = {
                     "type": "number",
                     "description": (
                         "Background annulus outer radius in arcminutes. Default 5.0. "
-                        "Used only when a fresh reduction is required."
-                    ),
-                },
-                "irf_date": {
-                    "type": "string",
-                    "description": (
-                        "IRF calibration date 'YYYYMMDD', resolved to "
-                        "'ixpe:obssim{irf_date}_alpha075:v13'. Default '20230702'. "
                         "Used only when a fresh reduction is required."
                     ),
                 },

@@ -176,9 +176,12 @@ def test_tool_manifest_exposes_class_parameters():
     assert entry["fn"] == "ixpe_pcube_timeseg"
     props = entry["args_schema"]["properties"]
     for name in ("segment_duration_s", "emin_kev", "emax_kev", "src_rad", "bkg",
-                 "bkg_inner_rad", "bkg_outer_rad", "ra", "dec", "irf_date",
+                 "bkg_inner_rad", "bkg_outer_rad", "ra", "dec",
                  "min_seg_exposure_s", "resume"):
         assert name in props, f"{name} missing from args_schema.properties"
+    # The IRF epoch is auto-selected inside the tool, not an AI-facing knob (the
+    # human-half red_ixpe.pcube_timeseg keeps an override).
+    assert "irf_date" not in props
     assert entry["args_schema"]["required"] == ["obs_db_path", "obsid"]
     assert props["bkg"]["type"] == "boolean"
     assert props["segment_duration_s"]["type"] == "number"
@@ -565,7 +568,7 @@ def test_skill_wrapper_records_catalog_bounded_return_and_falls_back_to_plain_ev
     _copy_real_event_files(obs_db_path)
 
     result = ixpe_session.ixpe_pcube_timeseg(
-        obs_db_path, OBSID, irf_date=IRF_DATE, bkg=False,
+        obs_db_path, OBSID, bkg=False,
         segment_duration_s=SEGMENT_DURATION_S)
 
     assert result["exit_code"] == 0, result.get("stderr")
@@ -607,7 +610,7 @@ def test_wrapper_return_is_bounded_independent_of_segment_count(tmp_path):
     _copy_real_event_files(obs_db_path)
 
     result = ixpe_session.ixpe_pcube_timeseg(
-        obs_db_path, OBSID, irf_date=IRF_DATE, bkg=False,
+        obs_db_path, OBSID, bkg=False,
         segment_duration_s=GATE_SEGMENT_DURATION_S)
 
     assert result["exit_code"] == 0, result.get("stderr")
@@ -636,7 +639,7 @@ def test_wrapper_reinvocation_ignores_generated_products(tmp_path):
     _copy_real_event_files(obs_db_path)
 
     first = ixpe_session.ixpe_pcube_timeseg(
-        obs_db_path, OBSID, irf_date=IRF_DATE, bkg=False,
+        obs_db_path, OBSID, bkg=False,
         segment_duration_s=SEGMENT_DURATION_S)
     assert first["exit_code"] == 0, first.get("stderr")
     assert first["n_segments"] == 2
@@ -651,7 +654,7 @@ def test_wrapper_reinvocation_ignores_generated_products(tmp_path):
     )
 
     second = ixpe_session.ixpe_pcube_timeseg(
-        obs_db_path, OBSID, irf_date=IRF_DATE, bkg=False,
+        obs_db_path, OBSID, bkg=False,
         segment_duration_s=SEGMENT_DURATION_S)
     assert second["exit_code"] == 0, second.get("stderr")
     assert second["n_segments"] == 2
@@ -678,7 +681,7 @@ def test_repro_integrated_within_tol(tmp_path_factory):
         obs_db_path = str(tmp_path_factory.mktemp("pcube_timeseg_wrapper_repro"))
         _copy_real_event_files(obs_db_path)
         results.append(ixpe_session.ixpe_pcube_timeseg(
-            obs_db_path, OBSID, irf_date=IRF_DATE, bkg=False,
+            obs_db_path, OBSID, bkg=False,
             segment_duration_s=GATE_SEGMENT_DURATION_S))
 
     a, b = results

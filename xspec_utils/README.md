@@ -166,7 +166,7 @@ def load_data(
     ixpe_src_rad: float = 1.0,
     ixpe_bkg_inner_rad: float = 3.0,
     ixpe_bkg_outer_rad: float = 5.0,
-    ixpe_irf_date: str = '20230702',
+    ixpe_irf_date: str | None = None,
     ixpe_erange: tuple[float, float] = (2.0, 8.0),
     nicer_erange: tuple[float, float] = (1.0, 10.0),
     nustar_erange: tuple[float, float] = (4.0, 50.0),
@@ -188,7 +188,7 @@ def load_data(
 | `ixpe_src_rad` | `float` | `1.0` | IXPE source-region radius in arcminutes. |
 | `ixpe_bkg_inner_rad` | `float` | `3.0` | IXPE background annulus inner radius in arcminutes. |
 | `ixpe_bkg_outer_rad` | `float` | `5.0` | IXPE background annulus outer radius in arcminutes. |
-| `ixpe_irf_date` | `str` | `'20230702'` | IRF date string (`'YYYYMMDD'`) used to select the IXPE response matrix. Available IRFs live under `/grad/fzhou/.local/lib/python3.13/site-packages/ixpeobssim/caldb/ixpe/gpd/cpf/rmf/`. |
+| `ixpe_irf_date` | `str \| None` | `None` | IRF calibration epoch (`'YYYYMMDD'`) for the IXPE response. `None` auto-selects the installed epoch nearest the observation date (see **IRF calibration epoch**); pass a value only to override. Used only when `ixpe_changes=True`. |
 | `ixpe_erange` | `tuple[float, float]` | `(2.0, 8.0)` | Energy range in keV to *notice* for IXPE spectra. |
 | `nicer_erange` | `tuple[float, float]` | `(1.0, 10.0)` | Energy range in keV to *notice* for NICER spectra. |
 | `nustar_erange` | `tuple[float, float]` | `(4.0, 50.0)` | Energy range in keV to *notice* for NuSTAR spectra. |
@@ -442,6 +442,10 @@ Scans `ixpe_path` for numeric observation sub-directories and returns a flat lis
 
 ---
 
+#### IRF calibration epoch (auto-selected)
+
+ixpeobssim has no concept of IRF validity dates (its own `irf/caldb.py`: *"we don't really have a concept of validity date"*), so the reduction must choose which `obssimYYYYMMDD` calibration epoch to use. Every IXPE reduction entry (`pcube`, `pha`, `reduce_pha`, `pcube_timeseg`, and `xspec_help.load_data`) takes `irf_date` as `None` by default and delegates to `lib/irf_epoch.py`, which reads the observation's midpoint date and selects the **installed epoch nearest in time** (`irf_epoch.resolve_irf_date`) — so omitting `irf_date` yields the temporally-appropriate response and a wrong-epoch bias is not something the caller can introduce by accident. Passing an explicit `'YYYYMMDD'` overrides it. The AI-facing `skills/` tools do **not** expose `irf_date` at all — the epoch is chosen for them.
+
 #### `red_ixpe.pcube(obs, file_list, ...)`
 
 Extracts an IXPE polarization cube (PCUBE) for one observation, background-subtracts it, and returns both.
@@ -463,7 +467,7 @@ def pcube(
 ) -> tuple[xBinnedPolarizationCube, xBinnedPolarizationCube]
 ```
 
-When `changes=False` only `obs` and `file_list` are required; existing `_src_pcube` / `_bkg_pcube` FITS files on disk are read directly. When `changes=True` all spatial and IRF parameters are required and the full `ixpeobssim` pipeline (`xpselect` → `xpbin PCUBE`) is re-run. Background scaling is applied as `bkg_pcube *= src_pcube.backscal() / bkg_pcube.backscal()` before subtraction.
+When `changes=False` only `obs` and `file_list` are required; existing `_src_pcube` / `_bkg_pcube` FITS files on disk are read directly. When `changes=True` the spatial parameters (`ebinning`, `src_rad`, `bkg_inner_rad`, `bkg_outer_rad`, `ra`, `dec`) are required and the full `ixpeobssim` pipeline (`xpselect` → `xpbin PCUBE`) is re-run; `irf_date` is auto-selected when `None` (see **IRF calibration epoch** above). Background scaling is applied as `bkg_pcube *= src_pcube.backscal() / bkg_pcube.backscal()` before subtraction.
 
 **Returns** `(src_pcube, bkg_pcube)` as `xBinnedPolarizationCube` objects.
 
@@ -489,7 +493,7 @@ def pha(
 ) -> tuple[list[str], list[str]]
 ```
 
-Same `changes` toggle as `pcube`. When `changes=True`, runs `xpselect` + `xpbin PHA1` with IRF name `ixpe:obssim{irf_date}_alpha075:v13`. One source and one background PHA1 file is produced per detector unit (DU1, DU2, DU3). The Q and U files are derived from the I paths by `red_ixpe.get_pha_q` / `red_ixpe.get_pha_u`.
+Same `changes` toggle as `pcube`. When `changes=True`, runs `xpselect` + `xpbin PHA1` with IRF name `ixpe:obssim{irf_date}_alpha075:v13` (`irf_date` auto-selected when `None` — see **IRF calibration epoch** above). One source and one background PHA1 file is produced per detector unit (DU1, DU2, DU3). The Q and U files are derived from the I paths by `red_ixpe.get_pha_q` / `red_ixpe.get_pha_u`.
 
 **Returns** `(src_pha_list, bkg_pha_list)` — each a list of three paths ordered DU1, DU2, DU3.
 
@@ -506,13 +510,13 @@ def reduce_pha(
     src_rad: float = 1.0,
     bkg_inner_rad: float = 3.0,
     bkg_outer_rad: float = 5.0,
-    irf_date: str = '20230702',
+    irf_date: str | None = None,
     overwrite: bool = True,
     chatter: bool = False,
 ) -> dict
 ```
 
-Verifies exactly one Level-2 event file per DU1/DU2/DU3 (`_validate_du_files`), then checks whether the src+bkg PHA1 paths `pha(..., changes=False)` derives already exist on disk. If so, they are reused as-is: no reduction, no source centroiding, `ra`/`dec`/`src_reg`/`bkg_reg` are `None`. Otherwise the source position is centroided from the DU1 event file via `find_src.run_extraction` (writing `src.reg`/`bkg.reg` into the observation's own directory, one level above `event_l2/` -- **not** read from a FITS header, and **not** from the fixed `src_pos.SRC_COORD` table), and `pha()` is run (`xpselect` + `xpbin PHA1`) with a circular source region of radius `src_rad` and an annular background (`bkg_inner_rad`-`bkg_outer_rad`) centred there, at `irf_date`.
+Verifies exactly one Level-2 event file per DU1/DU2/DU3 (`_validate_du_files`), then checks whether the src+bkg PHA1 paths `pha(..., changes=False)` derives already exist on disk. If so, they are reused as-is: no reduction, no source centroiding, `ra`/`dec`/`src_reg`/`bkg_reg` are `None`. Otherwise the source position is centroided from the DU1 event file via `find_src.run_extraction` (writing `src.reg`/`bkg.reg` into the observation's own directory, one level above `event_l2/` -- **not** read from a FITS header, and **not** from the fixed `src_pos.SRC_COORD` table), and `pha()` is run (`xpselect` + `xpbin PHA1`) with a circular source region of radius `src_rad` and an annular background (`bkg_inner_rad`-`bkg_outer_rad`) centred there, at the auto-selected IRF epoch (or `irf_date` when given). The resolved epoch is returned under the `irf_date` key.
 
 **Returns** a dict with `src_pha`, `bkg_pha` (each a 3-element DU1/DU2/DU3 list of Stokes-I PHA1 paths), `ra`, `dec` (`None` when reused), `reused` (bool), `src_reg`, `bkg_reg` (paths when freshly reduced, `None` when reused).
 
@@ -573,7 +577,7 @@ Time-resolved PCUBE polarimetry for one observation: splits it into natural elap
 def pcube_timeseg(
     obs: str,
     file_list: list[str],
-    irf_date: str,
+    irf_date: str | None = None,
     ra: float | None = None,
     dec: float | None = None,
     emin_kev: float = 2.0,

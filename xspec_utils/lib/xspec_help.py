@@ -15,7 +15,7 @@ def load_data(
     ixpe_src_rad: float = 1.0,
     ixpe_bkg_inner_rad: float = 3.0,
     ixpe_bkg_outer_rad: float = 5.0,
-    ixpe_irf_date: str = '20230702',
+    ixpe_irf_date: str | None = None,
     ixpe_erange: tuple[float, float] = (2.0, 8.0),
     nicer_erange: tuple[float, float] = (1.0, 10.0),
     nustar_erange: tuple[float, float] = (4.0, 50.0),
@@ -69,9 +69,11 @@ def load_data(
         IXPE background annulus inner radius in arcminutes (default 3.0).
     ixpe_bkg_outer_rad : float
         IXPE background annulus outer radius in arcminutes (default 5.0).
-    ixpe_irf_date : str
-        IRF date string in ``'YYYYMMDD'`` format used to select the IXPE
-        response (default ``'20230702'``).
+    ixpe_irf_date : str or None
+        IRF calibration epoch ``'YYYYMMDD'`` used to select the IXPE response.
+        Leave None (default) to auto-select the installed epoch nearest the
+        observation date (``irf_epoch.resolve_irf_date``, via ``red_ixpe.pha``);
+        pass a value only to override. Used only when ``ixpe_changes=True``.
     ixpe_erange : tuple[float, float]
         (lo, hi) energy range in keV to *notice* for IXPE (default 2–8 keV).
     nicer_erange : tuple[float, float]

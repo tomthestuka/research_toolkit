@@ -288,7 +288,6 @@ def plot_iqu(
 def ixpe_pcube_timeseg(
     obs_db_path: str,
     obsid: str,
-    irf_date: str = "20230702",
     ra: float | None = None,
     dec: float | None = None,
     emin_kev: float = 2.0,
@@ -310,6 +309,9 @@ def ixpe_pcube_timeseg(
     each window on GTI-clipped exposure before reducing it, and checkpoints
     to CSV incrementally so a call near the sandbox time cap can resume next
     call), and records the CSV in the mission catalog at level 3.
+
+    The IRF calibration epoch is auto-selected as the installed epoch nearest
+    the observation date -- no epoch argument is needed or accepted here.
 
     The full per-segment timeseries is never returned inline -- for a long
     observation (O(100) segments) it can exceed the sandbox transport chunk
@@ -342,7 +344,7 @@ def ixpe_pcube_timeseg(
 
     try:
         result = red_ixpe.pcube_timeseg(
-            obsid, file_list, irf_date, ra=ra, dec=dec,
+            obsid, file_list, ra=ra, dec=dec,
             emin_kev=emin_kev, emax_kev=emax_kev, src_rad=src_rad, bkg=bkg,
             bkg_inner_rad=bkg_inner_rad, bkg_outer_rad=bkg_outer_rad,
             segment_duration_s=segment_duration_s, min_seg_exposure_s=min_seg_exposure_s,
@@ -391,7 +393,6 @@ def ixpe_reduce_pha(
     src_rad: float = 1.0,
     bkg_inner_rad: float = 3.0,
     bkg_outer_rad: float = 5.0,
-    irf_date: str = "20230702",
 ) -> dict:
     """Reuse or reduce per-DU IXPE PHA1 (Stokes I) spectra for one local ObsID.
 
@@ -404,7 +405,9 @@ def ixpe_reduce_pha(
     (writing ``src.reg``/``bkg.reg`` under ``<obs_db_path>/<obsid>/``), and
     ``red_ixpe.pha`` is run (``xpselect`` + ``xpbin PHA1`` per DU) with a
     circular source region (``src_rad``) and annular background
-    (``bkg_inner_rad``-``bkg_outer_rad``) at that position, using ``irf_date``.
+    (``bkg_inner_rad``-``bkg_outer_rad``) at that position. The IRF calibration
+    epoch is auto-selected as the installed epoch nearest the observation date --
+    no epoch argument is needed or accepted here.
 
     Every PHA1 product on disk after this call (3 DUs x src/bkg, Stokes I) is
     recorded in the mission catalog at level 3 via
@@ -428,7 +431,7 @@ def ixpe_reduce_pha(
     try:
         result = red_ixpe.reduce_pha(
             obsid, file_list, src_rad=src_rad, bkg_inner_rad=bkg_inner_rad,
-            bkg_outer_rad=bkg_outer_rad, irf_date=irf_date,
+            bkg_outer_rad=bkg_outer_rad,
         )
     except (Exception, SystemExit) as exc:
         return {"exit_code": 1, "stdout": "", "stderr": str(exc)}
@@ -447,7 +450,8 @@ def ixpe_reduce_pha(
             "produced_by": "xspec_utils.red_ixpe.pha",
             "params": {"du": du, "stokes": "I", "region": region,
                        "src_rad": src_rad, "bkg_inner_rad": bkg_inner_rad,
-                       "bkg_outer_rad": bkg_outer_rad, "irf_date": irf_date,
+                       "bkg_outer_rad": bkg_outer_rad,
+                       "irf_date": result.get("irf_date"),
                        "reused": result["reused"]},
         }
         for du, s, b in zip(du_labels, src_pha, bkg_pha)

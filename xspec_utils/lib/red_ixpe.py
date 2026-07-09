@@ -15,6 +15,7 @@ from ixpeobssim.binning.polarization import xBinnedPolarizationCube
 from contextlib import redirect_stdout, redirect_stderr
 
 import find_src
+import irf_epoch
 
 def get_all_file_list(ixpe_path: str, chatter=False) -> list[str]:
     """
@@ -120,9 +121,10 @@ def pcube(obs: str,
     dec: float
         Declination of the source in degrees. Required if changes=True.
 
-    irf_date: str
-        Date string for the IRF version to use, in the format 'YYYYMMDD'. Required if changes=True.
-        Avaliable IRF versions at: /grad/fzhou/.local/lib/python3.13/site-packages/ixpeobssim/caldb/ixpe/gpd/cpf/rmf/
+    irf_date: str | None
+        IRF calibration epoch 'YYYYMMDD', resolving to 'ixpe:obssim{irf_date}_alpha075:v13'.
+        Leave None (default) to auto-select the installed epoch nearest the observation
+        date (irf_epoch.resolve_irf_date); pass a value only to override.
 
     Returns
     -------
@@ -140,9 +142,11 @@ def pcube(obs: str,
             print(f)
 
     if changes:
+        # irf_date=None -> auto-select the installed epoch nearest the observation.
+        irf_date = _resolve_irf_date(obs, file_list, irf_date, chatter)
         # Validate that all required parameters are provided when changes=True
-        if any(param is None for param in [ebinning, src_rad, bkg_inner_rad, bkg_outer_rad, ra, dec, irf_date]):
-            raise ValueError('When changes=True, all parameters (ebinning, src_rad, bkg_inner_rad, bkg_outer_rad, ra, dec, irf_date) must be provided.')
+        if any(param is None for param in [ebinning, src_rad, bkg_inner_rad, bkg_outer_rad, ra, dec]):
+            raise ValueError('When changes=True, all parameters (ebinning, src_rad, bkg_inner_rad, bkg_outer_rad, ra, dec) must be provided.')
         '''
         If changes were made to input params, redo reduction
         '''
@@ -193,7 +197,8 @@ def pha(obs: str,
     Reduce to IXPE PHA data for a given observation and args. returns a list of PHA file paths.
     
     When changes=False: only obs and file_list are required.
-    When changes=True: src_rad, bkg_inner_rad, bkg_outer_rad, ra, dec, irf_date are required.
+    When changes=True: src_rad, bkg_inner_rad, bkg_outer_rad, ra, dec are required
+    (irf_date is auto-selected when None).
 
     Parameters
     ----------
@@ -220,9 +225,10 @@ def pha(obs: str,
     dec: float
         Declination of the source in degrees. Required if changes=True.
 
-    irf_date: str
-        Date string for the IRF version to use, in the format 'YYYYMMDD'. Required if changes=True.
-        Avaliable IRF versions at: /grad/fzhou/.local/lib/python3.13/site-packages/ixpeobssim/caldb/ixpe/gpd
+    irf_date: str | None
+        IRF calibration epoch 'YYYYMMDD', resolving to 'ixpe:obssim{irf_date}_alpha075:v13'.
+        Leave None (default) to auto-select the installed epoch nearest the observation
+        date (irf_epoch.resolve_irf_date); pass a value only to override.
 
     Returns
     -------
@@ -236,9 +242,11 @@ def pha(obs: str,
         raise ValueError(f'No files found in file_list matching obs: {obs}')
 
     if changes:
+        # irf_date=None -> auto-select the installed epoch nearest the observation.
+        irf_date = _resolve_irf_date(obs, file_list, irf_date, chatter)
         # Validate that all required parameters are provided when changes=True
-        if any(param is None for param in [src_rad, bkg_inner_rad, bkg_outer_rad, ra, dec, irf_date]):
-            raise ValueError('When changes=True, all parameters (src_rad, bkg_inner_rad, bkg_outer_rad, ra, dec, irf_date) must be provided.')
+        if any(param is None for param in [src_rad, bkg_inner_rad, bkg_outer_rad, ra, dec]):
+            raise ValueError('When changes=True, all parameters (src_rad, bkg_inner_rad, bkg_outer_rad, ra, dec) must be provided.')
         '''
         If changes were made to input params, redo reduction
         '''
@@ -285,7 +293,7 @@ def reduce_pha(obs: str,
                src_rad: float = 1.0,
                bkg_inner_rad: float = 3.0,
                bkg_outer_rad: float = 5.0,
-               irf_date: str = '20230702',
+               irf_date: str | None = None,
                overwrite: bool = True,
                chatter: bool = False,
                ) -> dict:
@@ -313,9 +321,11 @@ def reduce_pha(obs: str,
         Source region radius / background annulus radii, in arcminutes.
         Used only when a fresh reduction is required.
 
-    irf_date: str
-        IRF date string ('YYYYMMDD'); resolves to 'ixpe:obssim{irf_date}_alpha075:v13'.
-        Used only when a fresh reduction is required.
+    irf_date: str | None
+        IRF calibration epoch 'YYYYMMDD', resolving to 'ixpe:obssim{irf_date}_alpha075:v13'.
+        Leave None (default) to auto-select the installed epoch nearest the observation
+        date; pass a value only to override. Used only when a fresh reduction is required;
+        the resolved epoch is returned under the 'irf_date' key.
 
     overwrite: bool
         Passed through to `pha()`/`xpselect`/`xpbin` when a fresh reduction is run.
@@ -334,13 +344,15 @@ def reduce_pha(obs: str,
     """
     obs_file_list = _get_obs_file_list(obs, file_list, chatter=chatter)
     obs_file_list = _validate_du_files(obs, obs_file_list, caller='reduce_pha')
+    # irf_date=None -> auto-select the installed epoch nearest the observation.
+    irf_date = _resolve_irf_date(obs, file_list, irf_date, chatter)
 
     src_pha, bkg_pha = pha(obs, file_list, changes=False, chatter=chatter)
     if all(os.path.exists(f) for f in src_pha + bkg_pha):
         if chatter:
             print(f'reduce_pha: reusing existing PHA1 products for {obs}')
         return {'src_pha': src_pha, 'bkg_pha': bkg_pha, 'ra': None, 'dec': None,
-                'reused': True, 'src_reg': None, 'bkg_reg': None}
+                'reused': True, 'src_reg': None, 'bkg_reg': None, 'irf_date': irf_date}
 
     obs_dir = Path(obs_file_list[0]).resolve().parent.parent
     src_reg = str(obs_dir / 'src.reg')
@@ -362,7 +374,7 @@ def reduce_pha(obs: str,
     if chatter:
         print(f'reduce_pha: reduced fresh PHA1 products for {obs} at RA={ra:.6f}, Dec={dec:.6f}')
     return {'src_pha': src_pha, 'bkg_pha': bkg_pha, 'ra': ra, 'dec': dec,
-            'reused': False, 'src_reg': src_reg, 'bkg_reg': bkg_reg}
+            'reused': False, 'src_reg': src_reg, 'bkg_reg': bkg_reg, 'irf_date': irf_date}
 
 def get_pha_q(pha_path: str) -> str:
     """
@@ -379,6 +391,26 @@ def get_pha_u(pha_path: str) -> str:
     path = Path(pha_path)
     name = path.name.replace("pha1", "pha1u", 1)
     return str(path.with_name(name))
+
+def _resolve_irf_date(obs: str, file_list: list[str], irf_date: str | None,
+                      chatter: bool = False) -> str:
+    """Return ``irf_date`` when the caller pinned one, else auto-select it.
+
+    Auto-selection reads the observation midpoint MJD (``get_mjd``) and asks
+    :func:`irf_epoch.resolve_irf_date` for the installed IXPE calibration epoch
+    nearest that date. Centralised here so ``pcube``/``pha``/``reduce_pha``/
+    ``pcube_timeseg`` share one policy; the hardcoded ``'YYYYMMDD'`` default is
+    gone (a wrong epoch silently biased a live reproduction -- see irf_epoch).
+    """
+    if irf_date is not None:
+        return irf_date
+    _, _, mjd_mid = get_mjd(obs, file_list)
+    resolved = irf_epoch.resolve_irf_date(mjd_mid)
+    if chatter:
+        print(f'irf_date auto-resolved to {resolved} '
+              f'(installed epoch nearest MJD {mjd_mid:.1f}) for {obs}')
+    return resolved
+
 
 def get_mjd(obs, file_list) -> tuple[float, float, float]:
     """
@@ -763,7 +795,7 @@ def _append_timeseg_csv_row(csv_path: str, row: dict) -> None:
 
 def pcube_timeseg(obs: str,
                    file_list: list[str],
-                   irf_date: str,
+                   irf_date: str | None = None,
                    ra: float | None = None,
                    dec: float | None = None,
                    emin_kev: float = 2.0,
@@ -818,8 +850,10 @@ def pcube_timeseg(obs: str,
     Parameters
     ----------
     obs, file_list : see ``_get_obs_file_list``.
-    irf_date : str
-        IRF date string ('YYYYMMDD'); resolves to ``ixpe:obssim{irf_date}_alpha075:v13``.
+    irf_date : str or None
+        IRF calibration epoch 'YYYYMMDD', resolving to ``ixpe:obssim{irf_date}_alpha075:v13``.
+        Leave None (default) to auto-select the installed epoch nearest the observation
+        date (``irf_epoch.resolve_irf_date``); pass a value only to override.
     ra, dec : float or None
         Source position in degrees. If both None, centroided from one Level-2
         event file via ``find_src.run_extraction``.
@@ -861,6 +895,8 @@ def pcube_timeseg(obs: str,
     """
     obs_file_list = _get_obs_file_list(obs, file_list, chatter=chatter)
     obs_file_list = _validate_du_files(obs, obs_file_list)
+    # irf_date=None -> auto-select the installed epoch nearest the observation.
+    irf_date = _resolve_irf_date(obs, file_list, irf_date, chatter)
 
     if (ra is None) != (dec is None):
         raise ValueError(
