@@ -53,6 +53,12 @@ Workflow (all steps share the persistent XSPEC session):
       linear PD(E)/PA(E) (a constant plus an energy-slope term each) into
       one free quartet for the whole session -- not a scipy fit on
       ixpe_pcube's PD(E) points
+  17. compare_to_benchmark — this-work-vs-paper benchmark comparison: takes
+      a caller-built list of records (this-work value+error, paper
+      value+error, a shared unit, and a mandatory paper citation),
+      computes delta/z-score/>sigma_flag flags, and writes a
+      provenance-headed comparison CSV (no XSPEC/ixpeobssim required, no
+      paper numbers hardcoded)
 """
 
 from __future__ import annotations
@@ -1408,6 +1414,123 @@ TOOL_MANIFEST: dict = {
                 },
             },
             "required": ["csv_path"],
+        },
+    },
+
+    # ── This-work-vs-paper benchmark comparison (data product) ─────────────
+    "research_toolkit.xspec_utils.compare_to_benchmark": {
+        "module": "xspec_utils.lib.benchmark_compare",
+        "fn": "compare_to_benchmark",
+        "description": (
+            "Compares this-work measured quantities against cited paper values and "
+            "flags statistically significant discrepancies -- the final, reproducible "
+            "this-work-vs-paper comparison a reproduction study (e.g. the Cyg X-1 IXPE "
+            "polarimetry reproduction of Krawczynski+2022) needs, replacing hand "
+            "arithmetic with a tested data product. Hardcodes no paper numbers and "
+            "re-derives no science: every value in 'records' comes from the caller -- "
+            "typically the this-work side from ixpe_pcube/fit_tbabs_polconst_powerlaw/"
+            "fit_tbabs_pollin_powerlaw results (via the lib-only pcube_quantity/"
+            "fit_quantity extractors, which apply the fraction<->percent unit contract "
+            "so this tool never has to), and the paper side from a literature value the "
+            "caller cites. This tool (compare_to_benchmark) itself is pure stdlib -- no "
+            "XSPEC/ixpeobssim import, runs standalone. pcube_quantity delegates to "
+            "red_ixpe.read_pcube_csv -- the single source of truth for the ixpe_pcube "
+            "CSV's provenance-header + band-field contract -- via a lazy, "
+            "function-local import, so that contract is never duplicated; this keeps "
+            "compare_to_benchmark's own import clean while only a pcube_quantity call "
+            "pulls in ixpeobssim. "
+            "Each record in 'records' must carry: 'label' (non-empty str), 'value_this' "
+            "(finite number), 'err_this' (finite number >= 0), 'value_paper' (finite "
+            "number), 'err_paper' (finite number >= 0) -- NaN/inf are refused on all "
+            "four with ValueError, since a failed upstream measurement must not "
+            "silently propagate into a z=nan/unreliable-flagged row -- 'paper_source' "
+            "(non-empty str -- the literature citation; an empty/missing paper_source "
+            "is refused, since a value cannot be benchmarked against an unattributed "
+            "source), and EITHER a shared 'unit' (non-empty str) OR the "
+            "'unit_this'/'unit_paper' pair (both required together; if given alongside "
+            "'unit' all three must agree). This tool does NO unit conversion -- both "
+            "sides must already be expressed in the same unit before calling it; a "
+            "genuine mismatch between unit_this and unit_paper (or between either and "
+            "'unit') raises ValueError naming the record's label and the conflicting "
+            "units, rather than silently picking one or converting. For each record: "
+            "delta = value_this - value_paper (signed: positive when this-work exceeds "
+            "the paper value); z = abs(delta) / sqrt(err_this**2 + err_paper**2), with "
+            "z set to +inf (never a ZeroDivisionError) when err_this==0 and "
+            "err_paper==0 -- a legitimate computed-denominator-of-zero case, distinct "
+            "from the input-level NaN/inf refusal above, which is refused before this "
+            "arithmetic ever runs -- an infinite z is always flagged; "
+            "flagged = abs(z) > sigma_flag. Writes a "
+            "provenance-headed CSV to out_csv (columns label, unit, value_this, "
+            "err_this, value_paper, err_paper, paper_source, delta, z, flagged, plus a "
+            "'# compare_to_benchmark provenance: {...}' JSON comment header line "
+            "carrying sigma_flag/created_at/produced_by), creating parent directories "
+            "as needed. Raises ValueError('empty records') on an empty records list, "
+            "or on any record failing the validation above -- nothing is written on "
+            "failure. Returns 'rows' (one dict per record, the exact fields written to "
+            "the CSV), 'flags' (labels with abs(z) > sigma_flag), 'out_csv' (absolute "
+            "path written), 'n_records', 'stdout', 'exit_code' (always 0 -- invalid "
+            "input raises instead)."
+        ),
+        "args_schema": {
+            "type": "object",
+            "properties": {
+                "records": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": True,
+                        "properties": {
+                            "label": {"type": "string", "description": "Non-empty row label, e.g. 'PD_2-8keV'."},
+                            "value_this": {"type": "number", "description": "This-work measured value. Must be finite -- NaN/inf are refused."},
+                            "err_this": {"type": "number", "description": "This-work 1-sigma error. Must be finite and >= 0 -- NaN/inf are refused."},
+                            "value_paper": {"type": "number", "description": "Cited paper value, in the SAME unit as value_this. Must be finite -- NaN/inf are refused."},
+                            "err_paper": {"type": "number", "description": "Cited paper 1-sigma error. Must be finite and >= 0 -- NaN/inf are refused."},
+                            "unit": {
+                                "type": "string",
+                                "description": (
+                                    "Shared unit for both value_this and value_paper, e.g. "
+                                    "'percent' or 'deg'. Omit only if supplying the "
+                                    "unit_this/unit_paper pair instead."
+                                ),
+                            },
+                            "unit_this": {
+                                "type": "string",
+                                "description": (
+                                    "This-work side's unit. Must be supplied together with "
+                                    "unit_paper (never alone); both must agree with each other "
+                                    "(and with 'unit' if also given) or the record is refused."
+                                ),
+                            },
+                            "unit_paper": {
+                                "type": "string",
+                                "description": "Paper side's unit -- see unit_this.",
+                            },
+                            "paper_source": {
+                                "type": "string",
+                                "description": "Non-empty literature citation this record is benchmarked against, e.g. 'Krawczynski+2022 Table S2'.",
+                            },
+                        },
+                        "required": ["label", "value_this", "err_this", "value_paper", "err_paper", "paper_source"],
+                    },
+                    "description": (
+                        "Non-empty list of comparison records (pass the list of objects "
+                        "directly -- do NOT JSON-encode it). Build value_this/err_this via "
+                        "pcube_quantity/fit_quantity (lib helpers) so the fraction<->percent "
+                        "unit choice is made once, correctly, and value_paper/err_paper/unit "
+                        "match it exactly."
+                    ),
+                },
+                "out_csv": {
+                    "type": "string",
+                    "description": "Output CSV path. Parent directories are created as needed.",
+                },
+                "sigma_flag": {
+                    "type": "number",
+                    "description": "z-score threshold above which a record is flagged. Default 3.0.",
+                },
+            },
+            "required": ["records", "out_csv"],
         },
     },
 }
