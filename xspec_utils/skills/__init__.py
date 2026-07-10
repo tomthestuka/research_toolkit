@@ -59,6 +59,12 @@ Workflow (all steps share the persistent XSPEC session):
       computes delta/z-score/>sigma_flag flags, and writes a
       provenance-headed comparison CSV (no XSPEC/ixpeobssim required, no
       paper numbers hardcoded)
+  18. plot_benchmark_compare — the compare_to_benchmark reviewer figure: a
+      forest/caterpillar plot of SIGNED z per record (direction-preserving,
+      unlike the CSV's own abs(z) column), so a systematic this-work-vs-
+      paper offset is visible at a glance; reads either compare_to_
+      benchmark's returned rows list or the CSV it wrote (no XSPEC/
+      ixpeobssim required)
 """
 
 from __future__ import annotations
@@ -1531,6 +1537,98 @@ TOOL_MANIFEST: dict = {
                 },
             },
             "required": ["records", "out_csv"],
+        },
+    },
+
+    # ── This-work-vs-paper benchmark comparison figure (companion plotter) ─
+    "research_toolkit.xspec_utils.plot_benchmark_compare": {
+        "module": "xspec_utils.lib.benchmark_compare",
+        "fn": "plot_benchmark_compare",
+        "description": (
+            "Renders the compare_to_benchmark reviewer figure: a forest/caterpillar "
+            "plot with one horizontal tick per record, in the order supplied. The "
+            "x-axis is the SIGNED z = (value_this - value_paper) / sqrt(err_this**2 + "
+            "err_paper**2) -- NOT the CSV's own 'z' column, which stores abs(z) for "
+            "flagging and discards direction; recomputing the sign here is exactly "
+            "what makes a systematic offset visible (e.g. every PD point pulled the "
+            "same side of zero reveals a consistent this-work-vs-paper discrepancy, "
+            "which an abs(z) table cannot show). Draws a vertical reference line at "
+            "z=0 and a shaded band at +/-sigma_flag; any record with abs(z) > "
+            "sigma_flag is drawn in a distinct colour and annotated with its label. "
+            "A record whose value_this and value_paper both carry zero error has an "
+            "infinite z (signed by delta, i.e. value_this-value_paper) -- it is "
+            "clamped to the finite-z axis edge with an explicit '[z=inf]' annotation "
+            "rather than left to break the axis autoscale. Heterogeneous quantities "
+            "(PD in percent, PA in degrees, a slope in percent/keV, per-DU values, "
+            "...) legitimately share this one axis because z is dimensionless. "
+            "Writes exactly ONE PNG. Takes EITHER 'rows' (e.g. compare_to_benchmark's "
+            "own returned 'rows' list) OR 'csv_path' (the CSV it wrote) -- supply "
+            "exactly one; 'rows' takes precedence if both are given. 'sigma_flag' "
+            "left unset (null/omitted) reads the threshold from the CSV's own "
+            "provenance header when 'csv_path' is used (falling back to 3.0), so the "
+            "plotted band always matches the flagging threshold compare_to_benchmark "
+            "actually used; pass an explicit number to override. Empty input (an "
+            "empty 'rows' list, or a 'csv_path' with zero data rows) is not an error: "
+            "no PNG is written and the result carries exit_code=1 with stderr set -- "
+            "raises ValueError instead for a missing csv_path/malformed CSV (not the "
+            "product of compare_to_benchmark) or a row missing a required field "
+            "('label', 'err_this', 'err_paper', and either 'delta' or "
+            "'value_this'/'value_paper'). Returns 'figures' (one FigureRef dict, or "
+            "[] on the empty-input case), 'plotted' (the exact label/z/flagged arrays "
+            "drawn, plus sigma_flag/n_records, for differential verification), "
+            "'stdout', 'exit_code'."
+        ),
+        "args_schema": {
+            "type": "object",
+            "properties": {
+                "rows": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": True,
+                        "properties": {
+                            "label": {"type": "string"},
+                            "err_this": {"type": "number"},
+                            "err_paper": {"type": "number"},
+                            "delta": {"type": "number"},
+                            "value_this": {"type": "number"},
+                            "value_paper": {"type": "number"},
+                        },
+                    },
+                    "description": (
+                        "compare_to_benchmark's own returned 'rows' list (pass the object "
+                        "directly -- do NOT JSON-encode it) -- or any equivalent list of "
+                        "dicts carrying 'label'/'err_this'/'err_paper' and either 'delta' "
+                        "or 'value_this'/'value_paper'. Omit to read from csv_path instead."
+                    ),
+                },
+                "csv_path": {
+                    "type": "string",
+                    "description": (
+                        "Path to the CSV written by compare_to_benchmark (its 'out_csv'). "
+                        "Ignored if 'rows' is also given. Must carry the "
+                        "'# compare_to_benchmark provenance: ...' header line."
+                    ),
+                },
+                "save_path": {
+                    "type": "string",
+                    "description": "Full output PNG path. Auto-generated if omitted.",
+                },
+                "title": {
+                    "type": "string",
+                    "description": "Figure title. Defaults to a generic caption.",
+                },
+                "sigma_flag": {
+                    "type": "number",
+                    "description": (
+                        "z-score threshold for the shaded band / flag colour. Left "
+                        "unset (the default): read from the CSV's own provenance header "
+                        "when csv_path is used, else 3.0. Pass an explicit value to "
+                        "override either way."
+                    ),
+                },
+            },
+            "required": [],
         },
     },
 }

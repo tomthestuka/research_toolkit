@@ -27,15 +27,31 @@ arithmetic) and the module's own top level stay import-clean and callable
 without the science stack, wired directly into `TOOL_MANIFEST`; only a call
 to `pcube_quantity` pulls in `ixpeobssim`, and any caller with a real pcube
 CSV in hand already has it installed.
+
+`plot_benchmark_compare` (bottom of this module) is the pure-matplotlib
+companion plotter -- the reviewer figure for a `compare_to_benchmark` CSV or
+its returned `rows` list: a forest/caterpillar plot of signed z per record,
+so a systematic offset (every point pulled the same direction) is visible at
+a glance, which a CSV of `abs(z)` values alone cannot show. Only `matplotlib`/
+`numpy` beyond stdlib (already used by `pa_pd_stability.py`/
+`bhxrb_pd_hr_survey.py`/`ixpe_pcube_plot.py`), so it stays in `lib/` and is
+wired directly into `TOOL_MANIFEST`, never through `skills/session.py`.
 """
 
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import math
 import os
 import time as _time
+from pathlib import Path
+
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import numpy as np
 
 _PCUBE_QUANTITY_NAMES = ('PD', 'PA', 'QN', 'UN')
 
@@ -347,5 +363,215 @@ def compare_to_benchmark(records: list[dict], out_csv: str, sigma_flag: float = 
         'n_records': len(rows),
         'stdout': (f'compare_to_benchmark: {len(rows)} record(s), {len(flags)} '
                    f'flagged at >{sigma_flag} sigma -> {out_csv}'),
+        'exit_code': 0,
+    }
+
+
+# --------------------------------------------------------------------------- #
+# plot_benchmark_compare -- pure-matplotlib companion plotter
+# --------------------------------------------------------------------------- #
+
+_PLOT_PRODUCED_BY = 'xspec_utils.lib.benchmark_compare.plot_benchmark_compare'
+_PLOT_ROW_KEYS = ('label', 'err_this', 'err_paper')
+
+
+def _read_compare_csv(csv_path: str) -> tuple[dict, list[dict]]:
+    """Read a `compare_to_benchmark` CSV into `(provenance, rows)`, each row
+    reduced to the fields `plot_benchmark_compare` needs (`label`, `err_this`,
+    `err_paper`, `delta`). Raises `ValueError` -- naming the offending path --
+    when `csv_path` does not exist or its first line is not the
+    `compare_to_benchmark` provenance header."""
+    if not os.path.exists(csv_path):
+        raise ValueError(f'plot_benchmark_compare: csv_path not found: {csv_path}')
+    with open(csv_path, newline='') as f:
+        header_line = f.readline()
+        if not header_line.startswith(_HEADER_PREFIX):
+            raise ValueError(
+                f'plot_benchmark_compare: {csv_path} is missing the compare_to_benchmark '
+                f'provenance header; it is not a product of compare_to_benchmark.')
+        provenance = json.loads(header_line[len(_HEADER_PREFIX):])
+        raw_rows = list(csv.DictReader(f))
+    rows = [{
+        'label': r['label'],
+        'err_this': float(r['err_this']),
+        'err_paper': float(r['err_paper']),
+        'delta': float(r['delta']),
+    } for r in raw_rows]
+    return provenance, rows
+
+
+def _row_signed_z(row: dict) -> float:
+    """Signed z = delta / sqrt(err_this**2 + err_paper**2) for one
+    `compare_to_benchmark` row (direct or CSV-parsed) -- the direction-
+    preserving companion to the CSV's own `abs(z)` 'z' column. `delta`
+    (`value_this - value_paper`) is read directly if present, else
+    recomputed from `value_this`/`value_paper`. +/-inf, signed by `delta`
+    (never a `ZeroDivisionError`), when both errors are zero -- `delta==0`
+    resolves to +inf, mirroring `compare_to_benchmark`'s own
+    always-flagged treatment of a zero-zero-error record."""
+    err_this = float(row['err_this'])
+    err_paper = float(row['err_paper'])
+    if row.get('delta') not in (None, ''):
+        delta = float(row['delta'])
+    else:
+        delta = float(row['value_this']) - float(row['value_paper'])
+    denom = math.hypot(err_this, err_paper)
+    if denom == 0:
+        return math.inf if delta >= 0 else -math.inf
+    return delta / denom
+
+
+def _build_compare_figure(rows: list[dict], sigma_flag: float, title: str | None = None):
+    """Build the forest/caterpillar plot of signed z, one tick per record in
+    `rows`' own order. Returns `(fig, ax, plotted)`; the caller owns the
+    figure's lifecycle. `plotted` carries `label`/`z`/`flagged` (the exact
+    per-record values drawn) plus `sigma_flag`/`n_records`."""
+    labels = [str(r['label']) for r in rows]
+    zs = [_row_signed_z(r) for r in rows]
+    n = len(rows)
+
+    finite_abs = [abs(z) for z in zs if math.isfinite(z)]
+    half_range = max(finite_abs) * 1.15 if finite_abs else 0.0
+    half_range = max(half_range, sigma_flag * 1.3, 1.0)
+    clamp = 0.95 * half_range
+
+    y = np.arange(n)
+    flagged = np.array([abs(z) > sigma_flag for z in zs])
+    x = np.array([math.copysign(clamp, z) if math.isinf(z) else z for z in zs])
+
+    fig, ax = plt.subplots(figsize=(7.5, max(2.5, 0.4 * n + 1.2)))
+    ax.axvspan(-sigma_flag, sigma_flag, color='0.5', alpha=0.15, zorder=0,
+               label=f'|z| <= {sigma_flag}')
+    ax.axvline(0.0, color='k', lw=0.8, zorder=1)
+
+    if (~flagged).any():
+        ax.scatter(x[~flagged], y[~flagged], color='tab:blue', zorder=3,
+                   label='within threshold')
+    if flagged.any():
+        ax.scatter(x[flagged], y[flagged], color='tab:red', zorder=3,
+                   label=f'|z| > {sigma_flag}')
+        for xi, yi, lbl, zi in zip(x[flagged], y[flagged],
+                                    np.array(labels)[flagged], np.array(zs)[flagged]):
+            note = lbl + (' [z=inf]' if math.isinf(zi) else '')
+            ax.annotate(note, (xi, yi), textcoords='offset points', xytext=(6, 0),
+                        va='center', fontsize=8, color='tab:red')
+
+    ax.set_yticks(y)
+    ax.set_yticklabels(labels)
+    ax.invert_yaxis()
+    ax.set_xlim(-half_range, half_range)
+    ax.set_xlabel('signed z = (this-work - paper) / sqrt(err_this^2 + err_paper^2)')
+    ax.set_title(title or 'This-work vs. paper benchmark comparison')
+    ax.legend(fontsize=8, loc='best')
+    fig.tight_layout()
+
+    plotted = {
+        'label': labels,
+        'z': [float(z) for z in zs],
+        'flagged': [bool(f) for f in flagged],
+        'sigma_flag': float(sigma_flag),
+        'n_records': n,
+    }
+    return fig, ax, plotted
+
+
+def plot_benchmark_compare(rows: list[dict] | None = None, csv_path: str | None = None,
+                            save_path: str | None = None, title: str | None = None,
+                            sigma_flag: float | None = None) -> dict:
+    """Render the forest/caterpillar reviewer figure for a `compare_to_benchmark`
+    result: one tick per record (in the supplied order), x-axis the SIGNED
+    z = (value_this-value_paper)/sqrt(err_this**2+err_paper**2) -- so a
+    systematic offset (every point on the same side of zero) is visible at a
+    glance, which the CSV's own `abs(z)` 'z' column cannot show. A vertical
+    line marks z=0 and a shaded band marks +/-`sigma_flag`; a record with
+    `abs(z) > sigma_flag` is drawn in a distinct colour and annotated with its
+    label. Writes exactly ONE PNG.
+
+    Takes EITHER `rows` (e.g. `compare_to_benchmark`'s own returned `rows`
+    list) OR `csv_path` (the CSV it wrote) -- supply exactly one; `rows`
+    takes precedence if both are given. `sigma_flag=None` (default) reads the
+    threshold from the CSV's own provenance header when `csv_path` is used,
+    else falls back to 3.0; pass an explicit float to override either way.
+
+    A record with both errors zero has an infinite z (signed by `delta`);
+    it is clamped to the finite-z axis edge (with an explicit "[z=inf]"
+    annotation) rather than leaving `set_xlim` an infinite/NaN range. An
+    empty `rows` (or a `csv_path` with zero data rows) is not an error: no
+    PNG is written and `exit_code=1` with `stderr` set.
+
+    Parameters
+    ----------
+    rows : list[dict] or None
+        Records carrying `label`, `err_this`, `err_paper`, and either `delta`
+        or `value_this`/`value_paper` (`compare_to_benchmark`'s own row shape
+        satisfies this).
+    csv_path : str or None
+        Path to a `compare_to_benchmark` output CSV.
+    save_path : str or None
+        Full output PNG path. Auto-generated timestamped file in
+        `os.getcwd()` when None.
+    title : str or None
+        Figure title. Defaults to a generic caption.
+    sigma_flag : float or None
+        z-score threshold for the shaded band / flag colour. See above.
+
+    Returns
+    -------
+    dict with 'figures' (one `FigureRef` dict, or `[]` on the empty-rows
+    edge case), 'plotted' (`label`/`z`/`flagged`/`sigma_flag`/`n_records` --
+    the exact per-record values drawn), 'stdout', 'exit_code' (1 with
+    'stderr' set only for empty rows; raises `ValueError` for a missing
+    csv_path/malformed CSV or a row missing required fields).
+    """
+    if rows is None and csv_path is None:
+        raise ValueError('plot_benchmark_compare: supply rows or csv_path')
+
+    provenance: dict = {}
+    if rows is None:
+        provenance, rows = _read_compare_csv(csv_path)
+
+    if sigma_flag is None:
+        sigma_flag = float(provenance['sigma_flag']) if 'sigma_flag' in provenance else 3.0
+
+    if not rows:
+        return {
+            'figures': [],
+            'stdout': '',
+            'stderr': 'plot_benchmark_compare: no records to plot (rows is empty).',
+            'exit_code': 1,
+        }
+
+    for i, row in enumerate(rows):
+        missing = [k for k in _PLOT_ROW_KEYS if k not in row]
+        if 'delta' not in row and not {'value_this', 'value_paper'} <= row.keys():
+            missing.append("'delta' (or 'value_this'/'value_paper')")
+        if missing:
+            raise ValueError(f'plot_benchmark_compare: row {i} missing required field(s) {missing}')
+
+    fig, _ax, plotted = _build_compare_figure(rows, sigma_flag, title=title)
+
+    if save_path is None:
+        ts = _time.strftime('%Y%m%dT%H%M%S')
+        save_path = os.path.join(os.getcwd(), f'plot_benchmark_compare_{ts}.png')
+    os.makedirs(os.path.dirname(os.path.abspath(save_path)) or '.', exist_ok=True)
+
+    fig.savefig(save_path, dpi=150, bbox_inches='tight', metadata={'Software': _PLOT_PRODUCED_BY})
+    plt.close(fig)
+    sha = hashlib.sha256(Path(save_path).read_bytes()).hexdigest()
+
+    n_flagged = sum(plotted['flagged'])
+    return {
+        'figures': [{
+            'path': save_path,
+            'caption': (f'This-work vs. paper benchmark comparison: {len(rows)} record(s), '
+                        f'{n_flagged} flagged at |z| > {sigma_flag}'),
+            'mime_type': 'image/png',
+            'produced_by': _PLOT_PRODUCED_BY,
+            'created_at': _time.strftime('%Y-%m-%dT%H:%M:%SZ', _time.gmtime()),
+            'sha256': sha,
+        }],
+        'plotted': plotted,
+        'stdout': (f'plot_benchmark_compare: {len(rows)} record(s), {n_flagged} flagged '
+                   f'at |z| > {sigma_flag} -> {save_path}'),
         'exit_code': 0,
     }
