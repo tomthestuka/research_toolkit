@@ -44,6 +44,12 @@ Workflow (all steps share the persistent XSPEC session):
       of the standard PCUBE polarization: fits tbabs*polconst*powerlaw to
       every IXPE Stokes I/Q/U triplet in a load_data indices dict, tying
       polconst's PD/PA into one free pair for the whole session
+  16. fit_tbabs_pollin_powerlaw — the paper's actual linear energy-dependence
+      route for Cyg X-1 polarization: fits tbabs*pollin*powerlaw to every
+      IXPE Stokes I/Q/U triplet in a load_data indices dict, tying pollin's
+      linear PD(E)/PA(E) (a constant plus an energy-slope term each) into
+      one free quartet for the whole session -- not a scipy fit on
+      ixpe_pcube's PD(E) points
 """
 
 from __future__ import annotations
@@ -238,6 +244,118 @@ TOOL_MANIFEST: dict = {
                 "pa_init": {
                     "type": "number",
                     "description": "Initial polconst polarization angle in degrees. Default -20.0 (Cyg X-1 starting point).",
+                },
+                "nh": {
+                    "type": "number",
+                    "description": (
+                        "TBabs equivalent hydrogen column, in units of 1e22 cm^-2. "
+                        "Default 0.6 (Cyg X-1 ISM value)."
+                    ),
+                },
+                "freeze_nh": {
+                    "type": "boolean",
+                    "description": "Freeze nH at the supplied value. Default true; set false to let nH float.",
+                },
+                "erange": {
+                    "type": "array",
+                    "items": {"type": "number"},
+                    "description": "[lo, hi] keV range noticed on every IXPE spectrum before fitting. Default [2.0, 8.0].",
+                },
+                "conf_level": {
+                    "type": "number",
+                    "description": (
+                        "Confidence level the reported covariance-matrix 1-sigma "
+                        "errors are scaled to. Default 0.683 (1 sigma, Delta-chi2=1.0 "
+                        "for one interesting parameter); pass e.g. 0.90 for a 90% "
+                        "interval."
+                    ),
+                },
+                "n_iterations": {
+                    "type": "integer",
+                    "description": "Fit.nIterations per convergence round. Default 100.",
+                },
+                "log_path": {
+                    "type": "string",
+                    "description": "If given, write the verbose AllModels.show()/Fit.show() summary here.",
+                },
+            },
+            "required": ["indices"],
+        },
+    },
+
+    # ── pollin linear-energy-dependence fit (IXPE-only) ────────────────────
+    "research_toolkit.xspec_utils.fit_tbabs_pollin_powerlaw": {
+        "module": "xspec_utils.lib.xspec_help",
+        "fn": "fit_tbabs_pollin_powerlaw",
+        "description": (
+            "Fit tbabs*pollin*powerlaw to every IXPE Stokes I/Q/U triplet in an "
+            "indices dict, tying pollin's linear polarization degree PD(E)=A1+"
+            "Aslope*(E-1keV) (A1 fraction 0-1, Aslope fraction per keV) and angle "
+            "PA(E)=psi1+psislope*(E-1keV) (psi1 degrees, psislope degrees per keV) "
+            "into ONE free (A1, Aslope, psi1, psislope) quartet for the whole "
+            "session -- never one per detector unit or ObsID. This is the paper's "
+            "ACTUAL linear energy-dependence route for Cyg X-1 polarization (an "
+            "XSPEC pollin fit), replacing an inline scipy fit on ixpe_pcube's PD(E) "
+            "points, which is a data-analysis boundary violation and not "
+            "toolkit-grounded. Same load path as fit_tbabs_polconst_powerlaw: call "
+            "load_data first with ixpe_changes=true (a fresh, freshly-centroided "
+            "reduction) so each spectrum's own RESPFILE/ANCRFILE and BACKSCAL "
+            "resolve for the region actually used -- reusing a stale on-disk PHA1 "
+            "(ixpe_changes=false) can carry dead response paths and a different "
+            "region's BACKSCAL, producing an unphysically poor fit. Pass an "
+            "IXPE-only indices dict (this fit is not a joint multi-instrument fit; "
+            "Model() here applies to every currently active data group). One ObsID "
+            "in indices['IXPE'] gives a single-ObsID fit; more than one gives a "
+            "joint combined fit, still with exactly one tied pollin quartet. "
+            "Notices 2-8 keV (erange) on every IXPE spectrum before fitting, runs "
+            "Fit.perform() to convergence, then reports every _err as the "
+            "covariance-matrix parameter-table 1-sigma (Parameter.sigma), scaled to "
+            "conf_level (default 0.683, i.e. 1 sigma) via the chi-squared quantile "
+            "for 1 degree of freedom -- raises RuntimeError naming the parameter if "
+            "any of PD_A/PD_slope/PA_A/PA_slope/Gamma has no valid covariance sigma, "
+            "instead of returning a meaningless 0 or negative error. Every fitted "
+            "number is returned in the result dict -- XSPEC's own terminal output "
+            "is muted, so nothing needed downstream is left only in stdout. "
+            "Companion figure: plot_fit (no separate plotter for this tool); the "
+            "PD(E)/PA(E) energy-dependence overlay across ObsIDs is a separate tool."
+        ),
+        "args_schema": {
+            "type": "object",
+            "properties": {
+                "indices": {
+                    "type": "object",
+                    "additionalProperties": True,
+                    "description": (
+                        "Return value of load_data (must contain 'IXPE') — pass the "
+                        "object directly, do NOT JSON-encode it."
+                    ),
+                },
+                "gamma_init": {
+                    "type": "number",
+                    "description": "Initial powerlaw photon index. Default 2.0 (Cyg X-1 starting point).",
+                },
+                "pd_a_init": {
+                    "type": "number",
+                    "description": (
+                        "Initial pollin PD at 1 keV (A1, fraction 0-1, NOT "
+                        "percent). Default 0.02."
+                    ),
+                },
+                "pd_slope_init": {
+                    "type": "number",
+                    "description": (
+                        "Initial pollin PD energy slope (Aslope, fraction per keV). "
+                        "Default 0.004 (Cyg X-1's PD rising roughly 2.6%->5.0% over "
+                        "2-8 keV)."
+                    ),
+                },
+                "pa_a_init": {
+                    "type": "number",
+                    "description": "Initial pollin PA at 1 keV (psi1, degrees). Default -20.0.",
+                },
+                "pa_slope_init": {
+                    "type": "number",
+                    "description": "Initial pollin PA energy slope (psislope, degrees per keV). Default 0.0.",
                 },
                 "nh": {
                     "type": "number",

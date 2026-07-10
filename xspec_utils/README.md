@@ -19,6 +19,7 @@ A Python/Bash toolkit for joint spectro-polarimetric analysis of X-ray binary da
 - **PD-vs-HR survey diagnostic figures** (`bhxrb_pd_hr_survey.pd_hr_survey_plot`): the five standard reviewer figures (combined and per-source PD-vs-HR scatter, soft-vs-hard PD distribution comparison, HR detection-bias histogram, MDP99-vs-exposure feasibility scatter) from a `bhxrb_pd_hr_survey` CSV — pure matplotlib, no XSPEC/ixpeobssim, exposed as the `bhxrb_pd_hr_survey_plot` AI tool
 - **Joint fitting helpers**: multi-panel plotting with model component decomposition, fit-state freezing for snapshotting
 - **polconst spectropolarimetric cross-check** (`xspec_help.fit_tbabs_polconst_powerlaw`): fits `tbabs*polconst*powerlaw` to every IXPE Stokes I/Q/U triplet in a `load_data` indices dict, tying polarization degree/angle into one free pair for the whole session -- the polconst XSPEC cross-check of the standard PCUBE polarization (Krawczynski+2022 Cyg X-1), exposed as the `fit_tbabs_polconst_powerlaw` AI tool
+- **pollin linear energy-dependence fit** (`xspec_help.fit_tbabs_pollin_powerlaw`): fits `tbabs*pollin*powerlaw` to every IXPE Stokes I/Q/U triplet in a `load_data` indices dict, tying `pollin`'s linear PD(E)/PA(E) (a constant plus an energy-slope term each) into one free quartet for the whole session -- the paper's actual linear energy-dependence route for Cyg X-1 polarization, replacing a non-toolkit-grounded `scipy` fit on `ixpe_pcube`'s PD(E) points, exposed as the `fit_tbabs_pollin_powerlaw` AI tool
 - **Fully customisable epoch management** for multi-observation campaigns, applicable to any source
 
 ## Repository layout
@@ -365,6 +366,54 @@ Call after `load_data(..., ixpe_changes=True, ixpe_src_rad=..., ixpe_bkg_inner_r
 **On the elevated global chi2.** For Cyg X-1 the global reduced chi2 is typically >2: `tbabs*powerlaw` (I is unpolarised by `polconst`) does not fully describe the Stokes-I continuum over 2-8 keV. But `polconst` multiplies only Q/U, so PD/PA are set by the well-fit (reduced chi2 ~ 1) polarization sector and are robust despite the elevated global chi2 -- confirmed by a per-spectrum chi2 decomposition (I: reduced chi2 ~5-11; Q/U: reduced chi2 ~0.9-1.15) and by agreement with the independent `ixpe_pcube` broadband PD/PA to <0.4 sigma (see Changelog).
 
 Companion figure: the existing `plot_fit` (I-spectrum + residuals) -- no separate plotter for this tool.
+
+---
+
+#### `xspec_help.fit_tbabs_pollin_powerlaw(indices, ...)`
+
+Fits `tbabs*pollin*powerlaw` to every IXPE Stokes I/Q/U triplet in an indices dict, tying `pollin`'s linear PD(E)=`A1`+`Aslope`*(E-1 keV) and PA(E)=`psi1`+`psislope`*(E-1 keV) into **one free (A1, Aslope, psi1, psislope) quartet for the whole session** -- the paper's actual linear energy-dependence route for Cyg X-1 polarization (an XSPEC `pollin` fit), replacing worker 0's inline `runfit.py` `scipy` fit on `ixpe_pcube`'s PD(E) points, which was not toolkit-grounded.
+
+```python
+def fit_tbabs_pollin_powerlaw(
+    indices: dict,
+    gamma_init: float = 2.0,
+    pd_a_init: float = 0.02,
+    pd_slope_init: float = 0.004,
+    pa_a_init: float = -20.0,
+    pa_slope_init: float = 0.0,
+    nh: float = 0.6,
+    freeze_nh: bool = True,
+    erange: tuple[float, float] = (2.0, 8.0),
+    conf_level: float = 0.683,
+    n_iterations: int = 100,
+    log_path: str | None = None,
+) -> dict
+```
+
+Same load path as `fit_tbabs_polconst_powerlaw`: call after `load_data(..., ixpe_changes=True, ixpe_src_rad=..., ixpe_bkg_inner_rad=..., ixpe_bkg_outer_rad=...)`, and pass an IXPE-only `indices` dict (`Model()` here applies to every currently active data group). The same default cross-data-group parameter tying `fit_tbabs_polconst_powerlaw` relies on ties `pollin`'s four parameters across every DU/ObsID with no explicit tie/untie call.
+
+**Parameters**
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `indices` | `dict` | -- | Return value of `load_data`; must contain `'IXPE'`. One ObsID gives a single-ObsID fit, more than one a joint combined fit, always with exactly one tied pollin quartet. |
+| `gamma_init` | `float` | `2.0` | Initial powerlaw photon index (Cyg X-1 starting point). |
+| `pd_a_init` | `float` | `0.02` | Initial pollin PD at 1 keV (`A1`, fraction 0-1, not percent). |
+| `pd_slope_init` | `float` | `0.004` | Initial pollin PD energy slope (`Aslope`, fraction per keV) -- Cyg X-1's PD rises roughly 2.6%->5.0% over 2-8 keV. |
+| `pa_a_init` | `float` | `-20.0` | Initial pollin PA at 1 keV (`psi1`, degrees). |
+| `pa_slope_init` | `float` | `0.0` | Initial pollin PA energy slope (`psislope`, degrees per keV). |
+| `nh` | `float` | `0.6` | `TBabs` equivalent hydrogen column, in units of 1e22 cm^-2 (Cyg X-1 ISM value). |
+| `freeze_nh` | `bool` | `True` | Freeze `nH` at `nh`. Set `False` to let it float. |
+| `erange` | `tuple[float, float]` | `(2.0, 8.0)` | keV range noticed on every IXPE spectrum before fitting. |
+| `conf_level` | `float` | `0.683` | Confidence level the reported errors are scaled to, via the chi-squared quantile for 1 degree of freedom (`scipy.stats.chi2.ppf`). |
+| `n_iterations` | `int` | `100` | `Fit.nIterations` per convergence round (up to 5 rounds, stopping early once the fit statistic stabilises). |
+| `log_path` | `str \| None` | `None` | If given, the verbose `AllModels.show()`/`Fit.show()` summary is logged here (chatter 10, restored to 5 afterwards). |
+
+**Returns** a dict with `PD_A`, `PD_A_err` (fraction), `PD_slope`, `PD_slope_err` (fraction per keV), `PA_A`, `PA_A_err` (degrees), `PA_slope`, `PA_slope_err` (degrees per keV), `Gamma`, `Gamma_err`, `nH`, `chi2`, `dof`, `stat_per_dof`, `conf_level`, `indices` (unchanged, for downstream `plot_fit`), `stdout`, `exit_code`.
+
+**Errors are the covariance-matrix parameter-table 1-sigma**, exactly as in `fit_tbabs_polconst_powerlaw`: `Parameter.sigma` scaled by `sqrt(chi2.ppf(conf_level, 1))`. If any of PD_A/PD_slope/PA_A/PA_slope/Gamma has no valid covariance sigma, the function raises `RuntimeError` naming the parameter instead of returning a meaningless 0 or negative error.
+
+Companion figure: the existing `plot_fit` -- no separate plotter for this tool. A separate PD(E)/PA(E) energy-dependence overlay across ObsIDs is a distinct tool.
 
 ---
 
@@ -1007,6 +1056,8 @@ Instrumental background rejection follows the method described in [Di Marco et a
 - NuSTAR background loading is disabled by default (`nustar_use_bkg=False`) because clean background regions are often unavailable for bright sources like Cyg X-1.
 
 ## Changelog
+
+- **2026-07-09** — Added `xspec_help.fit_tbabs_pollin_powerlaw` and the `fit_tbabs_pollin_powerlaw` AI tool: the paper's *actual* linear energy-dependence route for Cyg X-1 polarization (an XSPEC `pollin` fit), per the brief flagging that worker 0's reported linear PD(E) numbers (constant `A=3.187%±0.140%`, linear `A=1.724%±0.341%`, `B=0.534%/keV±0.114%/keV`) came from an inline `runfit.py` `scipy` fit on `ixpe_pcube`'s PD(E) points — a data-analysis boundary violation, not toolkit-grounded. Fits `tbabs*pollin*powerlaw` to every IXPE Stokes I/Q/U triplet in a `load_data` indices dict, tying `pollin`'s PD(E)=`A1`+`Aslope`*(E-1 keV) (fraction, fraction/keV) and PA(E)=`psi1`+`psislope`*(E-1 keV) (degrees, degrees/keV) into **one free (A1, Aslope, psi1, psislope) quartet for the whole session**, via the exact same default cross-data-group parameter tying `fit_tbabs_polconst_powerlaw` already relies on (confirmed empirically here too — no explicit tie/untie call needed). Same load path, same guard-rails, and the same covariance-matrix `Parameter.sigma`-scaled-to-`conf_level` error convention as `fit_tbabs_polconst_powerlaw` (`RuntimeError` naming the parameter if PD_A/PD_slope/PA_A/PA_slope/Gamma has no valid sigma). Validated on the real, already-local Cyg X-1 IXPE ObsID `01002901` via a fresh `load_data(ixpe_changes=True)` reduction at the paper's region radii (`src_rad=1.333`, `bkg_inner_rad=2.5`, `bkg_outer_rad=5.167`): the fit converges to `chi2/dof=4482.47/1332=3.37` (elevated for the same reason `fit_tbabs_polconst_powerlaw`'s global chi2 is — `pollin` multiplies only Q/U, so the Stokes-I continuum's poor description by a bare `powerlaw` does not compromise PD/PA), `PD_A=1.75%±0.37%`, `PD_slope=0.614%/keV±0.128%/keV` (positive, consistent in sign and order of magnitude with the paper's reported rise), `PA_A=-14.7°±3.2°`, `PA_slope=-1.94°/keV±0.94°/keV`. A capability test confirms exactly one free parameter of each of A1/Aslope/psi1/psislope across the whole session and that background was genuinely subtracted (net Stokes-I rate < gross); a second capability test confirms the linear term is genuinely exercised — freezing `Aslope` at 0 and refitting gives a nonzero Delta-chi2 relative to the reported slope-free fit; a differential test confirms `PD_slope`'s sign and rough (factor-of-4) magnitude agree with an independent inverse-variance-weighted linear regression of `ixpe_pcube`'s own PD(E) points (not this helper's own fit code); a reproducibility test confirms two calls on identical already-loaded fresh-reduced spectra agree on PD_A/PD_slope/PA_A/PA_slope/chi2 within 0.1%. No new `tool_config.yaml` entries needed — like `fit_tbabs_polconst_powerlaw`, this is a fit-only call on already-loaded spectra, not a fresh xpselect/xpbin reduction, and comfortably finishes well inside the existing package-wide `gate_test_timeout_s=1500`.
 
 - **2026-07-09** — Simplified `xspec_help.fit_tbabs_polconst_powerlaw`'s error interface: removed the XSPEC `error`-command machinery entirely (no more `Fit.error(...)` call, `try/except`, or `error_method` bookkeeping) in favor of a single, always-taken path -- the covariance-matrix parameter-table 1-sigma (`Parameter.sigma`, scaled to `conf_level` via `sqrt(chi2.ppf(conf_level, 1))`). Diagnosed first (no code changes) why `error_method` always came back `'covariance'` on real Cyg X-1 data: `Fit.error` refuses outright via its documented `maximum`-reduced-chi2 guard (default 2.0; [HEASARC manual](https://heasarc.gsfc.nasa.gov/xanadu/xspec/manual/XSerror.html)) whenever reduced chi2 exceeds it -- confirmed a legitimate, hardcoded XSPEC safeguard rather than a mis-call (`Fit.query="no"` made no difference; raising `maximum` unblocked the command). A follow-up diagnostic pass (gamma_init swept over {2.5, 2.0, 1.6, 1.2, 0.8}, extra `Fit.perform()` iterations at `nIterations=1000`) confirmed Gamma=1.609 is a true, unique global minimum (not an early-stopping or local-minimum artifact), and a per-spectrum chi2 decomposition showed the elevated global reduced chi2 (~3.4) sits almost entirely in the three Stokes-I spectra (reduced chi2 ~5-11) while every Q/U spectrum fits at reduced chi2 ~0.9-1.15 -- since `polconst` multiplies only Q/U, PD/PA are set by the well-fit polarization sector regardless of the I continuum's poor description by a bare `powerlaw`. Given that, the `error` command's extra rigor (asymmetric bounds, non-linear parameter search) was buying nothing our fixed Cyg X-1 chi2 regime could reliably use, while its refuse/fallback dance added a code path with no test coverage of its own status-string edge cases; the lead settled on trimming to the single covariance path, kept honest by raising `RuntimeError` (naming the parameter) if any of PD/PA/Gamma has no valid covariance sigma (`Parameter.sigma <= 0` or unavailable), instead of ever returning a meaningless 0/negative error. Output contract trimmed to drop `error_method` (kept `conf_level`, since it still documents what the returned errors mean). `test_capability_output_contract` updated to match; `test_differential_polconst_matches_pcube_broadband`'s tolerance tightened from 3-sigma to 2-sigma (observed agreement is <0.4 sigma, so 2-sigma stays safe while being a stricter regression guard).
 

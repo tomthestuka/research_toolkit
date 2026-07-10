@@ -1151,6 +1151,186 @@ def fit_tbabs_polconst_powerlaw(
     }
 
 
+def fit_tbabs_pollin_powerlaw(
+    indices: dict,
+    gamma_init: float = 2.0,
+    pd_a_init: float = 0.02,
+    pd_slope_init: float = 0.004,
+    pa_a_init: float = -20.0,
+    pa_slope_init: float = 0.0,
+    nh: float = 0.6,
+    freeze_nh: bool = True,
+    erange: tuple[float, float] = (2.0, 8.0),
+    conf_level: float = 0.683,
+    n_iterations: int = 100,
+    log_path: str | None = None,
+) -> dict:
+    """Fit ``tbabs*pollin*powerlaw`` to every IXPE Stokes I/Q/U triplet in
+    *indices*, tying ``pollin``'s linear PD(E)=A1+Aslope*(E-1 keV) and
+    PA(E)=psi1+psislope*(E-1 keV) across every detector unit and ObsID
+    present -- the paper's actual linear energy-dependence route for Cyg X-1
+    polarization (as opposed to a `scipy` fit on `ixpe_pcube`'s PD(E) points,
+    a data-analysis boundary violation this tool replaces). Exactly one tied
+    free (A1, Aslope, psi1, psislope) quartet for the whole session: XSPEC
+    ties every parameter of a model defined once across several already-active
+    data groups to the first group's value by default, the same mechanism
+    ``fit_tbabs_polconst_powerlaw`` relies on -- no explicit tie/untie call
+    is needed here either.
+
+    Same load path as ``fit_tbabs_polconst_powerlaw``: call after
+    ``load_data(..., ixpe_changes=True, ...)`` -- a fresh reduction resolves
+    each spectrum's own RESPFILE/ANCRFILE (arf for I, mrf for Q/U) and the
+    BACKSCAL for the region actually used. *indices* should come from an
+    IXPE-only epoch: ``Model()`` here applies to every currently active data
+    group. One ObsID in ``indices['IXPE']`` gives a single-ObsID fit; more
+    than one gives a joint combined fit, still with exactly one tied
+    (A1, Aslope, psi1, psislope) quartet.
+
+    Parameters
+    ----------
+    indices : dict
+        Return value of ``load_data``; must contain ``'IXPE'``. Every
+        obsid/DU I/Q/U triplet present is loaded into the joint fit -- one
+        ObsID gives a single-ObsID fit, more than one a joint combined fit,
+        always with exactly one tied pollin quartet.
+    gamma_init : float
+        Initial powerlaw photon index. Default 2.0 (Cyg X-1 starting point).
+    pd_a_init : float
+        Initial pollin PD at 1 keV (``A1``, fraction 0-1, NOT percent).
+        Default 0.02.
+    pd_slope_init : float
+        Initial pollin PD energy slope (``Aslope``, fraction per keV).
+        Default 0.004 (Cyg X-1's PD rising roughly 2.6%->5.0% over 2-8 keV).
+    pa_a_init : float
+        Initial pollin PA at 1 keV (``psi1``, degrees). Default -20.0.
+    pa_slope_init : float
+        Initial pollin PA energy slope (``psislope``, degrees per keV).
+        Default 0.0.
+    nh : float
+        TBabs equivalent hydrogen column, in units of 1e22 cm^-2. Default 0.6
+        (Cyg X-1 ISM value).
+    freeze_nh : bool
+        Freeze nH at `nh` (default True). Set False to let nH float.
+    erange : tuple[float, float]
+        (lo, hi) keV range noticed on every IXPE spectrum before fitting.
+        Default (2.0, 8.0).
+    conf_level : float
+        Confidence level the reported 1-sigma-scaled errors correspond to
+        (default 0.683 = 1 sigma, i.e. Delta-chi2=1.0 for one interesting
+        parameter); converted via the chi-squared quantile for 1 degree of
+        freedom. Pass e.g. 0.90 for a 90% interval.
+    n_iterations : int
+        ``Fit.nIterations`` per convergence round. Default 100.
+    log_path : str or None
+        If given, the verbose ``AllModels.show()``/``Fit.show()`` summary is
+        logged here (chatter 10, restored to 5 afterwards).
+
+    Returns
+    -------
+    dict with PD_A, PD_A_err (fraction), PD_slope, PD_slope_err (fraction
+    per keV), PA_A, PA_A_err (degrees), PA_slope, PA_slope_err (degrees per
+    keV), Gamma, Gamma_err, nH, chi2, dof, stat_per_dof, conf_level, indices
+    (the input, unchanged, for downstream ``plot_fit``), stdout, exit_code.
+    Errors are the covariance-matrix ``Parameter.sigma``, scaled by
+    ``sqrt(chi2.ppf(conf_level, 1))``.
+
+    Raises
+    ------
+    RuntimeError
+        Any of PD_A/PD_slope/PA_A/PA_slope/Gamma has no valid covariance
+        sigma (frozen, or XSPEC returned a non-positive/unavailable value)
+        -- surfaced instead of returning a meaningless 0 or negative error.
+    """
+    if not indices.get('IXPE'):
+        raise ValueError("fit_tbabs_pollin_powerlaw requires indices['IXPE'] (from load_data).")
+
+    spec_indices = []
+    for obsid, dus in indices['IXPE'].items():
+        for du, triplet in dus.items():
+            if len(triplet) != 3:
+                raise ValueError(
+                    f"fit_tbabs_pollin_powerlaw: IXPE {obsid}/{du} is not an "
+                    f"[I, Q, U] triplet: {triplet}")
+            spec_indices.extend(triplet)
+    if not spec_indices:
+        raise ValueError("fit_tbabs_pollin_powerlaw: indices['IXPE'] carries no DUs.")
+
+    for si in spec_indices:
+        AllData(si).notice('all')
+        AllData(si).ignore(f'**-{erange[0]} {erange[1]}-**')
+
+    m1 = Model("tbabs*pollin*powerlaw")
+    m1.TBabs.nH = nh
+    m1.TBabs.nH.frozen = freeze_nh
+    m1.pollin.A1 = pd_a_init
+    m1.pollin.A1.frozen = False
+    m1.pollin.Aslope = pd_slope_init
+    m1.pollin.Aslope.frozen = False
+    m1.pollin.psi1 = pa_a_init
+    m1.pollin.psi1.frozen = False
+    m1.pollin.psislope = pa_slope_init
+    m1.pollin.psislope.frozen = False
+    m1.powerlaw.PhoIndex = gamma_init
+    m1.powerlaw.PhoIndex.frozen = False
+
+    Fit.nIterations = n_iterations
+    prev_stat = None
+    for _ in range(5):
+        Fit.perform()
+        stat = Fit.statistic
+        if prev_stat is not None and abs(prev_stat - stat) < 1e-3 * max(1.0, abs(stat)):
+            break
+        prev_stat = stat
+
+    delta_chi2 = float(_chi2dist.ppf(conf_level, 1))
+    scale = delta_chi2 ** 0.5
+    pd_a_err = m1.pollin.A1.sigma * scale
+    pd_slope_err = m1.pollin.Aslope.sigma * scale
+    pa_a_err = m1.pollin.psi1.sigma * scale
+    pa_slope_err = m1.pollin.psislope.sigma * scale
+    gamma_err = m1.powerlaw.PhoIndex.sigma * scale
+    for name, err in (('PD_A', pd_a_err), ('PD_slope', pd_slope_err),
+                      ('PA_A', pa_a_err), ('PA_slope', pa_slope_err),
+                      ('Gamma', gamma_err)):
+        if err is None or err <= 0:
+            raise RuntimeError(
+                f"fit_tbabs_pollin_powerlaw: no valid covariance sigma for {name} "
+                f"(got {err!r}) -- the fit did not produce a usable error.")
+
+    if log_path is not None:
+        Xset.chatter = 10
+        Xset.openLog(log_path)
+        try:
+            AllModels.show()
+            Fit.show()
+        finally:
+            Xset.closeLog()
+            Xset.chatter = 5
+
+    PD_A, PD_slope = m1.pollin.A1.values[0], m1.pollin.Aslope.values[0]
+    PA_A, PA_slope = m1.pollin.psi1.values[0], m1.pollin.psislope.values[0]
+    Gamma = m1.powerlaw.PhoIndex.values[0]
+    chi2, dof = Fit.statistic, Fit.dof
+    stdout = (f"fit_tbabs_pollin_powerlaw: PD(E)={PD_A:.4f}+/-{pd_a_err:.4f} "
+              f"+ ({PD_slope:.5f}+/-{pd_slope_err:.5f})*(E-1keV) frac/keV "
+              f"PA(E)={PA_A:.3f}+/-{pa_a_err:.3f} + "
+              f"({PA_slope:.4f}+/-{pa_slope_err:.4f})*(E-1keV) deg/keV "
+              f"Gamma={Gamma:.3f}+/-{gamma_err:.3f} chi2/dof={chi2:.2f}/{dof}")
+    return {
+        'PD_A': PD_A, 'PD_A_err': pd_a_err,
+        'PD_slope': PD_slope, 'PD_slope_err': pd_slope_err,
+        'PA_A': PA_A, 'PA_A_err': pa_a_err,
+        'PA_slope': PA_slope, 'PA_slope_err': pa_slope_err,
+        'Gamma': Gamma, 'Gamma_err': gamma_err,
+        'nH': m1.TBabs.nH.values[0],
+        'chi2': chi2, 'dof': dof, 'stat_per_dof': chi2 / dof if dof > 0 else None,
+        'conf_level': conf_level,
+        'indices': indices,
+        'stdout': stdout,
+        'exit_code': 0,
+    }
+
+
 def inspect_epoch(
     indices: dict,
     e_bins,
