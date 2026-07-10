@@ -109,14 +109,19 @@ def test_differential_load_data_centroid_matches_independent_find_src_call(fresh
     assert dec == pytest.approx(ref_dec, abs=1e-6)
 
 
-def test_guardrail_multi_obsid_raises_cleanly(tmp_path):
-    """load_data's existing single-IXPE-ObsID guard-rail must surface as a
-    clean, attributable exception -- never silently accepted or swallowed --
-    for a 2-ObsID IXPE list (the multi-ObsID joint-fit path our new helper
-    ties across, once load_data can produce such an indices dict).
-    clear_existing=False so this never disturbs the shared XSPEC session
-    other tests in this module rely on."""
-    with pytest.raises(NotImplementedError, match="only one IXPE observation"):
+def test_guardrail_multi_obsid_no_longer_raises_not_implemented(tmp_path):
+    """Regression guard for the removed single-IXPE-ObsID guard-rail: a
+    2-ObsID IXPE list must no longer short-circuit on NotImplementedError.
+    ``ixpe_path`` deliberately resolves to zero files, so this reaches (and
+    stops at) ``red_ixpe.get_all_file_list``'s own "no files found" check --
+    a ValueError -- which only happens once load_data's IXPE branch has
+    actually started processing a multi-ObsID list, rather than bailing out
+    at the top on ``len(epoch['IXPE']) > 1``. This never calls AllData (the
+    ValueError fires before any spectrum is loaded), so it cannot disturb
+    the shared XSPEC session other tests in this module rely on -- the full
+    multi-ObsID load/capability/differential/gain-linking coverage on real
+    data lives in test_load_data_multi_ixpe.py."""
+    with pytest.raises(ValueError, match="No files found"):
         xspec_help.load_data(
             epoch={"IXPE": [OBSID, "01250101"]},
             ixpe_path=str(tmp_path),

@@ -80,7 +80,13 @@ TOOL_MANIFEST: dict = {
             "position via find_src.run_extraction, never a fixed coordinate table) at the "
             "given region radii, so each spectrum's own RESPFILE/ANCRFILE (arf for I, mrf "
             "for Q/U) and BACKSCAL resolve for that region — required to reproduce a "
-            "paper's region radii rather than reusing whatever is already on disk."
+            "paper's region radii rather than reusing whatever is already on disk. "
+            "epoch['IXPE'] may list any number of ObsIDs (e.g. combining a multi-ObsID "
+            "validation pair for one tied joint polconst/pollin fit): each ObsID "
+            "independently resolves its own centroid, response files/BACKSCAL, and IRF "
+            "calibration epoch, in consecutive gapless data groups (3 DGs per ObsID); Q/U "
+            "gain slopes tie only to that same ObsID+DU's own I gain slope, never across "
+            "ObsIDs or DUs."
         ),
         "args_schema": {
             "type": "object",

@@ -38,8 +38,12 @@ call_timeout_s:
   # cost ixpe_reduce_pha's fresh-reduction path budgets 900s for. Previously
   # ixpe_changes=true raised immediately (no ra/dec ever reached pha()), so
   # this path had no real runtime; now that it does the reduction, give it
-  # the same backstop as ixpe_reduce_pha.
-  load_data: 900
+  # the same backstop as ixpe_reduce_pha. epoch['IXPE'] now loops over any
+  # number of ObsIDs (each independently centroided/reduced), so the real
+  # runtime scales with ObsID count; raised to cover a several-ObsID joint
+  # load (e.g. the Krawczynski+2022 May+June validation pair) rather than
+  # only ever a single ObsID.
+  load_data: 2700
 
 # Per-package Layer-B (pytest) budget, applied to EACH of the gate's two runs.
 # ixpe_pcube_timeseg's tests exercise several real xpselect+xpbin PCUBE

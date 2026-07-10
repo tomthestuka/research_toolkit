@@ -44,16 +44,23 @@ def load_data(
     instrument is DG1.
 
     For IXPE each detector unit contributes three consecutive spectra
-    (Stokes I, Q, U).  The Q and U gain slopes are linked to the
-    corresponding DU's I gain slope to enforce a shared calibration.
+    (Stokes I, Q, U).  The Q and U gain slopes are linked to that same
+    (ObsID, DU)'s own I gain slope to enforce a shared per-DU calibration --
+    never tied across ObsIDs or across DUs, so a multi-ObsID epoch keeps
+    each ObsID's own DU gain independent (the same convention the
+    NuSTAR/NICER branches follow for a multi-ObsID epoch).
 
     Parameters
     ----------
     epoch : dict
         Single-epoch sub-dict from ``epoch.epoch``, e.g. ``epoch.epoch['E5']``.
         Expected keys: ``'IXPE'``, ``'NICER'``, ``'NuSTAR'`` (each a list of
-        obs-ID strings) and ``'STATE'``.  Only one IXPE observation per epoch
-        is supported.
+        obs-ID strings) and ``'STATE'``.  ``epoch['IXPE']`` may list any
+        number of ObsIDs (mirroring the NICER/NuSTAR branches' own inner
+        ``for obs in epoch[<inst>]`` loop): each ObsID independently resolves
+        its own source centroid, region, per-spectrum response files and
+        BACKSCAL, and IRF calibration epoch -- nothing is shared or reused
+        across ObsIDs.
     ixpe_path : str
         Path to the directory containing IXPE observation sub-directories
         (passed to ``red_ixpe.get_all_file_list``).
@@ -108,10 +115,15 @@ def load_data(
 
             {
                 'IXPE': {
-                    '<obsid>': {
+                    '<obsid_a>': {
                         'DU1': [1,  2,  3],
                         'DU2': [4,  5,  6],
                         'DU3': [7,  8,  9],
+                    },
+                    '<obsid_b>': {
+                        'DU1': [10, 11, 12],
+                        'DU2': [13, 14, 15],
+                        'DU3': [16, 17, 18],
                     },
                 },
                 'NICER': {
@@ -205,96 +217,101 @@ def load_data(
 
         # -------------------------------------------------------------- IXPE
         elif inst == 'IXPE':
-            if len(epoch['IXPE']) > 1:
-                raise NotImplementedError(
-                    "load_data currently supports only one IXPE observation per epoch; "
-                    f"got {epoch['IXPE']}.")
-
             ixpe_file_list = _red_ixpe.get_all_file_list(ixpe_path, chatter=chatter)
-            obs = epoch['IXPE'][0]
+            result['IXPE'] = {}
 
-            ixpe_ra = ixpe_dec = None
-            if ixpe_changes:
-                # Fresh reduction: centroid the source position ourselves --
-                # red_ixpe.pha() requires ra/dec whenever changes=True and
-                # load_data has no ra/dec parameters of its own. Mirrors
-                # red_ixpe.reduce_pha's fresh-reduction path exactly (same
-                # find_src.run_extraction call, same src.reg/bkg.reg
-                # location); never src_pos.SRC_COORD, which is a legacy table
-                # ixpe_reduce_pha also does not consult.
-                obs_du_files = _red_ixpe._get_obs_file_list(obs, ixpe_file_list, chatter=chatter)
-                obs_du_files = _red_ixpe._validate_du_files(obs, obs_du_files, caller='load_data')
-                obs_dir = Path(obs_du_files[0]).resolve().parent.parent
-                src_reg = str(obs_dir / 'src.reg')
-                bkg_reg = str(obs_dir / 'bkg.reg')
-                with open(os.devnull, 'w') as fnull:
-                    with contextlib.redirect_stdout(fnull):
-                        _find_src.run_extraction(
-                            obs_du_files[0], src_reg, bkg_reg, None,
-                            ixpe_src_rad, ixpe_bkg_inner_rad, ixpe_bkg_outer_rad)
-                with open(src_reg) as f:
-                    region_line = f.readlines()[1]
-                m = re.match(r'circle\(\s*([-\d.]+)\s*,\s*([-\d.]+)\s*,', region_line)
-                if not m:
-                    raise ValueError(
-                        f'load_data: could not parse source region from {src_reg}: {region_line!r}')
-                ixpe_ra, ixpe_dec = float(m.group(1)), float(m.group(2))
-                if chatter:
-                    print(f'load_data: IXPE {obs} centroided at RA={ixpe_ra:.6f}, Dec={ixpe_dec:.6f}')
+            for obs in epoch['IXPE']:
+                ixpe_ra = ixpe_dec = None
+                if ixpe_changes:
+                    # Fresh reduction: centroid the source position ourselves --
+                    # red_ixpe.pha() requires ra/dec whenever changes=True and
+                    # load_data has no ra/dec parameters of its own. Mirrors
+                    # red_ixpe.reduce_pha's fresh-reduction path exactly (same
+                    # find_src.run_extraction call, same src.reg/bkg.reg
+                    # location); never src_pos.SRC_COORD, which is a legacy table
+                    # ixpe_reduce_pha also does not consult. Each ObsID in the
+                    # loop centroids independently -- never reused across ObsIDs.
+                    obs_du_files = _red_ixpe._get_obs_file_list(obs, ixpe_file_list, chatter=chatter)
+                    obs_du_files = _red_ixpe._validate_du_files(obs, obs_du_files, caller='load_data')
+                    obs_dir = Path(obs_du_files[0]).resolve().parent.parent
+                    src_reg = str(obs_dir / 'src.reg')
+                    bkg_reg = str(obs_dir / 'bkg.reg')
+                    with open(os.devnull, 'w') as fnull:
+                        with contextlib.redirect_stdout(fnull):
+                            _find_src.run_extraction(
+                                obs_du_files[0], src_reg, bkg_reg, None,
+                                ixpe_src_rad, ixpe_bkg_inner_rad, ixpe_bkg_outer_rad)
+                    with open(src_reg) as f:
+                        region_line = f.readlines()[1]
+                    m = re.match(r'circle\(\s*([-\d.]+)\s*,\s*([-\d.]+)\s*,', region_line)
+                    if not m:
+                        raise ValueError(
+                            f'load_data: could not parse source region from {src_reg}: {region_line!r}')
+                    ixpe_ra, ixpe_dec = float(m.group(1)), float(m.group(2))
+                    if chatter:
+                        print(f'load_data: IXPE {obs} centroided at RA={ixpe_ra:.6f}, Dec={ixpe_dec:.6f}')
 
-            ixpe_src, ixpe_bkg = _red_ixpe.pha(
-                obs=obs,
-                file_list=ixpe_file_list,
-                src_rad=ixpe_src_rad,
-                bkg_inner_rad=ixpe_bkg_inner_rad,
-                bkg_outer_rad=ixpe_bkg_outer_rad,
-                ra=ixpe_ra,
-                dec=ixpe_dec,
-                irf_date=ixpe_irf_date,
-                changes=ixpe_changes,
-                chatter=chatter,
-            )
+                # irf_date=None -> red_ixpe.pha auto-resolves the installed epoch
+                # nearest THIS ObsID's own observation date (irf_epoch.resolve_irf_date)
+                # -- never a date carried over from a previous ObsID in this loop.
+                ixpe_src, ixpe_bkg = _red_ixpe.pha(
+                    obs=obs,
+                    file_list=ixpe_file_list,
+                    src_rad=ixpe_src_rad,
+                    bkg_inner_rad=ixpe_bkg_inner_rad,
+                    bkg_outer_rad=ixpe_bkg_outer_rad,
+                    ra=ixpe_ra,
+                    dec=ixpe_dec,
+                    irf_date=ixpe_irf_date,
+                    changes=ixpe_changes,
+                    chatter=chatter,
+                )
 
-            DU_LABELS = ['DU1', 'DU2', 'DU3']
-            ixpe_obs_result = {}
+                DU_LABELS = ['DU1', 'DU2', 'DU3']
+                ixpe_obs_result = {}
 
-            for du_idx, du_label in enumerate(DU_LABELS):
-                f_src_i = ixpe_src[du_idx]
-                f_bkg_i = ixpe_bkg[du_idx]
-                du_specs = []
+                for du_idx, du_label in enumerate(DU_LABELS):
+                    f_src_i = ixpe_src[du_idx]
+                    f_bkg_i = ixpe_bkg[du_idx]
+                    du_specs = []
 
-                for sto in ('I', 'Q', 'U'):
-                    if sto == 'I':
-                        f_src_sto, f_bkg_sto = f_src_i, f_bkg_i
-                    elif sto == 'Q':
-                        f_src_sto = _red_ixpe.get_pha_q(f_src_i)
-                        f_bkg_sto = _red_ixpe.get_pha_q(f_bkg_i)
-                    else:  # U
-                        f_src_sto = _red_ixpe.get_pha_u(f_src_i)
-                        f_bkg_sto = _red_ixpe.get_pha_u(f_bkg_i)
+                    for sto in ('I', 'Q', 'U'):
+                        if sto == 'I':
+                            f_src_sto, f_bkg_sto = f_src_i, f_bkg_i
+                        elif sto == 'Q':
+                            f_src_sto = _red_ixpe.get_pha_q(f_src_i)
+                            f_bkg_sto = _red_ixpe.get_pha_q(f_bkg_i)
+                        else:  # U
+                            f_src_sto = _red_ixpe.get_pha_u(f_src_i)
+                            f_bkg_sto = _red_ixpe.get_pha_u(f_bkg_i)
 
-                    AllData(f'{grp}:{spec_index} {f_src_sto}')
-                    AllData(spec_index).background = f_bkg_sto
-                    AllData(spec_index).ignore(
-                        f'**-{ixpe_erange[0]} {ixpe_erange[1]}-**')
+                        AllData(f'{grp}:{spec_index} {f_src_sto}')
+                        AllData(spec_index).background = f_bkg_sto
+                        AllData(spec_index).ignore(
+                            f'**-{ixpe_erange[0]} {ixpe_erange[1]}-**')
 
-                    r = AllData(spec_index).response
-                    r.gain.slope = 1.0
-                    r.gain.offset = 0.0
-                    r.gain.offset.frozen = True
-                    if sto in ('Q', 'U'):
-                        r.gain.slope.link = AllData(du_specs[0]).response.gain.slope
+                        r = AllData(spec_index).response
+                        r.gain.slope = 1.0
+                        r.gain.offset = 0.0
+                        r.gain.offset.frozen = True
+                        if sto in ('Q', 'U'):
+                            # Tied to THIS (obs, du) triplet's own I gain slope
+                            # (du_specs[0], set from the running spec_index of the
+                            # current triplet only) -- never a fixed offset, so a
+                            # later ObsID's Q/U can never mislink back to an
+                            # earlier ObsID's I.
+                            r.gain.slope.link = AllData(du_specs[0]).response.gain.slope
 
-                    du_specs.append(spec_index)
-                    spec_index += 1
+                        du_specs.append(spec_index)
+                        spec_index += 1
 
-                ixpe_obs_result[du_label] = du_specs  # [I, Q, U]
-                if chatter:
-                    print(f'Loaded IXPE {du_label}: group {grp}, '
-                          f'spectra {du_specs} (I, Q, U)')
-                grp += 1  # one DG per DU
+                    ixpe_obs_result[du_label] = du_specs  # [I, Q, U]
+                    if chatter:
+                        print(f'Loaded IXPE {obs} {du_label}: group {grp}, '
+                              f'spectra {du_specs} (I, Q, U)')
+                    grp += 1  # one DG per DU
 
-            result['IXPE'] = {obs: ixpe_obs_result}
+                result['IXPE'][obs] = ixpe_obs_result
 
     return result
 
