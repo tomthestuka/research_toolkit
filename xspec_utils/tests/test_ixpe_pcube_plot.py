@@ -298,7 +298,163 @@ def test_tool_manifest_wired_to_lib_directly():
     assert entry["module"] == "xspec_utils.lib.ixpe_pcube_plot"
     assert entry["fn"] == "ixpe_pcube_plot"
     props = entry["args_schema"]["properties"]
-    for name in ("csv_path", "save_path", "title"):
+    for name in ("csv_path", "save_path", "title", "pollin"):
         assert name in props, f"{name} missing from args_schema.properties"
     assert entry["args_schema"]["required"] == ["csv_path"]
     assert "png" in entry["description"].lower()
+
+
+# --------------------------------------------------------------------------- #
+# pollin PD(E)/PA(E) overlay -- reviewer figure for the energy-dependence claim
+# --------------------------------------------------------------------------- #
+
+POLLIN_BLOCK = {
+    "PD_A": 0.0175, "PD_A_err": 0.0037,
+    "PD_slope": 0.00614, "PD_slope_err": 0.00128,
+    "PA_A": -14.7, "PA_A_err": 3.2,
+    "PA_slope": -1.94, "PA_slope_err": 0.94,
+    "Gamma": 2.02, "chi2": 4482.47, "dof": 1332,  # extra keys must be ignored
+}
+
+
+def _overlay_line(ax):
+    """The overlay's Line2D is the last line added to *ax* -- the errorbar's
+    own data line (index 0) is added first, the overlay `ax.plot` call second."""
+    assert len(ax.lines) >= 2, "no overlay line found on axis"
+    return ax.lines[-1]
+
+
+def test_pollin_block_draws_analytic_line(multiband_csv):
+    fig, axes, plotted, _label = plotmod._build_figure(multiband_csv, pollin=POLLIN_BLOCK)
+    try:
+        assert plotted["overlay"]["kind"] == "pollin"
+        for k in ("PD_A", "PD_slope", "PA_A", "PA_slope"):
+            assert plotted["overlay"][k] == pytest.approx(POLLIN_BLOCK[k])
+
+        pd_line = _overlay_line(axes["pd"])
+        e = np.asarray(pd_line.get_xdata())
+        expected_pd = POLLIN_BLOCK["PD_A"] + POLLIN_BLOCK["PD_slope"] * (e - 1.0)
+        assert np.allclose(pd_line.get_ydata(), expected_pd)
+
+        pa_line = _overlay_line(axes["pa"])
+        e_pa = np.asarray(pa_line.get_xdata())
+        expected_pa = POLLIN_BLOCK["PA_A"] + POLLIN_BLOCK["PA_slope"] * (e_pa - 1.0)
+        assert np.allclose(pa_line.get_ydata(), expected_pa)
+    finally:
+        plt.close(fig)
+
+
+def test_pollin_overlay_end_to_end(tmp_path, multiband_csv):
+    save_path = str(tmp_path / "pollin.png")
+    result = plotmod.ixpe_pcube_plot(multiband_csv, save_path=save_path, pollin=POLLIN_BLOCK)
+    assert result["exit_code"] == 0
+    assert len(result["figures"]) == 1
+    data = open(save_path, "rb").read()
+    assert result["figures"][0]["sha256"] == hashlib.sha256(data).hexdigest()
+    assert result["plotted"]["overlay"]["kind"] == "pollin"
+
+
+def test_pollin_block_missing_key_raises(multiband_csv):
+    bad = {k: v for k, v in POLLIN_BLOCK.items() if k != "PA_slope"}
+    with pytest.raises(ValueError, match="PA_slope"):
+        plotmod.ixpe_pcube_plot(multiband_csv, pollin=bad)
+
+
+def test_fallback_overlay_drawn_when_no_pollin(multiband_csv):
+    fig, axes, plotted, _label = plotmod._build_figure(multiband_csv, pollin=None)
+    try:
+        assert plotted["overlay"]["kind"] == "fallback"
+        pd_line = _overlay_line(axes["pd"])
+        e = np.asarray(pd_line.get_xdata())
+        overlay = plotted["overlay"]
+        expected_pd = overlay["PD_A"] + overlay["PD_slope"] * (e - 1.0)
+        assert np.allclose(pd_line.get_ydata(), expected_pd)
+    finally:
+        plt.close(fig)
+
+
+def test_singleband_fallback_has_no_drawable_line(singleband_csv):
+    """A single-band CSV has only one point -- no line is fit-able, and this
+    must be handled gracefully (no crash, overlay simply absent), not raised."""
+    fig_bare, axes_bare, _plotted_bare, _ = plotmod._build_figure(singleband_csv)
+    fig, axes, plotted, _label = plotmod._build_figure(singleband_csv, pollin=None)
+    try:
+        assert plotted["overlay"]["kind"] is None
+        # No overlay line added beyond the errorbar's own artists (same count
+        # with and without the fallback attempt).
+        assert len(axes["pd"].lines) == len(axes_bare["pd"].lines)
+    finally:
+        plt.close(fig)
+        plt.close(fig_bare)
+
+
+def test_singleband_pollin_block_still_drawable(singleband_csv):
+    """The pollin overlay is analytic, not a fit off the points, so it still
+    draws even when only one band is available."""
+    fig_bare, axes_bare, _plotted_bare, _ = plotmod._build_figure(singleband_csv)
+    n_bare = len(axes_bare["pd"].lines)
+    plt.close(fig_bare)
+
+    fig, axes, plotted, _label = plotmod._build_figure(singleband_csv, pollin=POLLIN_BLOCK)
+    try:
+        assert plotted["overlay"]["kind"] == "pollin"
+        assert len(axes["pd"].lines) == n_bare + 1
+        pd_line = _overlay_line(axes["pd"])
+        e = np.asarray(pd_line.get_xdata())
+        expected_pd = POLLIN_BLOCK["PD_A"] + POLLIN_BLOCK["PD_slope"] * (e - 1.0)
+        assert np.allclose(pd_line.get_ydata(), expected_pd)
+    finally:
+        plt.close(fig)
+
+
+# --------------------------------------------------------------------------- #
+# Differential: the fallback scipy weighted-linear fit vs. an independent
+# closed-form weighted-least-squares computation on the same points.
+# --------------------------------------------------------------------------- #
+
+def _independent_wls_fit(x, y, yerr):
+    """(X^T W X)^-1 X^T W y for y = a + b*(x-1 keV), W = diag(1/yerr^2) --
+    a plain closed-form matrix computation, entirely independent of
+    `plotmod._weighted_linear_fit`."""
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    w = 1.0 / np.asarray(yerr, dtype=float) ** 2
+    xc = x - 1.0
+    X = np.column_stack([np.ones_like(xc), xc])
+    W = np.diag(w)
+    xtw = X.T @ W
+    cov = np.linalg.inv(xtw @ X)
+    beta = cov @ xtw @ y
+    return float(beta[0]), float(beta[1]), float(np.sqrt(cov[0, 0])), float(np.sqrt(cov[1, 1]))
+
+
+def test_differential_fallback_fit_matches_closed_form_wls(multiband_csv):
+    raw_bands = _read_raw_csv_bands(multiband_csv)
+    e_ctr = np.array([0.5 * (float(r["E_LO"]) + float(r["E_HI"])) for r in raw_bands])
+    pd = np.array([float(r["PD"]) for r in raw_bands])
+    pd_err = np.array([float(r["PD_err"]) for r in raw_bands])
+    order = np.argsort(e_ctr)
+    e_ctr, pd, pd_err = e_ctr[order], pd[order], pd_err[order]
+
+    a_scipy, b_scipy, a_err_scipy, b_err_scipy = plotmod._weighted_linear_fit(e_ctr, pd, pd_err)
+    a_ref, b_ref, a_err_ref, b_err_ref = _independent_wls_fit(e_ctr, pd, pd_err)
+
+    assert a_scipy == pytest.approx(a_ref, rel=1e-6, abs=1e-9)
+    assert b_scipy == pytest.approx(b_ref, rel=1e-6, abs=1e-9)
+    assert a_err_scipy == pytest.approx(a_err_ref, rel=1e-6, abs=1e-9)
+    assert b_err_scipy == pytest.approx(b_err_ref, rel=1e-6, abs=1e-9)
+
+
+# --------------------------------------------------------------------------- #
+# Reproducibility: the fallback fit's own parameters are stable across calls
+# --------------------------------------------------------------------------- #
+
+def test_repro_fallback_fit_params(tmp_path, multiband_csv):
+    out_a = str(tmp_path / "fallback_a.png")
+    out_b = str(tmp_path / "fallback_b.png")
+    a = plotmod.ixpe_pcube_plot(multiband_csv, save_path=out_a)
+    b = plotmod.ixpe_pcube_plot(multiband_csv, save_path=out_b)
+    ov_a, ov_b = a["plotted"]["overlay"], b["plotted"]["overlay"]
+    assert ov_a["kind"] == ov_b["kind"] == "fallback"
+    for k in ("PD_A", "PD_slope", "PA_A", "PA_slope"):
+        assert ov_a[k] == pytest.approx(ov_b[k], abs=1e-3, rel=1e-3)

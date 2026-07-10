@@ -39,7 +39,10 @@ Workflow (all steps share the persistent XSPEC session):
       across every listed ObsID's Level-2 files), background-subtracted,
       per caller-supplied energy bin edges
   14. ixpe_pcube_plot — PD(E)/PA(E) and Q-U plane companion figure for an
-      ixpe_pcube CSV (no XSPEC/ixpeobssim required)
+      ixpe_pcube CSV, with an optional fit_tbabs_pollin_powerlaw PD(E)/PA(E)
+      overlay (falling back to an internal scipy weighted-linear fit of the
+      PCUBE points when no pollin quartet is supplied) (no XSPEC/ixpeobssim
+      required)
   15. fit_tbabs_polconst_powerlaw — polconst spectropolarimetric cross-check
       of the standard PCUBE polarization: fits tbabs*polconst*powerlaw to
       every IXPE Stokes I/Q/U triplet in a load_data indices dict, tying
@@ -1341,15 +1344,26 @@ TOOL_MANIFEST: dict = {
             "1-sigma error bars read straight from csv_path's own columns (PD, PD_err, "
             "PA, PA_err, QN, QN_err, UN, UN_err are plotted exactly as ixpe_pcube wrote "
             "them -- dimensionless fractions for PD/QN/UN, degrees for PA -- never "
-            "recomputed). A single-band CSV still renders (one marker; no line to "
-            "connect). A band with any non-finite value in the plotted columns is "
-            "skipped -- never drawn as zero. Raises (no PNG written) if csv_path does "
-            "not exist, is missing the ixpe_pcube provenance header, carries zero band "
-            "rows, or every band is skipped for non-finite values. Returns 'figures' "
-            "(one FigureRef dict), 'plotted' (the exact E_LO/E_HI/E_ctr/PD/PD_err/PA/"
-            "PA_err/QN/QN_err/UN/UN_err arrays drawn, plus n_bands/n_skipped -- for "
-            "differential verification against csv_path), 'stdout', 'exit_code' "
-            "(always 0 -- failures raise instead of degrading to an empty plot)."
+            "recomputed). The PD/PA panels additionally overlay a linear PD(E)/PA(E) "
+            "model, the reviewer check for the energy-dependence claim: pass 'pollin' "
+            "(the PD_A/PD_slope/PA_A/PA_slope quartet from fit_tbabs_pollin_powerlaw's "
+            "result dict, extra keys ignored) to draw PD(E)=PD_A+PD_slope*(E-1 keV) and "
+            "PA(E)=PA_A+PA_slope*(E-1 keV) -- the model actually fit to the spectra -- "
+            "or omit 'pollin' to fall back to an inverse-variance-weighted linear fit "
+            "of the CSV's own PD(E)/PA(E) points (scipy.optimize.curve_fit), drawn the "
+            "same way. A single-band CSV still renders (one marker; no line to connect "
+            "or fit -- the fallback line is simply omitted, never an error). A band "
+            "with any non-finite value in the plotted columns is skipped -- never drawn "
+            "as zero. Raises (no PNG written) if csv_path does not exist, is missing "
+            "the ixpe_pcube provenance header, carries zero band rows, every band is "
+            "skipped for non-finite values, or 'pollin' is supplied but missing any of "
+            "PD_A/PD_slope/PA_A/PA_slope. Returns 'figures' (one FigureRef dict), "
+            "'plotted' (the exact E_LO/E_HI/E_ctr/PD/PD_err/PA/PA_err/QN/QN_err/UN/"
+            "UN_err arrays drawn, plus n_bands/n_skipped and 'overlay' -- "
+            "{'kind': None} when no line was drawable, else {'kind': 'pollin'|"
+            "'fallback', PD_A, PD_slope, PA_A, PA_slope, ...} -- for differential "
+            "verification against csv_path), 'stdout', 'exit_code' (always 0 -- "
+            "failures raise instead of degrading to an empty plot)."
         ),
         "args_schema": {
             "type": "object",
@@ -1371,6 +1385,19 @@ TOOL_MANIFEST: dict = {
                     "description": (
                         "Figure suptitle. Defaults to the CSV provenance's obsids "
                         "joined by '+'."
+                    ),
+                },
+                "pollin": {
+                    "type": "object",
+                    "additionalProperties": True,
+                    "description": (
+                        "Optional PD_A/PD_slope/PA_A/PA_slope quartet (fraction, "
+                        "fraction/keV, degrees, degrees/keV) to overlay as the "
+                        "analytic PD(E)/PA(E) model -- pass fit_tbabs_pollin_powerlaw's "
+                        "result dict directly (do NOT JSON-encode it; extra keys such "
+                        "as Gamma/*_err are ignored). Omit to overlay a scipy "
+                        "weighted-linear fit of the CSV's own PD(E)/PA(E) points "
+                        "instead."
                     ),
                 },
             },
