@@ -1,7 +1,10 @@
 import contextlib
 import io
 import os
+import re
+from pathlib import Path
 import numpy as np
+from scipy.stats import chi2 as _chi2dist
 import matplotlib.pyplot as plt
 from astropy.io import fits
 from xspec import AllData, AllModels, Fit, Model, Plot, Xset
@@ -61,8 +64,13 @@ def load_data(
         Path to the NuSTAR data directory.  Required when ``'NuSTAR'`` is in
         *epoch*.
     ixpe_changes : bool
-        If True, re-run the IXPE reduction pipeline; if False (default), use
-        existing pipeline products on disk.
+        If True, force a fresh IXPE reduction: the source position is
+        centroided from the DU1 Level-2 event file via
+        ``find_src.run_extraction`` (mirroring ``red_ixpe.reduce_pha`` --
+        never a fixed/legacy source-coordinate table) and ``red_ixpe.pha`` is
+        re-run at that position, so a stale on-disk PHA1 (wrong region,
+        dead response paths) is never silently reused. If False (default),
+        use existing pipeline products on disk as-is (no centroiding).
     ixpe_src_rad : float
         IXPE source-region radius in arcminutes (default 1.0).
     ixpe_bkg_inner_rad : float
@@ -118,6 +126,7 @@ def load_data(
         follow alphabetical (sorted) filename order.
     """
     import red_ixpe as _red_ixpe
+    import find_src as _find_src
     import NICER as _NICER
     import NuSTAR as _NuSTAR
 
@@ -203,12 +212,44 @@ def load_data(
 
             ixpe_file_list = _red_ixpe.get_all_file_list(ixpe_path, chatter=chatter)
             obs = epoch['IXPE'][0]
+
+            ixpe_ra = ixpe_dec = None
+            if ixpe_changes:
+                # Fresh reduction: centroid the source position ourselves --
+                # red_ixpe.pha() requires ra/dec whenever changes=True and
+                # load_data has no ra/dec parameters of its own. Mirrors
+                # red_ixpe.reduce_pha's fresh-reduction path exactly (same
+                # find_src.run_extraction call, same src.reg/bkg.reg
+                # location); never src_pos.SRC_COORD, which is a legacy table
+                # ixpe_reduce_pha also does not consult.
+                obs_du_files = _red_ixpe._get_obs_file_list(obs, ixpe_file_list, chatter=chatter)
+                obs_du_files = _red_ixpe._validate_du_files(obs, obs_du_files, caller='load_data')
+                obs_dir = Path(obs_du_files[0]).resolve().parent.parent
+                src_reg = str(obs_dir / 'src.reg')
+                bkg_reg = str(obs_dir / 'bkg.reg')
+                with open(os.devnull, 'w') as fnull:
+                    with contextlib.redirect_stdout(fnull):
+                        _find_src.run_extraction(
+                            obs_du_files[0], src_reg, bkg_reg, None,
+                            ixpe_src_rad, ixpe_bkg_inner_rad, ixpe_bkg_outer_rad)
+                with open(src_reg) as f:
+                    region_line = f.readlines()[1]
+                m = re.match(r'circle\(\s*([-\d.]+)\s*,\s*([-\d.]+)\s*,', region_line)
+                if not m:
+                    raise ValueError(
+                        f'load_data: could not parse source region from {src_reg}: {region_line!r}')
+                ixpe_ra, ixpe_dec = float(m.group(1)), float(m.group(2))
+                if chatter:
+                    print(f'load_data: IXPE {obs} centroided at RA={ixpe_ra:.6f}, Dec={ixpe_dec:.6f}')
+
             ixpe_src, ixpe_bkg = _red_ixpe.pha(
                 obs=obs,
                 file_list=ixpe_file_list,
                 src_rad=ixpe_src_rad,
                 bkg_inner_rad=ixpe_bkg_inner_rad,
                 bkg_outer_rad=ixpe_bkg_outer_rad,
+                ra=ixpe_ra,
+                dec=ixpe_dec,
                 irf_date=ixpe_irf_date,
                 changes=ixpe_changes,
                 chatter=chatter,
@@ -952,6 +993,162 @@ def fit_tbfeo_plabs_polconst_diskbb_polconst_relxillCp(
         with open(log_path, 'w') as f:
             f.write(_audit_buf.getvalue())
             f.write(xspec_content)
+
+
+def fit_tbabs_polconst_powerlaw(
+    indices: dict,
+    gamma_init: float = 2.0,
+    pd_init: float = 0.04,
+    pa_init: float = -20.0,
+    nh: float = 0.6,
+    freeze_nh: bool = True,
+    erange: tuple[float, float] = (2.0, 8.0),
+    conf_level: float = 0.683,
+    n_iterations: int = 100,
+    log_path: str | None = None,
+) -> dict:
+    """Fit ``tbabs*polconst*powerlaw`` to every IXPE Stokes I/Q/U triplet in
+    *indices*, tying polconst's PD (``A``) and PA (``psi``) across every
+    detector unit and ObsID present -- the polconst spectropolarimetric
+    cross-check of the standard PCUBE polarization (Krawczynski+2022 Cyg X-1
+    XSPEC column). Exactly one free PD/PA pair for the whole session: XSPEC
+    ties every parameter of a model defined once across several already-active
+    data groups to the first group's value by default, so no explicit
+    tie/untie call is needed here (unlike e.g. ``fit_tbfeo_hss``'s
+    cross-calibration constant, which explicitly unties per instrument).
+
+    Call after ``load_data(..., ixpe_changes=True, ...)`` -- a fresh
+    reduction resolves each spectrum's own RESPFILE/ANCRFILE (arf for I, mrf
+    for Q/U) and the BACKSCAL for the region actually used; reusing a stale
+    on-disk PHA1 (``ixpe_changes=False``) can carry dead response paths and a
+    different region's BACKSCAL. *indices* should come from an IXPE-only
+    epoch: ``Model()`` here applies to every currently active data group.
+
+    For Cyg X-1 the global reduced chi2 is typically >2 -- the Stokes-I
+    continuum (``tbabs*powerlaw``; I is unpolarised by ``polconst``) is not
+    fully described by a single power law over 2-8 keV, but ``polconst``
+    multiplies only Q/U, so PD/PA are set by the well-fit (reduced chi2 ~ 1)
+    polarization sector and are robust despite the elevated global chi2.
+
+    Parameters
+    ----------
+    indices : dict
+        Return value of ``load_data``; must contain ``'IXPE'``. Every
+        obsid/DU I/Q/U triplet present is loaded into the joint fit -- one
+        ObsID gives a single-ObsID fit, more than one a joint combined fit,
+        always with exactly one tied PD/PA pair.
+    gamma_init, pd_init, pa_init : float
+        Initial powerlaw photon index, polconst polarization fraction
+        (0-1, not percent) and polarization angle (degrees). Defaults are
+        the physically-motivated Cyg X-1 starting point (Gamma~2, PD~4%,
+        PA~-20 deg).
+    nh : float
+        TBabs equivalent hydrogen column, in units of 1e22 cm^-2 (TBabs.nH's
+        own units). Default 0.6.
+    freeze_nh : bool
+        Freeze nH at `nh` (default True). Set False to let nH float.
+    erange : tuple[float, float]
+        (lo, hi) keV range noticed on every IXPE spectrum before fitting.
+        Default (2.0, 8.0).
+    conf_level : float
+        Confidence level the reported 1-sigma-scaled errors correspond to
+        (default 0.683 = 1 sigma, i.e. Delta-chi2=1.0 for one interesting
+        parameter); converted via the chi-squared quantile for 1 degree of
+        freedom. Pass e.g. 0.90 for a 90% interval.
+    n_iterations : int
+        ``Fit.nIterations`` per convergence round. Default 100.
+    log_path : str or None
+        If given, the verbose ``AllModels.show()``/``Fit.show()`` summary is
+        logged here (chatter 10, restored to 5 afterwards).
+
+    Returns
+    -------
+    dict with PD, PA (fraction, degrees), PD_err, PA_err, Gamma, Gamma_err
+    (covariance-matrix ``Parameter.sigma``, scaled by
+    ``sqrt(chi2.ppf(conf_level, 1))``), nH, chi2, dof, stat_per_dof,
+    conf_level, indices (the input, unchanged, for downstream ``plot_fit``),
+    stdout, exit_code.
+
+    Raises
+    ------
+    RuntimeError
+        Any of PD/PA/Gamma has no valid covariance sigma (frozen, or XSPEC
+        returned a non-positive/unavailable value) -- surfaced instead of
+        returning a meaningless 0 or negative error.
+    """
+    if not indices.get('IXPE'):
+        raise ValueError("fit_tbabs_polconst_powerlaw requires indices['IXPE'] (from load_data).")
+
+    spec_indices = []
+    for obsid, dus in indices['IXPE'].items():
+        for du, triplet in dus.items():
+            if len(triplet) != 3:
+                raise ValueError(
+                    f"fit_tbabs_polconst_powerlaw: IXPE {obsid}/{du} is not an "
+                    f"[I, Q, U] triplet: {triplet}")
+            spec_indices.extend(triplet)
+    if not spec_indices:
+        raise ValueError("fit_tbabs_polconst_powerlaw: indices['IXPE'] carries no DUs.")
+
+    for si in spec_indices:
+        AllData(si).notice('all')
+        AllData(si).ignore(f'**-{erange[0]} {erange[1]}-**')
+
+    m1 = Model("tbabs*polconst*powerlaw")
+    m1.TBabs.nH = nh
+    m1.TBabs.nH.frozen = freeze_nh
+    m1.polconst.A = pd_init
+    m1.polconst.A.frozen = False
+    m1.polconst.psi = pa_init
+    m1.polconst.psi.frozen = False
+    m1.powerlaw.PhoIndex = gamma_init
+    m1.powerlaw.PhoIndex.frozen = False
+
+    Fit.nIterations = n_iterations
+    prev_stat = None
+    for _ in range(5):
+        Fit.perform()
+        stat = Fit.statistic
+        if prev_stat is not None and abs(prev_stat - stat) < 1e-3 * max(1.0, abs(stat)):
+            break
+        prev_stat = stat
+
+    delta_chi2 = float(_chi2dist.ppf(conf_level, 1))
+    scale = delta_chi2 ** 0.5
+    pd_err = m1.polconst.A.sigma * scale
+    pa_err = m1.polconst.psi.sigma * scale
+    gamma_err = m1.powerlaw.PhoIndex.sigma * scale
+    for name, err in (('PD', pd_err), ('PA', pa_err), ('Gamma', gamma_err)):
+        if err is None or err <= 0:
+            raise RuntimeError(
+                f"fit_tbabs_polconst_powerlaw: no valid covariance sigma for {name} "
+                f"(got {err!r}) -- the fit did not produce a usable error.")
+
+    if log_path is not None:
+        Xset.chatter = 10
+        Xset.openLog(log_path)
+        try:
+            AllModels.show()
+            Fit.show()
+        finally:
+            Xset.closeLog()
+            Xset.chatter = 5
+
+    PD, PA, Gamma = m1.polconst.A.values[0], m1.polconst.psi.values[0], m1.powerlaw.PhoIndex.values[0]
+    chi2, dof = Fit.statistic, Fit.dof
+    stdout = (f"fit_tbabs_polconst_powerlaw: PD={PD:.4f}+/-{pd_err:.4f} (frac) "
+              f"PA={PA:.3f}+/-{pa_err:.3f} deg Gamma={Gamma:.3f}+/-{gamma_err:.3f} "
+              f"chi2/dof={chi2:.2f}/{dof}")
+    return {
+        'PD': PD, 'PA': PA, 'PD_err': pd_err, 'PA_err': pa_err,
+        'Gamma': Gamma, 'Gamma_err': gamma_err,
+        'nH': m1.TBabs.nH.values[0],
+        'chi2': chi2, 'dof': dof, 'stat_per_dof': chi2 / dof if dof > 0 else None,
+        'conf_level': conf_level,
+        'indices': indices,
+        'stdout': stdout,
+        'exit_code': 0,
+    }
 
 
 def inspect_epoch(

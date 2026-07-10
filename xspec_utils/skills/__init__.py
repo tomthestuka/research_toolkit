@@ -40,6 +40,10 @@ Workflow (all steps share the persistent XSPEC session):
       per caller-supplied energy bin edges
   14. ixpe_pcube_plot — PD(E)/PA(E) and Q-U plane companion figure for an
       ixpe_pcube CSV (no XSPEC/ixpeobssim required)
+  15. fit_tbabs_polconst_powerlaw — polconst spectropolarimetric cross-check
+      of the standard PCUBE polarization: fits tbabs*polconst*powerlaw to
+      every IXPE Stokes I/Q/U triplet in a load_data indices dict, tying
+      polconst's PD/PA into one free pair for the whole session
 """
 
 from __future__ import annotations
@@ -62,7 +66,12 @@ TOOL_MANIFEST: dict = {
             "Pass this indices dict unchanged to fit_*, xspec_status, plot_fit, and plot_iqu. "
             "On first load XSPEC prints harmless warnings about unresolved response-file "
             "paths (arf/rmf are loaded explicitly) — ignore them. For bright sources like "
-            "Cyg X-1, NuSTAR/NICER background is None by design — not an error or missing data."
+            "Cyg X-1, NuSTAR/NICER background is None by design — not an error or missing data. "
+            "ixpe_changes=true forces a fresh, freshly-centroided IXPE reduction (source "
+            "position via find_src.run_extraction, never a fixed coordinate table) at the "
+            "given region radii, so each spectrum's own RESPFILE/ANCRFILE (arf for I, mrf "
+            "for Q/U) and BACKSCAL resolve for that region — required to reproduce a "
+            "paper's region radii rather than reusing whatever is already on disk."
         ),
         "args_schema": {
             "type": "object",
@@ -111,6 +120,36 @@ TOOL_MANIFEST: dict = {
                     "type": "boolean",
                     "description": "Print file paths and loading summaries. Default false.",
                 },
+                "ixpe_changes": {
+                    "type": "boolean",
+                    "description": (
+                        "If true, force a fresh IXPE reduction: centroid the source position "
+                        "(find_src.run_extraction) and re-run red_ixpe.pha at ixpe_src_rad/"
+                        "ixpe_bkg_inner_rad/ixpe_bkg_outer_rad. If false (default), reuse "
+                        "whatever per-DU PHA1 products are already on disk as-is."
+                    ),
+                },
+                "ixpe_src_rad": {
+                    "type": "number",
+                    "description": (
+                        "IXPE source-region radius in arcminutes. Default 1.0. Used only "
+                        "when ixpe_changes=true."
+                    ),
+                },
+                "ixpe_bkg_inner_rad": {
+                    "type": "number",
+                    "description": (
+                        "IXPE background annulus inner radius in arcminutes. Default 3.0. "
+                        "Used only when ixpe_changes=true."
+                    ),
+                },
+                "ixpe_bkg_outer_rad": {
+                    "type": "number",
+                    "description": (
+                        "IXPE background annulus outer radius in arcminutes. Default 5.0. "
+                        "Used only when ixpe_changes=true."
+                    ),
+                },
             },
             "required": ["epoch", "ixpe_path"],
         },
@@ -135,6 +174,104 @@ TOOL_MANIFEST: dict = {
                 },
                 "log_path": {"type": "string"},
                 "audit_data": {"type": "boolean", "description": "Audit loaded data before fitting. Default true."},
+            },
+            "required": ["indices"],
+        },
+    },
+
+    # ── polconst spectropolarimetric cross-check (IXPE-only) ──────────────
+    "research_toolkit.xspec_utils.fit_tbabs_polconst_powerlaw": {
+        "module": "xspec_utils.lib.xspec_help",
+        "fn": "fit_tbabs_polconst_powerlaw",
+        "description": (
+            "Fit tbabs*polconst*powerlaw to every IXPE Stokes I/Q/U triplet in an "
+            "indices dict, tying polconst's polarization degree (PD, fraction 0-1) and "
+            "angle (PA, degrees) into ONE free pair for the whole session -- never one "
+            "per detector unit or ObsID. This is the polconst spectropolarimetric "
+            "cross-check of the standard PCUBE polarization measurement (the "
+            "Krawczynski+2022 Cyg X-1 XSPEC column): call load_data first with "
+            "ixpe_changes=true (a fresh, freshly-centroided reduction) so each "
+            "spectrum's own RESPFILE/ANCRFILE and BACKSCAL resolve for the region "
+            "actually used -- reusing a stale on-disk PHA1 (ixpe_changes=false) can "
+            "carry dead response paths and a different region's BACKSCAL, producing an "
+            "unphysically poor fit. Pass an IXPE-only indices dict (this fit is not a "
+            "joint multi-instrument fit; Model() here applies to every currently active "
+            "data group). One ObsID in indices['IXPE'] gives a single-ObsID fit; more "
+            "than one gives a joint combined fit, still with exactly one tied PD/PA "
+            "pair. Notices 2-8 keV (erange) on every IXPE spectrum before fitting, runs "
+            "Fit.perform() to convergence, then reports PD_err/PA_err/Gamma_err as the "
+            "covariance-matrix parameter-table 1-sigma (Parameter.sigma), scaled to "
+            "conf_level (default 0.683, i.e. 1 sigma) via the chi-squared quantile for "
+            "1 degree of freedom -- raises RuntimeError naming the parameter if any of "
+            "the three has no valid covariance sigma, instead of returning a "
+            "meaningless 0 or negative error. For Cyg X-1 the global reduced chi2 is "
+            "typically >2: the Stokes-I continuum (tbabs*powerlaw; I is unpolarised by "
+            "polconst) is not fully described by a single power law over 2-8 keV, but "
+            "polconst multiplies only Q/U, so PD/PA are set by the well-fit (reduced "
+            "chi2 ~ 1) polarization sector and are robust despite the elevated global "
+            "chi2. Every fitted number is returned in the result dict -- XSPEC's own "
+            "terminal output is muted, so nothing needed downstream is left only in "
+            "stdout. Companion figure: plot_fit (no separate plotter for this tool)."
+        ),
+        "args_schema": {
+            "type": "object",
+            "properties": {
+                "indices": {
+                    "type": "object",
+                    "additionalProperties": True,
+                    "description": (
+                        "Return value of load_data (must contain 'IXPE') — pass the "
+                        "object directly, do NOT JSON-encode it."
+                    ),
+                },
+                "gamma_init": {
+                    "type": "number",
+                    "description": "Initial powerlaw photon index. Default 2.0 (Cyg X-1 starting point).",
+                },
+                "pd_init": {
+                    "type": "number",
+                    "description": (
+                        "Initial polconst polarization fraction (0-1, NOT percent). "
+                        "Default 0.04 (Cyg X-1 starting point)."
+                    ),
+                },
+                "pa_init": {
+                    "type": "number",
+                    "description": "Initial polconst polarization angle in degrees. Default -20.0 (Cyg X-1 starting point).",
+                },
+                "nh": {
+                    "type": "number",
+                    "description": (
+                        "TBabs equivalent hydrogen column, in units of 1e22 cm^-2. "
+                        "Default 0.6 (Cyg X-1 ISM value)."
+                    ),
+                },
+                "freeze_nh": {
+                    "type": "boolean",
+                    "description": "Freeze nH at the supplied value. Default true; set false to let nH float.",
+                },
+                "erange": {
+                    "type": "array",
+                    "items": {"type": "number"},
+                    "description": "[lo, hi] keV range noticed on every IXPE spectrum before fitting. Default [2.0, 8.0].",
+                },
+                "conf_level": {
+                    "type": "number",
+                    "description": (
+                        "Confidence level the reported covariance-matrix 1-sigma "
+                        "errors are scaled to. Default 0.683 (1 sigma, Delta-chi2=1.0 "
+                        "for one interesting parameter); pass e.g. 0.90 for a 90% "
+                        "interval."
+                    ),
+                },
+                "n_iterations": {
+                    "type": "integer",
+                    "description": "Fit.nIterations per convergence round. Default 100.",
+                },
+                "log_path": {
+                    "type": "string",
+                    "description": "If given, write the verbose AllModels.show()/Fit.show() summary here.",
+                },
             },
             "required": ["indices"],
         },

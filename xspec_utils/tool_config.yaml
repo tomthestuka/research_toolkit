@@ -33,6 +33,14 @@ call_timeout_s:
   # ixpe_reduce_pha's single-ObsID 900s to absorb a several-ObsID combination.
   ixpe_pcube: 1800
 
+  # load_data's IXPE ixpe_changes=true branch now centroids (find_src) and
+  # re-runs red_ixpe.pha -- the same find_src + xpselect + xpbin PHA1/Q/U
+  # cost ixpe_reduce_pha's fresh-reduction path budgets 900s for. Previously
+  # ixpe_changes=true raised immediately (no ra/dec ever reached pha()), so
+  # this path had no real runtime; now that it does the reduction, give it
+  # the same backstop as ixpe_reduce_pha.
+  load_data: 900
+
 # Per-package Layer-B (pytest) budget, applied to EACH of the gate's two runs.
 # ixpe_pcube_timeseg's tests exercise several real xpselect+xpbin PCUBE
 # reductions on real, already-local IXPE Level-2 event files (01250401,
