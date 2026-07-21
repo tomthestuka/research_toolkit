@@ -3,6 +3,7 @@ import os
 import csv
 import glob
 import json
+import math
 import re
 import tempfile
 import warnings
@@ -1178,3 +1179,577 @@ def pcube_timeseg(obs: str,
         'n_skipped_empty': n_skipped_empty, 'n_expected': n_expected,
         'complete': complete, 'resumed': resumed,
     }
+
+
+# --------------------------------------------------------------------------- #
+# qu_slice_pcubes: MDP-anchored adaptive q(t)=Q/I, u(t)=U/I intra-observation
+# time series, with data-driven N-way splitting of merged observations.
+# --------------------------------------------------------------------------- #
+
+# Di Marco+2023 (AJ 165, 143) source-region count-rate surface-brightness
+# regimes for the background-subtraction decision: bright (>T_BRIGHT
+# cps/arcmin**2) and intermediate (T_FAINT-T_BRIGHT) sources leave the
+# background annulus itself source-dominated, so subtraction should be
+# avoided; faint (<T_FAINT) sources let rejection work and the residual
+# background should be subtracted. Only T_FAINT drives the binary
+# subtract_background decision (bright and intermediate both resolve to no
+# subtraction); T_BRIGHT is carried in provenance to document the regime
+# boundary, not used in the decision itself.
+_R_PROXY_T_FAINT = 1.0   # cps/arcmin**2
+_R_PROXY_T_BRIGHT = 2.0  # cps/arcmin**2
+
+_QU_SLICE_HEADER_PREFIX = '# qu_slice_pcubes provenance: '
+_QU_SLICE_FIELDS = ['slice_id', 't_mean_met', 't_start_met', 't_stop_met',
+                     'good_exposure_s', 'counts', 'q', 'q_err', 'u', 'u_err',
+                     'PD_pct', 'PA_deg', 'MDP99_pct', 'under_target']
+
+
+def _reduce_window(obs_file_list: list[str], suffix: str, tmin: float | None, tmax: float | None,
+                    ra: float, dec: float, emin_kev: float, emax_kev: float, src_rad: float,
+                    bkg: bool, bkg_inner_rad: float, bkg_outer_rad: float, irf_date: str,
+                    overwrite: bool = True) -> 'xBinnedPolarizationCube':
+    """One weighted, DU-merged PCUBE over ``[tmin, tmax)`` (or the whole
+    observation when ``tmin`` is ``None``), background-subtracted iff
+    ``bkg`` -- the same ``xpselect(tmin=, tmax=)``/``xpbin`` pattern
+    ``pcube_timeseg``'s own ``_reduce`` closure uses for its fixed
+    elapsed-time segments, generalised here to an arbitrary caller-chosen
+    window and reused for both a sub-observation's whole-span cube and every
+    one of its adaptively-placed slices.
+    """
+    bin_kwargs = dict(algorithm='PCUBE', ebinalg='LIST', ebinning=[emin_kev, emax_kev],
+                       overwrite=overwrite, irfname=f'ixpe:obssim{irf_date}_alpha075:v13', weights=True)
+    sel_kwargs = dict(rad=src_rad, ra=ra, dec=dec, suffix=f'{suffix}src', overwrite=overwrite)
+    if tmin is not None:
+        sel_kwargs.update(tmin=tmin, tmax=tmax)
+    with open(os.devnull, 'w') as fnull:
+        with redirect_stdout(fnull):
+            src_files = pipeline.xpselect(*obs_file_list, **sel_kwargs)
+            spc = xBinnedPolarizationCube.from_file_list(pipeline.xpbin(*src_files, **bin_kwargs))
+            if bkg:
+                bkg_sel_kwargs = dict(ra=ra, dec=dec, innerrad=bkg_inner_rad, rad=bkg_outer_rad,
+                                       suffix=f'{suffix}bkg', overwrite=overwrite)
+                if tmin is not None:
+                    bkg_sel_kwargs.update(tmin=tmin, tmax=tmax)
+                bkg_files = pipeline.xpselect(*obs_file_list, **bkg_sel_kwargs)
+                bpc = xBinnedPolarizationCube.from_file_list(pipeline.xpbin(*bkg_files, **bin_kwargs))
+                bpc *= spc.backscal() / bpc.backscal()
+                spc -= bpc
+    return spc
+
+
+def _centroid_ra_dec(evt_path: str, src_rad: float, bkg_inner_rad: float, bkg_outer_rad: float) -> tuple[float, float]:
+    """Centroid a source position from one Level-2 event file via
+    ``find_src.run_extraction`` -- the same auto-centroid ``pcube_timeseg``
+    runs when ``ra``/``dec`` are both omitted -- parsed from the DS9 region
+    it writes to a scratch directory."""
+    with tempfile.TemporaryDirectory(prefix='qu_slice_centroid_') as tmp_dir:
+        src_reg = os.path.join(tmp_dir, 'src.reg')
+        with open(os.devnull, 'w') as fnull:
+            with redirect_stdout(fnull):
+                find_src.run_extraction(evt_path, src_reg, os.path.join(tmp_dir, 'bkg.reg'), None,
+                                         src_rad, bkg_inner_rad, bkg_outer_rad)
+        with open(src_reg) as f:
+            region_line = f.readlines()[1]
+        m = re.match(r'circle\(\s*([-\d.]+)\s*,\s*([-\d.]+)\s*,', region_line)
+        if not m:
+            raise ValueError(f'qu_slice_pcubes: could not parse source region from {src_reg}: {region_line!r}')
+        return float(m.group(1)), float(m.group(2))
+
+
+def _col_num(header, ttype: str) -> int:
+    """FITS column number (1-based) whose ``TTYPE`` keyword equals ``ttype``."""
+    for key, val in header.items():
+        if key.startswith('TTYPE') and val == ttype:
+            return int(key[5:])
+    raise ValueError(f'qu_slice_pcubes: no {ttype!r} column found in header')
+
+
+def _sep_arcmin(ra: np.ndarray, dec: np.ndarray, ra0: float, dec0: float) -> np.ndarray:
+    """Flat-sky angular separation (arcmin) from ``(ra0, dec0)`` -- adequate
+    at the few-arcmin scale of an IXPE source/background region. Used only
+    to place the fast slice-edge/``r_proxy`` proxies below, never for the
+    PCUBE measurement itself (which always goes through ixpeobssim's own
+    ``xpselect`` region selection via ``_reduce_window``)."""
+    dra = (ra - ra0) * np.cos(np.radians(dec0))
+    ddec = dec - dec0
+    return np.sqrt(dra ** 2 + ddec ** 2) * 60.0
+
+
+def _pi_energy_mask(pi: np.ndarray, du: int, emin_kev: float, emax_kev: float) -> np.ndarray:
+    """Boolean mask selecting events whose PI channel's installed-RMF
+    EBOUNDS midpoint falls in ``[emin_kev, emax_kev)`` -- the fixed
+    instrumental channel grid shared across every IRF date for a given DU
+    (see ``_installed_du_rmf``)."""
+    rmf = _installed_du_rmf(du)
+    with fits.open(rmf) as hdul:
+        e_lo = hdul['EBOUNDS'].data['E_MIN'].astype(float)
+        e_hi = hdul['EBOUNDS'].data['E_MAX'].astype(float)
+    in_band = _ebounds_channel_mask(e_lo, e_hi, (emin_kev, emax_kev))
+    pi = np.asarray(pi, dtype=int)
+    mask = np.zeros(pi.shape, dtype=bool)
+    valid = (pi >= 0) & (pi < len(in_band))
+    mask[valid] = in_band[pi[valid]]
+    return mask
+
+
+def _selected_event_times(evt_path: str, du: int, ra: float, dec: float,
+                           src_rad: float, emin_kev: float, emax_kev: float) -> np.ndarray:
+    """Event ``TIME`` (MET s) values from one DU's Level-2 file that fall
+    inside the circular source aperture (``src_rad`` arcmin, via the EVENTS
+    table's own linear TAN-projection column WCS for the X/Y columns -- the
+    same table-column WCS ``find_src.get_table_wcs`` reads for IXPE) and the
+    ``[emin_kev, emax_kev)`` band.
+
+    A fast, un-weighted, un-background-subtracted proxy for two things that
+    never touch the actual polarimetric measurement itself: the source-region
+    count-rate surface brightness (``r_proxy``) and the adaptive slice-edge
+    placement walk (``_greedy_slice_edges``). The measurement always goes
+    through ``_reduce_window`` (ixpeobssim's own ``xpselect``/``xpbin``/
+    weights machinery, never hand-rolled Stokes arithmetic).
+    """
+    with fits.open(evt_path) as hdul:
+        data = hdul['EVENTS'].data
+        header = hdul['EVENTS'].header
+        time = np.asarray(data['TIME'], dtype=float)
+        pi = data['PI']
+        xcol, ycol = _col_num(header, 'X'), _col_num(header, 'Y')
+        x = np.asarray(data['X'], dtype=float)
+        y = np.asarray(data['Y'], dtype=float)
+        ra_evt = header[f'TCRVL{xcol}'] + (x - header[f'TCRPX{xcol}']) * header[f'TCDLT{xcol}']
+        dec_evt = header[f'TCRVL{ycol}'] + (y - header[f'TCRPX{ycol}']) * header[f'TCDLT{ycol}']
+    region_mask = _sep_arcmin(ra_evt, dec_evt, ra, dec) <= src_rad
+    energy_mask = _pi_energy_mask(pi, du, emin_kev, emax_kev)
+    return time[region_mask & energy_mask]
+
+
+def _merged_selected_times(obs_file_list: list[str], ra: float, dec: float,
+                            src_rad: float, emin_kev: float, emax_kev: float) -> np.ndarray:
+    """Sorted, DU1+DU2+DU3-merged ``_selected_event_times``."""
+    times = np.concatenate([
+        _selected_event_times(f, _parse_du(f), ra, dec, src_rad, emin_kev, emax_kev)
+        for f in obs_file_list
+    ])
+    return np.sort(times)
+
+
+def r_proxy(n_events: int, good_exposure_s: float, src_rad: float) -> float:
+    """Source-region count-rate surface brightness (cps/arcmin**2) -- the
+    Di Marco+2023 (AJ 165, 143) brightness proxy that decides background
+    subtraction. Returns ``0.0`` for non-positive exposure (never a
+    ``ZeroDivisionError``)."""
+    if good_exposure_s <= 0:
+        return 0.0
+    area = math.pi * src_rad ** 2
+    return n_events / (good_exposure_s * area)
+
+
+def _decide_background(bkg: bool | None, r_proxy_val: float,
+                        t_faint: float = _R_PROXY_T_FAINT) -> bool:
+    """``bkg`` overrides when given (True/False); otherwise subtract only in
+    the faint regime (``r_proxy_val < t_faint``) -- both the intermediate and
+    bright regimes resolve to no subtraction (Di Marco+2023's caution that a
+    source-dominated background annulus makes subtraction counterproductive)."""
+    return bkg if bkg is not None else (r_proxy_val < t_faint)
+
+
+def _sorted_gap_split_indices(gti_start: list[float], gti_stop: list[float],
+                               split_gap_factor: float) -> list[int]:
+    """GTI-array indices after which a genuine multi-pointing merge gap
+    sits, found by a MAX-RATIO CLIFF on the SORTED gap list -- never against
+    the population median/mean of all gaps. Real IXPE GTI structure mixes
+    many small on-orbit dropout gaps (fractions of a second to a few ks)
+    with, at most, a handful of genuine month-scale merge gaps; comparing
+    every gap to the population median flags hundreds of ordinary orbital
+    dropouts as "splits".
+
+    Ranks every inter-GTI gap descending, then finds the single LARGEST
+    adjacent ratio ``gaps[k] / gaps[k+1]`` in that sorted list -- the cliff
+    separating the top tier of genuine (comparable-magnitude) merge gaps
+    from the ordinary orbital-dropout gaps below it -- and accepts every gap
+    at or above that cliff. This differs from (and replaces) a strictly
+    descending chain of outliers, which fails outright on a merge with two
+    or more comparable dominant gaps (e.g. sorted gaps
+    ``[5.0e6, 4.8e6, 2.8e3, ...]``: the top-vs-second-largest ratio
+    ``5.0e6/4.8e6 ~ 1.04`` never clears ``split_gap_factor``, so a naive
+    top-down chain returns no split at all -- even though BOTH gaps are
+    genuine merge boundaries, comparably huge against every ordinary gap
+    below them). The max-ratio cliff instead looks for where the biggest
+    proportional DROP occurs, wherever that is in the ranked list:
+
+    - A single dominant gap (e.g. ObsID 03002599's ~5.4e6s literature-merge
+      gap against its next-largest ~2.8e3s ordinary gap, ratio ~1900) puts
+      the biggest cliff at the very top -- exactly that one gap is accepted.
+    - Two (or more) comparable dominant gaps put the biggest cliff below
+      ALL of them (their mutual ratio is small; the drop to the ordinary
+      gaps below is what is large) -- every one of that top tier is
+      accepted together.
+    - A tiered case (e.g. sorted gaps ``[5e6, 4e5, 2e3]``, adjacent ratios
+      12.5 then 200) prefers the LARGEST cliff: the 200x drop between
+      ``4e5`` and ``2e3`` beats the 12.5x drop between ``5e6`` and ``4e5``,
+      so the top 2 gaps are accepted, not just the top 1.
+    - No adjacent ratio exceeding ``split_gap_factor`` anywhere in the
+      ranked list means no genuine cliff was found at all -- no split.
+
+    A ``gap_next <= 0`` (degenerate/overlapping GTI) is treated as an
+    infinite ratio, i.e. a definite cliff.
+    """
+    if len(gti_start) < 2:
+        return []
+    gaps = [(gti_start[i + 1] - gti_stop[i], i) for i in range(len(gti_start) - 1)]
+    ranked = sorted(gaps, key=lambda pair: -pair[0])
+    if len(ranked) < 2:
+        return []
+
+    best_k, best_ratio = -1, -1.0
+    for k in range(len(ranked) - 1):
+        gap_k = ranked[k][0]
+        gap_next = ranked[k + 1][0]
+        ratio = float('inf') if gap_next <= 0 else gap_k / gap_next
+        if ratio > best_ratio:
+            best_ratio, best_k = ratio, k
+
+    if best_ratio <= split_gap_factor:
+        return []
+
+    accepted = [ranked[j][1] for j in range(best_k + 1)]
+    return sorted(accepted)
+
+
+def subobs_groups(gti_start: list[float], gti_stop: list[float],
+                   split_gap_factor: float = 10.0) -> list[dict]:
+    """Partition one observation's GTI list into N sub-observations at
+    genuine multi-pointing merge gaps (see ``_sorted_gap_split_indices``).
+
+    Returns a chronologically-ordered list of dicts, each with ``gti_start``,
+    ``gti_stop`` (that sub-observation's own GTI sub-lists) and ``tstart``,
+    ``tstop`` (first GTI start / last GTI stop in the group). A single-group
+    result (no split detected) is still returned as a 1-element list, so
+    callers never special-case "no split" separately from "N-way split".
+    """
+    cuts = _sorted_gap_split_indices(gti_start, gti_stop, split_gap_factor)
+    groups = []
+    start = 0
+    for cut in cuts + [len(gti_start) - 1]:
+        gs = gti_start[start:cut + 1]
+        ge = gti_stop[start:cut + 1]
+        groups.append({'gti_start': gs, 'gti_stop': ge, 'tstart': gs[0], 'tstop': ge[-1]})
+        start = cut + 1
+    return groups
+
+
+def _subobs_key(obs: str, index: int, n_groups: int) -> str:
+    """``obs`` unchanged for a single group; ``obs`` + 'a'/'b'/... for N>1 groups."""
+    if n_groups == 1:
+        return obs
+    return obs + chr(ord('a') + index)
+
+
+def _greedy_slice_edges(times: np.ndarray, tstart: float, tstop: float,
+                         target_raw: float, n_min: int, n_max: int) -> tuple[list[float], bool, bool]:
+    """Adaptive greedy time-edge placement within one sub-observation.
+
+    Walks ``times`` (sorted MET s, already scoped to the sub-observation's
+    own span) accumulating a running raw-event count and closes a slice as
+    soon as the count reaches ``target_raw``; a trailing remainder that never
+    reaches target is merged into the previous slice (never emitted as its
+    own straggler) unless it is the only slice produced. The natural slice
+    count is then clipped to ``[n_min, n_max]``: exceeding ``n_max``
+    re-partitions ``times`` into exactly ``n_max`` equal-raw-count chunks;
+    falling short of ``n_min`` is accepted as-is (this walk never invents
+    slices past what the real events support) and signalled via the
+    returned ``noise_limited``.
+
+    Returns ``(edges, noise_limited, clipped_to_n_max)`` where ``edges`` has
+    ``n_slices + 1`` entries (``edges[0] == tstart``, ``edges[-1] == tstop``).
+    """
+    n_events = len(times)
+    if n_events == 0 or target_raw <= 0:
+        return [tstart, tstop], True, False
+
+    edges = [tstart]
+    cum = 0
+    for t in times:
+        cum += 1
+        if cum >= target_raw:
+            edges.append(float(t))
+            cum = 0
+    # The walk above always closes a slice the moment it reaches target_raw
+    # (even at the very last event), so whatever remains after the final
+    # closure is a residual of 0..target_raw-1 events over [last_closure,
+    # tstop) -- fold it into the previous slice by dropping its own boundary
+    # rather than emit it as its own (possibly EMPTY, if the residual is 0)
+    # straggler, unless it is the ONLY slice (nothing to merge into).
+    if edges[-1] != tstop:
+        edges.append(tstop)
+        if len(edges) > 2:
+            del edges[-2]
+
+    n_natural = len(edges) - 1
+    if n_natural > n_max:
+        idxs = sorted({int(round(k * n_events / n_max)) for k in range(1, n_max)})
+        idxs = [i for i in idxs if 0 < i < n_events]
+        edges = [tstart] + [float(times[i]) for i in idxs] + [tstop]
+        return edges, False, True
+
+    return edges, n_natural < n_min, False
+
+
+def qu_slice_pcubes(obs: str,
+                     file_list: list[str],
+                     ra: float | None = None,
+                     dec: float | None = None,
+                     emin_kev: float = 2.0,
+                     emax_kev: float = 8.0,
+                     src_rad: float = 1.0,
+                     bkg: bool | None = None,
+                     bkg_inner_rad: float = 3.0,
+                     bkg_outer_rad: float = 5.0,
+                     mdp_target: float | None = None,
+                     mdp_frac: float = 0.5,
+                     mdp_floor: float = 0.015,
+                     n_min: int = 8,
+                     n_max: int = 25,
+                     split_gap_factor: float = 10.0,
+                     irf_date: str | None = None,
+                     overwrite: bool = True,
+                     chatter: bool = False,
+                     ) -> dict:
+    """Model-independent, MDP-anchored adaptive q(t)=Q/I, u(t)=U/I intra-
+    observation time series, DU1/2/3 merged, with data-driven N-way splitting
+    of a merged/multi-pointing observation.
+
+    **N-way split.** The observation's GTI list is partitioned into one or
+    more sub-observations at genuine multi-pointing merge gaps
+    (``subobs_groups``/``split_gap_factor``); each sub-observation is keyed
+    ``<obs>`` (no split) or ``<obs>a``, ``<obs>b``, ... (N-way split) and
+    processed fully independently below.
+
+    **Per sub-observation:**
+
+    1. A source-region count-rate surface brightness ``r_proxy`` (cps/
+       arcmin**2, ``r_proxy()``) decides background subtraction when
+       ``bkg=None`` (Di Marco+2023, AJ 165 143): faint (``r_proxy <
+       T_FAINT=1.0``) subtracts an annulus, intermediate/bright does not.
+       ``bkg=True``/``False`` overrides; the resolved choice is applied to
+       both the whole-sub-obs cube and every one of its slices.
+    2. One whole-sub-observation weighted, DU-merged PCUBE (``_reduce_window``
+       over the sub-obs's own ``[tstart, tstop)``) gives ``MDP99_obs`` and
+       total good-time ``COUNTS`` (``C_obs``). The effective per-slice MDP
+       target is ``mdp_target`` if given, else
+       ``max(mdp_frac * PD_obs, mdp_floor)`` (all as dimensionless
+       fractions); ``C_target = C_obs * (MDP99_obs / target) ** 2``.
+    3. Adaptive greedy slicing (``_greedy_slice_edges``) places slice edges
+       at real event arrival times so each slice's raw-proxy count
+       approximates ``C_target``, clipped to ``[n_min, n_max]`` slices (see
+       that function's docstring for the exact clipping rule).
+    4. Each final slice re-runs ``_reduce_window`` over its own
+       ``[tmin, tmax)`` (same background choice as the whole sub-obs),
+       reading ``q``/``u``/errors/``PD``/``PA``/``MDP99``/``COUNTS`` via
+       ``pcube_bands``/direct attribute access -- never hand-rolled Stokes
+       arithmetic -- and is timestamped by the MEAN of the real event
+       arrival times inside its window (``t_mean_met``), NOT the window
+       midpoint -- this deliberately diverges from ``pcube_timeseg``.
+
+    Writes one provenance-headed CSV per sub-observation,
+    ``qu_slices_<key>.csv``, under the observation's own directory (see
+    ``_QU_SLICE_FIELDS`` for the row schema). Every sub-observation is fully
+    reduced (whole cube + slices) BEFORE any CSV is written -- the write
+    pass runs only after the entire per-sub-observation loop has completed
+    without raising, so a failure partway through (e.g. sub-observation "b"
+    of an N-way split) leaves NO CSV at all on disk, not even for a sub-obs
+    ("a") that finished its own reduction successfully first.
+
+    Parameters
+    ----------
+    obs, file_list : see ``_get_obs_file_list``.
+    ra, dec : float or None
+        Source position in degrees. If both ``None``, centroided from DU1's
+        event file via ``find_src.run_extraction``.
+    emin_kev, emax_kev : float
+        Single energy bin edges in keV (also the ``r_proxy`` reference band).
+        Default 2.0-8.0.
+    src_rad, bkg_inner_rad, bkg_outer_rad : float
+        Source region radius / background annulus radii, arcmin.
+    bkg : bool or None
+        Background-subtraction override; ``None`` (default) auto-decides
+        from ``r_proxy`` per sub-observation.
+    mdp_target : float or None
+        Per-slice MDP99 target as a dimensionless fraction (e.g. 0.02 for
+        2%). ``None`` (default) derives it from ``mdp_frac``/``mdp_floor``.
+    mdp_frac, mdp_floor : float
+        ``target = max(mdp_frac * PD_obs, mdp_floor)`` when ``mdp_target``
+        is ``None``. Defaults 0.5, 0.015.
+    n_min, n_max : int
+        Slice-count clipping bounds per sub-observation. Defaults 8, 25.
+    split_gap_factor : float
+        Outlier-ratio threshold for the N-way GTI-gap split. Default 10.0.
+    irf_date : str or None
+        IRF calibration epoch; ``None`` auto-selects the installed epoch
+        nearest the observation date.
+
+    Returns
+    -------
+    dict with ``subobs_keys`` (list) and ``per_subobs`` (key -> dict with
+    ``mdp99_obs_pct``, ``r_proxy``, ``subtract_background``, ``uses_rej``,
+    ``n_slice``, ``noise_limited``, ``whole_pd_pct``, ``whole_pd_err``,
+    ``whole_pa_deg``, ``whole_signif``, ``csv_path``, and ``rows`` -- the
+    per-slice row dicts written to that sub-obs's CSV).
+
+    Raises
+    ------
+    ValueError
+        ``file_list`` does not resolve to exactly one Level-2 event file per
+        DU1/DU2/DU3 for ``obs``; exactly one of ``ra``/``dec`` is given
+        without the other; or a sub-observation has no GTI overlap over its
+        own span or no usable (region+band-selected) events/counts to derive
+        an MDP target or slice from. Any such failure -- even one raised on
+        a LATER sub-observation, after an earlier one's reduction already
+        succeeded -- leaves no CSV on disk at all, since every CSV write is
+        deferred until the whole per-sub-observation loop completes.
+    """
+    obs_file_list = _get_obs_file_list(obs, file_list, chatter=chatter)
+    obs_file_list = _validate_du_files(obs, obs_file_list, caller='qu_slice_pcubes')
+    irf_date = _resolve_irf_date(obs, file_list, irf_date, chatter)
+    uses_rej = any('_rej' in os.path.basename(f) for f in obs_file_list)
+
+    if (ra is None) != (dec is None):
+        raise ValueError(
+            f'qu_slice_pcubes: provide both ra and dec, or neither (auto-centroid); '
+            f'got ra={ra}, dec={dec}')
+    if ra is None:
+        ra, dec = _centroid_ra_dec(obs_file_list[0], src_rad, bkg_inner_rad, bkg_outer_rad)
+
+    with fits.open(obs_file_list[0]) as hdul:
+        if 'GTI' not in hdul or len(hdul['GTI'].data) == 0:
+            raise ValueError(f'{obs_file_list[0]}: no GTI extension data')
+        gti = hdul['GTI'].data
+        gti_start = [float(x) for x in gti['START']]
+        gti_stop = [float(x) for x in gti['STOP']]
+        deadc = hdul['PRIMARY'].header.get('DEADC')
+        if deadc is None:
+            raise ValueError(f'{obs_file_list[0]}: PRIMARY header missing DEADC keyword')
+        deadc = float(deadc)
+
+    all_times = _merged_selected_times(obs_file_list, ra, dec, src_rad, emin_kev, emax_kev)
+    groups = subobs_groups(gti_start, gti_stop, split_gap_factor)
+    obs_dir = Path(obs_file_list[0]).resolve().parent.parent
+
+    subobs_keys = []
+    per_subobs = {}
+    pending_writes = []  # (csv_path, provenance, rows) -- written only after every sub-obs succeeds
+    for i, group in enumerate(groups):
+        key = _subobs_key(obs, i, len(groups))
+        subobs_keys.append(key)
+
+        sub_tstart, sub_tstop = group['tstart'], group['tstop']
+        overlap = _gti_overlap(gti_start, gti_stop, sub_tstart, sub_tstop)
+        if overlap is None:
+            raise ValueError(f'qu_slice_pcubes: sub-obs {key} has no GTI overlap over its own span')
+        good_exposure_whole = overlap[2] * deadc
+
+        sub_times = all_times[(all_times >= sub_tstart) & (all_times < sub_tstop)]
+        n_sub_raw = len(sub_times)
+        r_proxy_val = r_proxy(n_sub_raw, good_exposure_whole, src_rad)
+        subtract_background = _decide_background(bkg, r_proxy_val)
+
+        whole_cube = _reduce_window(obs_file_list, f'{key}whole', sub_tstart, sub_tstop, ra, dec,
+                                     emin_kev, emax_kev, src_rad, subtract_background,
+                                     bkg_inner_rad, bkg_outer_rad, irf_date, overwrite)
+        whole_band = pcube_bands(whole_cube)[0]
+        c_obs = float(whole_cube.COUNTS[0])
+        if c_obs <= 0 or n_sub_raw == 0:
+            raise ValueError(
+                f'qu_slice_pcubes: sub-obs {key} has no usable counts '
+                f'(C_obs={c_obs}, raw region+band events={n_sub_raw})')
+
+        mdp99_obs_frac = whole_band['MDP99']
+        pd_obs_frac = whole_band['PD']
+        target_frac = mdp_target if mdp_target is not None else max(mdp_frac * pd_obs_frac, mdp_floor)
+        if target_frac <= 0:
+            raise ValueError(f'qu_slice_pcubes: sub-obs {key} resolved a non-positive MDP target ({target_frac})')
+        c_target = c_obs * (mdp99_obs_frac / target_frac) ** 2
+        raw_target = c_target * (n_sub_raw / c_obs)
+
+        edges, noise_limited, clipped = _greedy_slice_edges(sub_times, sub_tstart, sub_tstop,
+                                                             raw_target, n_min, n_max)
+        n_slices = len(edges) - 1
+        target_counts = (c_obs / n_slices) if clipped else c_target
+
+        rows = []
+        for s_idx in range(n_slices):
+            t0, t1 = edges[s_idx], edges[s_idx + 1]
+            slice_cube = _reduce_window(obs_file_list, f'{key}s{s_idx:03d}', t0, t1, ra, dec,
+                                         emin_kev, emax_kev, src_rad, subtract_background,
+                                         bkg_inner_rad, bkg_outer_rad, irf_date, overwrite)
+            band = pcube_bands(slice_cube)[0]
+            counts = float(slice_cube.COUNTS[0])
+
+            slice_overlap = _gti_overlap(gti_start, gti_stop, t0, t1)
+            if slice_overlap is None:
+                raise ValueError(f'qu_slice_pcubes: slice {s_idx} of {key} [{t0},{t1}) has no GTI overlap')
+            clip_start, clip_stop, overlap_s = slice_overlap
+            good_exposure_s = overlap_s * deadc
+
+            in_window = sub_times[(sub_times >= t0) & (sub_times < t1)]
+            if len(in_window) == 0:
+                raise ValueError(
+                    f'qu_slice_pcubes: slice {s_idx} of {key} [{t0},{t1}) has no raw '
+                    f'region+band events for the mean-arrival timestamp')
+            t_mean = float(np.mean(in_window))
+
+            rows.append({
+                'slice_id': s_idx, 't_mean_met': t_mean,
+                't_start_met': clip_start, 't_stop_met': clip_stop,
+                'good_exposure_s': good_exposure_s, 'counts': counts,
+                'q': band['QN'], 'q_err': band['QN_err'],
+                'u': band['UN'], 'u_err': band['UN_err'],
+                'PD_pct': band['PD'] * 100.0, 'PA_deg': band['PA'],
+                'MDP99_pct': band['MDP99'] * 100.0,
+                'under_target': counts < target_counts,
+            })
+
+        csv_path = str(obs_dir / f'qu_slices_{key}.csv')
+        provenance = {
+            'emin_kev': emin_kev, 'emax_kev': emax_kev, 'src_rad': src_rad,
+            'bkg': subtract_background, 'bkg_inner_rad': bkg_inner_rad, 'bkg_outer_rad': bkg_outer_rad,
+            'mdp_target': mdp_target, 'mdp_frac': mdp_frac, 'mdp_floor': mdp_floor,
+            'n_min': n_min, 'n_max': n_max, 'split_gap_factor': split_gap_factor,
+            'ra': ra, 'dec': dec, 'irf_date': irf_date, 'uses_rej': uses_rej,
+            'subobs_span': [sub_tstart, sub_tstop],
+        }
+        pending_writes.append((csv_path, provenance, rows))
+
+        per_subobs[key] = {
+            'mdp99_obs_pct': mdp99_obs_frac * 100.0,
+            'r_proxy': r_proxy_val,
+            'subtract_background': subtract_background,
+            'uses_rej': uses_rej,
+            'n_slice': n_slices,
+            'noise_limited': noise_limited,
+            'whole_pd_pct': pd_obs_frac * 100.0,
+            'whole_pd_err': whole_band['PD_err'] * 100.0,
+            'whole_pa_deg': whole_band['PA'],
+            'whole_signif': whole_band['SIGNIF'],
+            'whole_counts': c_obs,
+            'whole_exposure_s': good_exposure_whole,
+            'csv_path': csv_path,
+            'rows': rows,
+        }
+
+        if chatter:
+            print(f'qu_slice_pcubes {key}: {n_slices} slice(s), r_proxy={r_proxy_val:.3f} '
+                  f'cps/arcmin^2, subtract_background={subtract_background}, '
+                  f'noise_limited={noise_limited} -> {csv_path}')
+
+    # Every sub-observation reduced without raising -- only now write the
+    # CSVs, so a failure anywhere in the loop above (even on a later
+    # sub-observation, after an earlier one already succeeded) leaves no
+    # partial CSV at all on disk.
+    for csv_path, provenance, rows in pending_writes:
+        with open(csv_path, 'w', newline='') as f:
+            f.write(_QU_SLICE_HEADER_PREFIX + json.dumps(provenance, sort_keys=True) + '\n')
+            writer = csv.DictWriter(f, fieldnames=_QU_SLICE_FIELDS)
+            writer.writeheader()
+            writer.writerows(rows)
+
+    return {'subobs_keys': subobs_keys, 'per_subobs': per_subobs}

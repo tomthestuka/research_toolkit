@@ -45,11 +45,25 @@ call_timeout_s:
   # only ever a single ObsID.
   load_data: 2700
 
+  # ixpe_qu_slice_pcubes has no internal timeout knob either: per sub-
+  # observation it runs one whole-sub-obs xpselect+xpbin PCUBE plus up to
+  # n_max (default 25) per-slice xpselect+xpbin PCUBE calls, and an N-way
+  # split (e.g. a literature-merged ObsID like 03002599) repeats that whole
+  # sequence once per sub-observation. Worst case at production defaults is
+  # comparable to ixpe_pcube_timeseg's O(100)-segment budget (a handful of
+  # sub-obs * up to 26 reductions each), so this gets the same order-of-
+  # magnitude backstop rather than the 300s orchestration default.
+  ixpe_qu_slice_pcubes: 5400
+
 # Per-package Layer-B (pytest) budget, applied to EACH of the gate's two runs.
 # ixpe_pcube_timeseg's tests exercise several real xpselect+xpbin PCUBE
 # reductions on real, already-local IXPE Level-2 event files (01250401,
 # 02001901) to validate the GTI gate, resume/override, and bounded-return
 # behaviour against genuine, already-local data; ~30 real
 # reductions at ~8-10s each measured in-sandbox, well under the 900s default,
-# but this raises it modestly to absorb slower CI hardware.
-gate_test_timeout_s: 1500
+# but this raises it modestly to absorb slower CI hardware. ixpe_qu_slice_
+# pcubes' tests add real reductions on 01002901/03002599 (larger event files
+# than 01250401/02001901), each test call bounding n_max small (2-3) to keep
+# the real xpselect/xpbin count low; raised further to absorb both files'
+# larger per-call I/O cost on slower CI hardware.
+gate_test_timeout_s: 2400

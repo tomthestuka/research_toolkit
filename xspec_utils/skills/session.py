@@ -605,6 +605,100 @@ def ixpe_pcube(
     }
 
 
+def ixpe_qu_slice_pcubes(
+    obs_db_path: str,
+    obsid: str,
+    ra: float | None = None,
+    dec: float | None = None,
+    emin_kev: float = 2.0,
+    emax_kev: float = 8.0,
+    src_rad: float = 1.0,
+    bkg: bool | None = None,
+    bkg_inner_rad: float = 3.0,
+    bkg_outer_rad: float = 5.0,
+    mdp_target: float | None = None,
+    mdp_frac: float = 0.5,
+    mdp_floor: float = 0.015,
+    n_min: int = 8,
+    n_max: int = 25,
+    split_gap_factor: float = 10.0,
+) -> dict:
+    """MDP-anchored adaptive q(t)=Q/I, u(t)=U/I intra-observation time series
+    for one local IXPE ObsID, with data-driven N-way splitting of a
+    merged/multi-pointing observation.
+
+    Locates the ObsID's Level-2 DU1/2/3 event files under
+    ``<obs_db_path>/<obsid>/event_l2/`` (preferring the instrumental-
+    background-rejected ``_rej`` files; falling back to plain
+    ``evt2_v*.fits`` -- the same convention as ``ixpe_pcube_timeseg``/
+    ``ixpe_reduce_pha``, which naturally resolves a literature-merged ObsID
+    such as 03002599, whose own reduction script skips ``_rej``, to its
+    plain files), then calls ``red_ixpe.qu_slice_pcubes`` -- see that
+    function's docstring for the full N-way-split / background-decision /
+    MDP-anchored-slicing / mean-arrival-timestamp procedure.
+
+    Records one ``kind='qu_slices'`` product per sub-observation CSV in the
+    mission catalog at level 3 via ``obsdb_catalog.neutral.advance`` (all
+    against the real 9-digit ``obsid`` -- a sub-observation key such as
+    ``<obsid>a`` is a virtual partition of that same ObsID, not a separate
+    catalog entry).
+
+    Returns
+    -------
+    dict with 'obsid', 'subobs_keys' (list, chronological order), and
+    'per_subobs' (sub-obs key -> dict with 'mdp99_obs_pct', 'r_proxy',
+    'subtract_background', 'uses_rej', 'n_slice', 'noise_limited',
+    'whole_pd_pct', 'whole_pd_err', 'whole_pa_deg', 'whole_signif',
+    'csv_path' -- read that CSV for the full per-slice table), plus
+    'stdout'/'exit_code' (1 with 'stderr' on failure -- nothing written or
+    recorded on failure).
+    """
+    evt_dir = os.path.join(obs_db_path, obsid, "event_l2")
+    file_list = sorted(glob.glob(os.path.join(evt_dir, f"ixpe{obsid}_det[123]_evt2_v[0-9][0-9]_rej.fits")))
+    if not file_list:
+        file_list = sorted(glob.glob(os.path.join(evt_dir, f"ixpe{obsid}_det[123]_evt2_v[0-9][0-9].fits")))
+    if not file_list:
+        return {"exit_code": 1, "stdout": "",
+                "stderr": f"No Level-2 event files found for {obsid} under {evt_dir}"}
+
+    try:
+        result = red_ixpe.qu_slice_pcubes(
+            obsid, file_list, ra=ra, dec=dec, emin_kev=emin_kev, emax_kev=emax_kev,
+            src_rad=src_rad, bkg=bkg, bkg_inner_rad=bkg_inner_rad, bkg_outer_rad=bkg_outer_rad,
+            mdp_target=mdp_target, mdp_frac=mdp_frac, mdp_floor=mdp_floor,
+            n_min=n_min, n_max=n_max, split_gap_factor=split_gap_factor,
+        )
+    except (Exception, SystemExit) as exc:
+        return {"exit_code": 1, "stdout": "", "stderr": str(exc)}
+
+    per_subobs = result["per_subobs"]
+    missing = [k for k, v in per_subobs.items() if not os.path.exists(v["csv_path"])]
+    if missing:
+        return {"exit_code": 1, "stdout": "",
+                "stderr": f"qu_slice_pcubes did not produce CSV(s) for sub-obs: {missing}"}
+
+    for key, info in per_subobs.items():
+        neutral.advance(obs_db_path, "ixpe", obsid, level=3, products=[{
+            "kind": "qu_slices",
+            "path": os.path.relpath(info["csv_path"], obs_db_path),
+            "produced_by": "xspec_utils.red_ixpe.qu_slice_pcubes",
+            "params": {"subobs_key": key, "emin_kev": emin_kev, "emax_kev": emax_kev,
+                       "src_rad": src_rad, "subtract_background": info["subtract_background"],
+                       "n_slice": info["n_slice"], "noise_limited": info["noise_limited"]},
+        }])
+
+    summary = {k: {kk: vv for kk, vv in v.items() if kk != "rows"} for k, v in per_subobs.items()}
+    return {
+        "obsid": obsid,
+        "subobs_keys": result["subobs_keys"],
+        "per_subobs": summary,
+        "stdout": (f"ixpe_qu_slice_pcubes {obsid}: {len(result['subobs_keys'])} sub-obs, "
+                   f"{sum(v['n_slice'] for v in per_subobs.values())} slice(s) total -> "
+                   f"{[v['csv_path'] for v in per_subobs.values()]}"),
+        "exit_code": 0,
+    }
+
+
 def ixpe_HR(
     obs_db_path: str,
     obsids: list,

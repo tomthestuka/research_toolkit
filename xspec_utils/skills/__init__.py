@@ -65,6 +65,13 @@ Workflow (all steps share the persistent XSPEC session):
       paper offset is visible at a glance; reads either compare_to_
       benchmark's returned rows list or the CSV it wrote (no XSPEC/
       ixpeobssim required)
+  19. ixpe_qu_slice_pcubes — MDP-anchored adaptive q(t)=Q/I, u(t)=U/I
+      intra-observation time series for one local ObsID: data-driven N-way
+      splitting of a merged/multi-pointing observation at genuine GTI merge
+      gaps, a Di Marco+2023 source-brightness-proxy background decision,
+      adaptive greedy slice-edge placement anchored to a per-slice MDP99
+      target, and mean-event-arrival-time (not window-midpoint) slice
+      timestamps
 """
 
 from __future__ import annotations
@@ -1629,6 +1636,190 @@ TOOL_MANIFEST: dict = {
                 },
             },
             "required": [],
+        },
+    },
+
+    # ── MDP-anchored adaptive intra-observation q(t)/u(t) slicing ──────────
+    "research_toolkit.xspec_utils.ixpe_qu_slice_pcubes": {
+        "module": "xspec_utils.skills.session",
+        "fn": "ixpe_qu_slice_pcubes",
+        "description": (
+            "Model-independent intra-observation q(t)=Q/I, u(t)=U/I time series for one "
+            "local IXPE ObsID, DU1/2/3 merged, sliced ADAPTIVELY so each slice reaches a "
+            "TARGET MDP99 -- unlike ixpe_pcube_timeseg's fixed-duration, GTI-window-timed "
+            "segments. Locates Level-2 DU1/2/3 event files under "
+            "<obs_db_path>/<obsid>/event_l2/ (preferring '_rej' instrumental-background- "
+            "rejected files, falling back to plain evt2_v*.fits -- the same convention as "
+            "ixpe_pcube_timeseg/ixpe_reduce_pha, which naturally resolves a literature- "
+            "merged ObsID such as 03002599 to its plain files). This tool does not download "
+            "data, so check ObsID locality with a data-catalog tool first. "
+            "N-WAY SPLIT: the observation's GTI list is partitioned into one or more "
+            "sub-observations at genuine multi-pointing merge gaps -- an outlier-ratio test "
+            "on the SORTED inter-GTI gap list (never against the population median, which "
+            "misfires on real IXPE GTI structure: on-orbit dropout gaps span orders of "
+            "magnitude below a genuine month-scale merge gap) -- gated by split_gap_factor. "
+            "No split -> one sub-obs keyed <obsid>; an N-way split (e.g. two merged "
+            "pointings) -> <obsid>a, <obsid>b, ... in time order, each analysed fully "
+            "independently and NEVER straddled by a single slice. "
+            "PER SUB-OBSERVATION: (1) BACKGROUND -- bkg=None auto-decides from a "
+            "source-region count-rate surface-brightness proxy r_proxy (cps/arcmin^2, "
+            "Di Marco+2023 AJ 165 143): faint (r_proxy<1.0) subtracts a background "
+            "annulus, intermediate/bright (r_proxy>=1.0) does not (a source-dominated "
+            "background annulus makes subtraction counterproductive); bkg=True/False "
+            "overrides this per-sub-obs decision; the resolved choice is applied "
+            "identically to the whole-sub-obs cube and every one of its slices. (2) One "
+            "whole-sub-obs weighted, DU-merged PCUBE gives MDP99_obs and total good-time "
+            "COUNTS (C_obs); the per-slice MDP target is mdp_target if given, else "
+            "max(mdp_frac*PD_obs, mdp_floor) (dimensionless fractions), and "
+            "C_target=C_obs*(MDP99_obs/target)^2. (3) ADAPTIVE GREEDY SLICING places edges "
+            "at real event arrival times so each slice's counts approximate C_target, "
+            "clipped to [n_min, n_max] slices per sub-obs: exceeding n_max re-partitions "
+            "into exactly n_max equal-count slices (raising the effective target "
+            "accordingly); falling short of n_min is accepted as-is and flagged "
+            "noise_limited=true for that sub-obs (this tool never invents slices past "
+            "what the real events support) -- a trailing under-target remainder is merged "
+            "into the previous slice rather than emitted as its own straggler. (4) Each "
+            "final slice re-runs the same weighted DU-merged PCUBE over its own [tmin,tmax) "
+            "window (never re-deriving the whole observation) and is TIMESTAMPED by the "
+            "MEAN of the real event arrival times inside that window (t_mean_met), NOT the "
+            "window midpoint -- this deliberately diverges from ixpe_pcube_timeseg, and can "
+            "matter across a real intra-sub-obs GTI gap. Auto-centroids ra/dec via source "
+            "extraction when both are omitted (same as ixpe_pcube_timeseg); provide both or "
+            "neither. Writes one provenance-headed qu_slices_<subobs_key>.csv per "
+            "sub-observation under <obs_db_path>/<obsid>/ (columns: slice_id, t_mean_met, "
+            "t_start_met, t_stop_met, good_exposure_s, counts, q, q_err, u, u_err, PD_pct, "
+            "PA_deg, MDP99_pct, under_target -- all MET times in seconds; q/u are "
+            "dimensionless normalized Stokes fractions Q/I, U/I; PD_pct/MDP99_pct are "
+            "percent, matching ixpe_pcube_timeseg), and records one 'qu_slices' product per "
+            "sub-obs CSV in the mission catalog at level 3 via obsdb_catalog.neutral.advance "
+            "(all against the real 9-digit obsid). Raises (surfaced as exit_code=1/stderr, "
+            "nothing written or recorded) on a missing/incomplete DU set, a mismatched "
+            "ra/dec pair, or a sub-observation with no GTI overlap or no usable counts over "
+            "its own span. Returns 'obsid', 'subobs_keys' (list, time order), 'per_subobs' "
+            "(key -> 'mdp99_obs_pct', 'r_proxy', 'subtract_background', 'uses_rej', "
+            "'n_slice', 'noise_limited', 'whole_pd_pct', 'whole_pd_err', 'whole_pa_deg', "
+            "'whole_signif', 'whole_counts', 'whole_exposure_s', 'csv_path' -- read that "
+            "CSV for the full per-slice table, "
+            "never returned inline), 'stdout', 'exit_code'. This is a data tool -- it "
+            "writes no plot."
+        ),
+        "args_schema": {
+            "type": "object",
+            "properties": {
+                "obs_db_path": {
+                    "type": "string",
+                    "description": (
+                        "The IXPE mission's obs-db directory (e.g. "
+                        "'/data/fzhou/XSPEC/Cyg_X-1/IXPE'). Event files are expected at "
+                        "<obs_db_path>/<obsid>/event_l2/; qu_slices_<subobs_key>.csv lands "
+                        "under <obs_db_path>/<obsid>/."
+                    ),
+                },
+                "obsid": {
+                    "type": "string",
+                    "description": "9-digit IXPE Observation ID, as a string, e.g. '01002901'.",
+                },
+                "ra": {
+                    "type": "number",
+                    "description": (
+                        "Source RA in decimal degrees. Omit together with dec to "
+                        "auto-centroid from one Level-2 event file."
+                    ),
+                },
+                "dec": {
+                    "type": "number",
+                    "description": (
+                        "Source Dec in decimal degrees. Omit together with ra to "
+                        "auto-centroid from one Level-2 event file."
+                    ),
+                },
+                "emin_kev": {
+                    "type": "number",
+                    "description": (
+                        "Lower edge of the single energy bin, in keV -- also the r_proxy "
+                        "background-decision reference band. Default 2.0."
+                    ),
+                },
+                "emax_kev": {
+                    "type": "number",
+                    "description": "Upper edge of the single energy bin, in keV. Default 8.0.",
+                },
+                "src_rad": {
+                    "type": "number",
+                    "description": "Source region radius in arcminutes. Default 1.0.",
+                },
+                "bkg": {
+                    "type": "boolean",
+                    "description": (
+                        "Background-subtraction override, applied identically to the "
+                        "whole-sub-obs cube and every slice within each sub-observation. "
+                        "Omit (null/default) to auto-decide per sub-observation from the "
+                        "r_proxy source-brightness proxy (Di Marco+2023): faint "
+                        "(r_proxy<1.0 cps/arcmin^2) subtracts, intermediate/bright does not."
+                    ),
+                },
+                "bkg_inner_rad": {
+                    "type": "number",
+                    "description": "Background annulus inner radius in arcminutes. Default 3.0.",
+                },
+                "bkg_outer_rad": {
+                    "type": "number",
+                    "description": "Background annulus outer radius in arcminutes. Default 5.0.",
+                },
+                "mdp_target": {
+                    "type": "number",
+                    "description": (
+                        "Per-slice MDP99 target as a dimensionless fraction (e.g. 0.02 for "
+                        "2%, NOT percent). Omit (null/default) to derive it per "
+                        "sub-observation from mdp_frac/mdp_floor instead."
+                    ),
+                },
+                "mdp_frac": {
+                    "type": "number",
+                    "description": (
+                        "When mdp_target is omitted: the per-slice MDP99 target is "
+                        "max(mdp_frac * whole-sub-obs PD, mdp_floor), i.e. mdp_frac is the "
+                        "fraction of the sub-observation's own detected polarization degree "
+                        "considered an adequate per-slice sensitivity. Default 0.5."
+                    ),
+                },
+                "mdp_floor": {
+                    "type": "number",
+                    "description": (
+                        "Floor (dimensionless fraction, e.g. 0.015 for 1.5%) on the derived "
+                        "per-slice MDP99 target when mdp_target is omitted -- prevents an "
+                        "unreachably tight target for a weakly-polarized or short "
+                        "sub-observation. Default 0.015."
+                    ),
+                },
+                "n_min": {
+                    "type": "integer",
+                    "description": (
+                        "Minimum slice count per sub-observation. Fewer natural slices than "
+                        "this are still emitted as-is (never invented); that sub-obs is "
+                        "flagged noise_limited=true instead. Default 8."
+                    ),
+                },
+                "n_max": {
+                    "type": "integer",
+                    "description": (
+                        "Maximum slice count per sub-observation. More natural slices than "
+                        "this are re-partitioned into exactly n_max equal-count slices "
+                        "(raising the effective per-slice target accordingly). Default 25."
+                    ),
+                },
+                "split_gap_factor": {
+                    "type": "number",
+                    "description": (
+                        "N-way split threshold: an inter-GTI gap is accepted as a genuine "
+                        "multi-pointing merge boundary only when it exceeds this many times "
+                        "its own next-largest neighbour in the sorted gap list (an outlier "
+                        "test on the sorted gaps, never against the population median/mean "
+                        "of all gaps). Default 10.0."
+                    ),
+                },
+            },
+            "required": ["obs_db_path", "obsid"],
         },
     },
 }
