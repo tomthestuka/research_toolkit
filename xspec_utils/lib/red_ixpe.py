@@ -1205,10 +1205,33 @@ _QU_SLICE_FIELDS = ['slice_id', 't_mean_met', 't_start_met', 't_stop_met',
                      'PD_pct', 'PA_deg', 'MDP99_pct', 'under_target']
 
 
+def _common_du_bounds(obs_file_list: list[str]) -> tuple[float, float]:
+    """Common physical MET span every file in ``obs_file_list`` actually
+    covers: ``(max over files of that file's own EVENTS TSTART, min over
+    files of that file's own EVENTS TSTOP)``.
+
+    These are the same per-file TSTART/TSTOP keywords ixpeobssim's own
+    ``xEventSelect._validate`` checks a requested ``tmin``/``tmax`` against,
+    one file at a time, before running the selection. Real IXPE DU1/DU2/DU3
+    Level-2 files for the same ObsID can carry TSTART/TSTOP differing by
+    milliseconds up to hundreds of seconds (a merged/re-processed
+    observation), so a window edge valid for one DU's own bounds can lie
+    outside a sibling DU's -- this is the span every contributing file's own
+    bounds cover in common.
+    """
+    tstarts, tstops = [], []
+    for f in obs_file_list:
+        with fits.open(f) as hdul:
+            hdr = hdul['EVENTS'].header
+            tstarts.append(float(hdr['TSTART']))
+            tstops.append(float(hdr['TSTOP']))
+    return max(tstarts), min(tstops)
+
+
 def _reduce_window(obs_file_list: list[str], suffix: str, tmin: float | None, tmax: float | None,
                     ra: float, dec: float, emin_kev: float, emax_kev: float, src_rad: float,
                     bkg: bool, bkg_inner_rad: float, bkg_outer_rad: float, irf_date: str,
-                    overwrite: bool = True) -> 'xBinnedPolarizationCube':
+                    overwrite: bool = True) -> tuple['xBinnedPolarizationCube', float | None, float | None]:
     """One weighted, DU-merged PCUBE over ``[tmin, tmax)`` (or the whole
     observation when ``tmin`` is ``None``), background-subtracted iff
     ``bkg`` -- the same ``xpselect(tmin=, tmax=)``/``xpbin`` pattern
@@ -1217,6 +1240,21 @@ def _reduce_window(obs_file_list: list[str], suffix: str, tmin: float | None, tm
     window and reused for both a sub-observation's whole-span cube and every
     one of its adaptively-placed slices.
 
+    **Per-DU physical-bounds clipping.** A single ``xpselect(tmin=, tmax=)``
+    call spans all three DU files at once, but ``xEventSelect._validate``
+    checks that one ``tmin``/``tmax`` pair against EACH file's own EVENTS
+    TSTART/TSTOP in turn and aborts the instant either edge falls outside
+    any single file's own bounds -- even when the window is entirely valid
+    for the other two DUs. When ``tmin`` is not ``None`` this clips the
+    requested window to the span every contributing DU file covers in
+    common (``_common_du_bounds``): ``tmin_eff = max(tmin, tstart_common)``,
+    ``tmax_eff = min(tmax, tstop_common)``. Raises ``ValueError`` -- never
+    calling ``xpselect`` at all -- when the clipped window is empty
+    (``tmax_eff <= tmin_eff``), i.e. the requested window lies entirely
+    outside the common span; this is a genuine, honest failure of that
+    window, not a cube to invent. The whole-observation call (``tmin`` is
+    ``None``) is never clipped.
+
     Every ``xpselect``/``xpbin`` call runs with stdout+stderr captured into
     an in-memory buffer, discarded on success. ixpeobssim's own
     ``logging_.abort()`` is a bare ``sys.exit`` -- on that ``SystemExit``
@@ -1224,12 +1262,34 @@ def _reduce_window(obs_file_list: list[str], suffix: str, tmin: float | None, tm
     diagnostic ixpeobssim prints right before "Cannot continue, abort.":
     missing IRF, empty selection, missing extension, ...), so the real cause
     reaches the caller instead of a bare, uninformative abort message.
+
+    Returns
+    -------
+    tuple[xBinnedPolarizationCube, float | None, float | None]
+        The reduced cube, and the effective ``(tmin, tmax)`` actually passed
+        to ``xpselect`` -- ``(None, None)`` when ``tmin`` was ``None``, else
+        the (possibly per-DU-clipped, and therefore narrower) window. A
+        caller computing GTI-derived exposure or a mean event-arrival
+        timestamp for this window should recompute it against this
+        returned, effective window, not the originally-requested one, so
+        the reported quantity matches the events actually selected.
     """
+    if tmin is not None:
+        tstart_common, tstop_common = _common_du_bounds(obs_file_list)
+        tmin_eff = max(tmin, tstart_common)
+        tmax_eff = min(tmax, tstop_common)
+        if tmax_eff <= tmin_eff:
+            raise ValueError(
+                f'_reduce_window({suffix}): requested window [{tmin}, {tmax}) does not '
+                f'overlap the common per-DU physical span [{tstart_common}, {tstop_common})')
+    else:
+        tmin_eff = tmax_eff = None
+
     bin_kwargs = dict(algorithm='PCUBE', ebinalg='LIST', ebinning=[emin_kev, emax_kev],
                        overwrite=overwrite, irfname=f'ixpe:obssim{irf_date}_alpha075:v13', weights=True)
     sel_kwargs = dict(rad=src_rad, ra=ra, dec=dec, suffix=f'{suffix}src', overwrite=overwrite)
-    if tmin is not None:
-        sel_kwargs.update(tmin=tmin, tmax=tmax)
+    if tmin_eff is not None:
+        sel_kwargs.update(tmin=tmin_eff, tmax=tmax_eff)
 
     buf = io.StringIO()
     try:
@@ -1239,8 +1299,8 @@ def _reduce_window(obs_file_list: list[str], suffix: str, tmin: float | None, tm
             if bkg:
                 bkg_sel_kwargs = dict(ra=ra, dec=dec, innerrad=bkg_inner_rad, rad=bkg_outer_rad,
                                        suffix=f'{suffix}bkg', overwrite=overwrite)
-                if tmin is not None:
-                    bkg_sel_kwargs.update(tmin=tmin, tmax=tmax)
+                if tmin_eff is not None:
+                    bkg_sel_kwargs.update(tmin=tmin_eff, tmax=tmax_eff)
                 bkg_files = pipeline.xpselect(*obs_file_list, **bkg_sel_kwargs)
                 bpc = xBinnedPolarizationCube.from_file_list(pipeline.xpbin(*bkg_files, **bin_kwargs))
                 bpc *= spc.backscal() / bpc.backscal()
@@ -1251,7 +1311,7 @@ def _reduce_window(obs_file_list: list[str], suffix: str, tmin: float | None, tm
             f'_reduce_window({suffix}): ixpeobssim pipeline aborted ({exc}); '
             f'last output:\n{tail}'
         ) from exc
-    return spc
+    return spc, tmin_eff, tmax_eff
 
 
 def _centroid_ra_dec(evt_path: str, src_rad: float, bkg_inner_rad: float, bkg_outer_rad: float) -> tuple[float, float]:
@@ -1612,11 +1672,12 @@ def qu_slice_pcubes(obs: str,
        ``bkg=True``/``False`` overrides; the resolved choice is applied to
        both the whole-sub-obs cube and every one of its slices.
     2. One whole-sub-observation weighted, DU-merged PCUBE (``_reduce_window``
-       over the sub-obs's own ``[tstart, tstop)``) gives ``MDP99_obs`` and
-       total good-time ``COUNTS`` (``C_obs``). The effective per-slice MDP
-       target is ``mdp_target`` if given, else
-       ``max(mdp_frac * PD_obs, mdp_floor)`` (all as dimensionless
-       fractions); ``C_target = C_obs * (MDP99_obs / target) ** 2``.
+       over the sub-obs's own ``[tstart, tstop)``, per-DU-clipped -- see
+       ``_reduce_window`` -- when a sibling DU's own physical TSTART/TSTOP is
+       narrower) gives ``MDP99_obs`` and total good-time ``COUNTS``
+       (``C_obs``). The effective per-slice MDP target is ``mdp_target`` if
+       given, else ``max(mdp_frac * PD_obs, mdp_floor)`` (all as
+       dimensionless fractions); ``C_target = C_obs * (MDP99_obs / target) ** 2``.
     3. Adaptive greedy slicing (``_greedy_slice_edges``) places slice edges
        at real event arrival times so each slice's raw-proxy count
        approximates ``C_target``, clipped to ``[n_min, n_max]`` slices (see
@@ -1628,6 +1689,10 @@ def qu_slice_pcubes(obs: str,
        arithmetic -- and is timestamped by the MEAN of the real event
        arrival times inside its window (``t_mean_met``), NOT the window
        midpoint -- this deliberately diverges from ``pcube_timeseg``.
+       ``good_exposure_s``/``t_mean_met`` are both computed against
+       ``_reduce_window``'s returned effective (possibly per-DU-clipped)
+       window, so they describe exactly the events the slice's cube was
+       built from.
 
     Writes one provenance-headed CSV per sub-observation,
     ``qu_slices_<key>.csv``, under the observation's own directory (see
@@ -1740,15 +1805,28 @@ def qu_slice_pcubes(obs: str,
         r_proxy_val = r_proxy(n_sub_raw, good_exposure_whole, src_rad)
         subtract_background = _decide_background(bkg, r_proxy_val)
 
-        whole_cube = _reduce_window(obs_file_list, f'{key}whole', sub_tstart, sub_tstop, ra, dec,
-                                     emin_kev, emax_kev, src_rad, subtract_background,
-                                     bkg_inner_rad, bkg_outer_rad, irf_date, overwrite)
+        whole_cube, whole_tmin_eff, whole_tmax_eff = _reduce_window(
+            obs_file_list, f'{key}whole', sub_tstart, sub_tstop, ra, dec,
+            emin_kev, emax_kev, src_rad, subtract_background,
+            bkg_inner_rad, bkg_outer_rad, irf_date, overwrite)
         whole_band = pcube_bands(whole_cube)[0]
         c_obs = float(whole_cube.COUNTS[0])
         if c_obs <= 0 or n_sub_raw == 0:
             raise ValueError(
                 f'qu_slice_pcubes: sub-obs {key} has no usable counts '
                 f'(C_obs={c_obs}, raw region+band events={n_sub_raw})')
+
+        # Recompute the reported whole-sub-obs exposure against the window
+        # _reduce_window actually selected (per-DU-clipped when a sibling
+        # DU's own physical TSTART/TSTOP is narrower than sub_tstart/
+        # sub_tstop -- see _reduce_window), so good_exposure_whole matches
+        # the events the whole-sub-obs cube was actually built from.
+        whole_overlap = _gti_overlap(gti_start, gti_stop, whole_tmin_eff, whole_tmax_eff)
+        if whole_overlap is None:
+            raise ValueError(
+                f'qu_slice_pcubes: sub-obs {key} has no GTI overlap over its '
+                f'clipped span [{whole_tmin_eff},{whole_tmax_eff})')
+        good_exposure_whole = whole_overlap[2] * deadc
 
         mdp99_obs_frac = whole_band['MDP99']
         pd_obs_frac = whole_band['PD']
@@ -1766,22 +1844,29 @@ def qu_slice_pcubes(obs: str,
         rows = []
         for s_idx in range(n_slices):
             t0, t1 = edges[s_idx], edges[s_idx + 1]
-            slice_cube = _reduce_window(obs_file_list, f'{key}s{s_idx:03d}', t0, t1, ra, dec,
-                                         emin_kev, emax_kev, src_rad, subtract_background,
-                                         bkg_inner_rad, bkg_outer_rad, irf_date, overwrite)
+            slice_cube, s_tmin_eff, s_tmax_eff = _reduce_window(
+                obs_file_list, f'{key}s{s_idx:03d}', t0, t1, ra, dec,
+                emin_kev, emax_kev, src_rad, subtract_background,
+                bkg_inner_rad, bkg_outer_rad, irf_date, overwrite)
             band = pcube_bands(slice_cube)[0]
             counts = float(slice_cube.COUNTS[0])
 
-            slice_overlap = _gti_overlap(gti_start, gti_stop, t0, t1)
+            # GTI overlap and the mean-arrival timestamp both read off the
+            # effective (per-DU-clipped) window _reduce_window actually
+            # selected, not the originally-requested [t0, t1), so
+            # good_exposure_s/t_mean_met describe exactly the events the
+            # slice cube was built from.
+            slice_overlap = _gti_overlap(gti_start, gti_stop, s_tmin_eff, s_tmax_eff)
             if slice_overlap is None:
-                raise ValueError(f'qu_slice_pcubes: slice {s_idx} of {key} [{t0},{t1}) has no GTI overlap')
+                raise ValueError(
+                    f'qu_slice_pcubes: slice {s_idx} of {key} [{s_tmin_eff},{s_tmax_eff}) has no GTI overlap')
             clip_start, clip_stop, overlap_s = slice_overlap
             good_exposure_s = overlap_s * deadc
 
-            in_window = sub_times[(sub_times >= t0) & (sub_times < t1)]
+            in_window = sub_times[(sub_times >= s_tmin_eff) & (sub_times < s_tmax_eff)]
             if len(in_window) == 0:
                 raise ValueError(
-                    f'qu_slice_pcubes: slice {s_idx} of {key} [{t0},{t1}) has no raw '
+                    f'qu_slice_pcubes: slice {s_idx} of {key} [{s_tmin_eff},{s_tmax_eff}) has no raw '
                     f'region+band events for the mean-arrival timestamp')
             t_mean = float(np.mean(in_window))
 

@@ -316,6 +316,179 @@ def test_reduce_window_surfaces_captured_diagnostic_on_abort(monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
+# Fix-under-test: _reduce_window must clip a windowed xpselect(tmin=,tmax=)
+# call to the common per-DU physical span rather than abort on a per-DU
+# TSTART/TSTOP mismatch (toolspec-reduce-window-perdu-tstop). OBSID_MISMATCH
+# (02008501) is one of the five real ObsIDs the brief reports aborting at
+# _reduce_window(<obsid>whole): its DU1 TSTART (203469478.24) precedes
+# DU2/DU3's own TSTART (203470050.77) by ~572s, so the DU1-derived
+# whole-sub-obs window used to fail ixpeobssim's per-file physical-bounds
+# check for DU2/DU3.
+# --------------------------------------------------------------------------- #
+
+OBSID_MISMATCH = "02008501"  # real per-DU TSTART mismatch; aborted pre-fix
+
+
+def _events_tstart_tstop(evt_path: str) -> tuple[float, float]:
+    with fits.open(evt_path) as hdul:
+        hdr = hdul["EVENTS"].header
+        return float(hdr["TSTART"]), float(hdr["TSTOP"])
+
+
+def test_common_du_bounds_real_mismatched_obsid_is_narrower_than_du1(tmp_path):
+    """Grounds _common_du_bounds against the real, reported mismatch: the
+    common per-DU intersection must be strictly narrower than DU1's own
+    individual span, exactly matching the mismatch the brief reports
+    (DU1 TSTART precedes DU2/DU3's own TSTART by ~572s; TSTOP agrees)."""
+    file_list = _copy_real_event_files(str(tmp_path), OBSID_MISMATCH)
+    du1_tstart, du1_tstop = _events_tstart_tstop(file_list[0])
+    tstart_common, tstop_common = red_ixpe._common_du_bounds(file_list)
+    assert tstart_common > du1_tstart
+    assert tstart_common == pytest.approx(203470050.77, abs=0.1)
+    assert tstop_common == pytest.approx(du1_tstop, abs=1e-6)
+
+
+def test_common_du_bounds_matches_du_span_when_all_dus_agree(tmp_path):
+    """Differential: on 01002901 -- whose three DU files share identical
+    TSTART/TSTOP -- the per-DU-clipped span must equal each DU's own
+    (unclipped) span exactly, so the fix is a genuine no-op for the
+    already-working case."""
+    file_list = _copy_real_event_files(str(tmp_path), OBSID_SINGLE)
+    du_tstart, du_tstop = _events_tstart_tstop(file_list[0])
+    tstart_common, tstop_common = red_ixpe._common_du_bounds(file_list)
+    assert tstart_common == pytest.approx(du_tstart, abs=1e-6)
+    assert tstop_common == pytest.approx(du_tstop, abs=1e-6)
+
+
+def test_reduce_window_whole_observation_call_never_clipped(monkeypatch):
+    """The whole-observation call (tmin=None) must stay exactly as before:
+    _common_du_bounds is never even consulted (so it never opens a file --
+    a dummy, non-existent path is fine here)."""
+
+    def bounds_boom(*args, **kwargs):
+        raise AssertionError("_common_du_bounds must not be called when tmin is None")
+
+    def xpselect_exit(*args, **kwargs):
+        raise SystemExit(1)
+
+    monkeypatch.setattr(red_ixpe, "_common_du_bounds", bounds_boom)
+    monkeypatch.setattr(red_ixpe.pipeline, "xpselect", xpselect_exit)
+    with pytest.raises(RuntimeError):
+        red_ixpe._reduce_window(
+            ["dummy_det1_evt2_v01.fits"], "wholecall", None, None, 299.59, 35.20,
+            2.0, 8.0, 1.0, False, 3.0, 5.0, "20220101",
+        )
+
+
+def test_reduce_window_edge_case_empty_intersection_raises_before_xpselect(tmp_path, monkeypatch):
+    """When the requested window lies entirely outside the common per-DU
+    span, _reduce_window must raise ValueError WITHOUT ever calling
+    xpselect -- an honest failure of that window, never a silent
+    empty/invented cube."""
+    file_list = _copy_real_event_files(str(tmp_path), OBSID_MISMATCH)
+    _, tstop_common = red_ixpe._common_du_bounds(file_list)
+
+    def boom(*args, **kwargs):
+        raise AssertionError("xpselect must not be called for an empty clipped window")
+
+    monkeypatch.setattr(red_ixpe.pipeline, "xpselect", boom)
+    with pytest.raises(ValueError, match="does not overlap"):
+        red_ixpe._reduce_window(
+            file_list, "edge", tstop_common + 100.0, tstop_common + 200.0, 299.59, 35.20,
+            2.0, 8.0, 1.0, False, 3.0, 5.0, "20220101",
+        )
+
+
+def test_reduce_window_passes_clipped_window_to_xpselect(tmp_path, monkeypatch):
+    """Direct capability proof (toolspec check a): when the requested window
+    extends past the common per-DU physical span on BOTH edges,
+    _reduce_window must pass the CLIPPED window -- exactly
+    [max-TSTART, min-TSTOP] from _common_du_bounds -- to xpselect, not the
+    wider requested window. Captures the tmin/tmax kwargs xpselect actually
+    receives (short-circuiting with SystemExit before xpbin runs) and asserts
+    they equal the common per-DU bounds, and are strictly inside the requested
+    window."""
+    file_list = _copy_real_event_files(str(tmp_path), OBSID_MISMATCH)
+    tstart_common, tstop_common = red_ixpe._common_du_bounds(file_list)
+
+    captured = {}
+
+    def fake_xpselect(*args, **kwargs):
+        captured["tmin"] = kwargs.get("tmin")
+        captured["tmax"] = kwargs.get("tmax")
+        raise SystemExit(1)  # short-circuit before xpbin/from_file_list
+
+    monkeypatch.setattr(red_ixpe.pipeline, "xpselect", fake_xpselect)
+
+    req_tmin = tstart_common - 100.0
+    req_tmax = tstop_common + 100.0
+    with pytest.raises(RuntimeError):
+        red_ixpe._reduce_window(
+            file_list, "clip", req_tmin, req_tmax, 299.59, 35.20,
+            2.0, 8.0, 1.0, False, 3.0, 5.0, "20220101",
+        )
+    assert captured["tmin"] == pytest.approx(tstart_common, abs=1e-6)
+    assert captured["tmax"] == pytest.approx(tstop_common, abs=1e-6)
+    # The clip genuinely narrowed the requested window on both edges.
+    assert captured["tmin"] > req_tmin
+    assert captured["tmax"] < req_tmax
+
+
+@pytest.fixture(scope="module")
+def mismatch_result(tmp_path_factory):
+    """One real qu_slice_pcubes call on a scratch copy of OBSID_MISMATCH --
+    the ObsID that aborted at _reduce_window(<obsid>whole) pre-fix. n_max
+    kept small to bound the real xpselect/xpbin call count."""
+    tmp_dir = tmp_path_factory.mktemp("qu_slice_mismatch")
+    file_list = _copy_real_event_files(str(tmp_dir), OBSID_MISMATCH)
+    result = red_ixpe.qu_slice_pcubes(OBSID_MISMATCH, file_list, n_max=2, n_min=1)
+    return result, file_list
+
+
+def test_capability_mismatch_obsid_completes_and_window_was_clipped(mismatch_result):
+    """Capability regression for the reported abort: qu_slice_pcubes must
+    now complete on OBSID_MISMATCH and write a real qu_slices CSV, and the
+    window it actually needed to reduce (DU1's own GTI-derived whole-sub-obs
+    span) must be genuinely narrower once clipped to the common per-DU
+    intersection -- proving the clip is what let the reduction succeed,
+    rather than it succeeding some other way with the clip a no-op."""
+    result, file_list = mismatch_result
+    assert result["subobs_keys"] == [OBSID_MISMATCH]  # not a '...99' ObsID -- no N-way split
+    info = result["per_subobs"][OBSID_MISMATCH]
+    assert os.path.exists(info["csv_path"])
+    assert info["whole_counts"] > 0
+    assert info["n_slice"] >= 1
+    assert len(info["rows"]) == info["n_slice"]
+
+    with fits.open(file_list[0]) as hdul:
+        gti = hdul["GTI"].data
+        du1_tstart, du1_tstop = float(gti["START"][0]), float(gti["STOP"][-1])
+    tstart_common, tstop_common = red_ixpe._common_du_bounds(file_list)
+    assert tstart_common > du1_tstart  # the clip genuinely narrowed the requested window
+    assert tstop_common <= du1_tstop
+
+
+def test_repro_mismatch_obsid_stable_across_calls(mismatch_result, tmp_path_factory):
+    """Reproducibility, on the previously-aborting ObsID itself: an
+    independent second qu_slice_pcubes call on a fresh scratch copy with the
+    same arguments gives the same whole-sub-obs PD and the same per-slice
+    q/u within tolerance."""
+    first, _ = mismatch_result
+    tmp_dir = tmp_path_factory.mktemp("qu_slice_mismatch_repro")
+    file_list = _copy_real_event_files(str(tmp_dir), OBSID_MISMATCH)
+    second = red_ixpe.qu_slice_pcubes(OBSID_MISMATCH, file_list, n_max=2, n_min=1)
+
+    info_a = first["per_subobs"][OBSID_MISMATCH]
+    info_b = second["per_subobs"][OBSID_MISMATCH]
+    assert info_a["n_slice"] == info_b["n_slice"]
+    assert info_a["whole_pd_pct"] == pytest.approx(info_b["whole_pd_pct"], rel=1e-6)
+    assert info_a["whole_pa_deg"] == pytest.approx(info_b["whole_pa_deg"], rel=1e-6)
+    for row_a, row_b in zip(info_a["rows"], info_b["rows"]):
+        for field in ("q", "u", "PD_pct", "PA_deg"):
+            assert row_a[field] == pytest.approx(row_b[field], rel=1e-6)
+
+
+# --------------------------------------------------------------------------- #
 # Manifest wiring (AI-facing half)
 # --------------------------------------------------------------------------- #
 
