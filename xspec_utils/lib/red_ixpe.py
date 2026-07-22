@@ -2,6 +2,7 @@
 import os
 import csv
 import glob
+import io
 import json
 import math
 import re
@@ -1215,14 +1216,24 @@ def _reduce_window(obs_file_list: list[str], suffix: str, tmin: float | None, tm
     elapsed-time segments, generalised here to an arbitrary caller-chosen
     window and reused for both a sub-observation's whole-span cube and every
     one of its adaptively-placed slices.
+
+    Every ``xpselect``/``xpbin`` call runs with stdout+stderr captured into
+    an in-memory buffer, discarded on success. ixpeobssim's own
+    ``logging_.abort()`` is a bare ``sys.exit`` -- on that ``SystemExit``
+    this raises ``RuntimeError`` embedding the last ~15 captured lines (the
+    diagnostic ixpeobssim prints right before "Cannot continue, abort.":
+    missing IRF, empty selection, missing extension, ...), so the real cause
+    reaches the caller instead of a bare, uninformative abort message.
     """
     bin_kwargs = dict(algorithm='PCUBE', ebinalg='LIST', ebinning=[emin_kev, emax_kev],
                        overwrite=overwrite, irfname=f'ixpe:obssim{irf_date}_alpha075:v13', weights=True)
     sel_kwargs = dict(rad=src_rad, ra=ra, dec=dec, suffix=f'{suffix}src', overwrite=overwrite)
     if tmin is not None:
         sel_kwargs.update(tmin=tmin, tmax=tmax)
-    with open(os.devnull, 'w') as fnull:
-        with redirect_stdout(fnull):
+
+    buf = io.StringIO()
+    try:
+        with redirect_stdout(buf), redirect_stderr(buf):
             src_files = pipeline.xpselect(*obs_file_list, **sel_kwargs)
             spc = xBinnedPolarizationCube.from_file_list(pipeline.xpbin(*src_files, **bin_kwargs))
             if bkg:
@@ -1234,6 +1245,12 @@ def _reduce_window(obs_file_list: list[str], suffix: str, tmin: float | None, tm
                 bpc = xBinnedPolarizationCube.from_file_list(pipeline.xpbin(*bkg_files, **bin_kwargs))
                 bpc *= spc.backscal() / bpc.backscal()
                 spc -= bpc
+    except SystemExit as exc:
+        tail = '\n'.join(buf.getvalue().splitlines()[-15:])
+        raise RuntimeError(
+            f'_reduce_window({suffix}): ixpeobssim pipeline aborted ({exc}); '
+            f'last output:\n{tail}'
+        ) from exc
     return spc
 
 
@@ -1437,11 +1454,62 @@ def subobs_groups(gti_start: list[float], gti_stop: list[float],
     return groups
 
 
+def _should_split_subobs(obsid: str, split_multiobs: bool | None = None) -> bool:
+    """Whether an N-way GTI-gap split should even be attempted for ``obsid``.
+
+    ``split_multiobs=None`` (default) auto-decides from the IXPE
+    literature-merged-ObsID naming convention: ``obsid`` ending in ``'99'``
+    (e.g. ``03002599`` -> sub-obs a/b) is judged a merged observation and the
+    split machinery (``subobs_groups``/``_sorted_gap_split_indices``, both
+    scale-free and otherwise untouched) is allowed to run; any other obsid --
+    an ordinary single monitoring pointing, however large its own inter-GTI
+    gaps happen to be (e.g. Cyg X-1's 02008201/02008301/...) -- is never
+    assumed merged and is always treated as one whole-span sub-observation.
+    ``split_multiobs=True``/``False`` forces the decision either way,
+    overriding the naming convention.
+    """
+    if split_multiobs is not None:
+        return split_multiobs
+    return obsid.endswith('99')
+
+
+def _resolve_subobs_groups(obs: str, gti_start: list[float], gti_stop: list[float],
+                            split_gap_factor: float, split_multiobs: bool | None) -> list[dict]:
+    """The exact GTI partition ``qu_slice_pcubes`` reduces per sub-observation:
+    ``subobs_groups(...)`` when ``_should_split_subobs(obs, split_multiobs)``
+    is True, else a single group spanning the whole GTI list unchanged.
+    ``subobs_groups``/``_sorted_gap_split_indices`` themselves stay fully
+    general and untouched -- this is the one gate deciding whether they run
+    at all.
+    """
+    if _should_split_subobs(obs, split_multiobs):
+        return subobs_groups(gti_start, gti_stop, split_gap_factor)
+    return [{'gti_start': list(gti_start), 'gti_stop': list(gti_stop),
+             'tstart': gti_start[0], 'tstop': gti_stop[-1]}]
+
+
+def _letter_suffix(index: int) -> str:
+    """0-based ``index`` -> a bijective base-26 lowercase-letter string:
+    'a'..'z' for index 0-25 (exactly the original single-letter on-disk
+    convention, e.g. ``qu_slices_<obsid>a.csv``), then 'aa','ab',...,'az',
+    'ba',... beyond that -- pure ASCII letters at every index, so a >26-way
+    split can never emit a non-printable byte (the original ``chr(ord('a')
+    + index)`` did, once ``index`` passed 25) into a FITS header value.
+    """
+    n = index + 1
+    letters = []
+    while n > 0:
+        n, rem = divmod(n - 1, 26)
+        letters.append(chr(ord('a') + rem))
+    return ''.join(reversed(letters))
+
+
 def _subobs_key(obs: str, index: int, n_groups: int) -> str:
-    """``obs`` unchanged for a single group; ``obs`` + 'a'/'b'/... for N>1 groups."""
+    """``obs`` unchanged for a single group; ``obs`` + ``_letter_suffix(index)``
+    for N>1 groups -- always pure ASCII letters, never a non-printable byte."""
     if n_groups == 1:
         return obs
-    return obs + chr(ord('a') + index)
+    return obs + _letter_suffix(index)
 
 
 def _greedy_slice_edges(times: np.ndarray, tstart: float, tstop: float,
@@ -1510,6 +1578,7 @@ def qu_slice_pcubes(obs: str,
                      n_min: int = 8,
                      n_max: int = 25,
                      split_gap_factor: float = 10.0,
+                     split_multiobs: bool | None = None,
                      irf_date: str | None = None,
                      overwrite: bool = True,
                      chatter: bool = False,
@@ -1518,8 +1587,18 @@ def qu_slice_pcubes(obs: str,
     observation time series, DU1/2/3 merged, with data-driven N-way splitting
     of a merged/multi-pointing observation.
 
-    **N-way split.** The observation's GTI list is partitioned into one or
-    more sub-observations at genuine multi-pointing merge gaps
+    **N-way split.** The split is attempted at all ONLY when
+    ``_should_split_subobs(obs, split_multiobs)`` judges ``obs`` a
+    literature-merged observation -- by default, an obsid ending in ``'99'``
+    (e.g. 03002599); ``split_multiobs=True``/``False`` overrides that
+    naming-convention gate. An ordinary single monitoring pointing (e.g.
+    Cyg X-1's 02008201) is never assumed merged, however large its own
+    inter-GTI gaps happen to be, and is always reduced as one whole-span
+    sub-observation -- ``subobs_groups``/``_sorted_gap_split_indices``
+    (the scale-free gap-outlier machinery itself) stay fully general and
+    untouched; they simply are not invoked at all when the gate is closed.
+    When the gate is open, the observation's GTI list is partitioned into
+    one or more sub-observations at genuine multi-pointing merge gaps
     (``subobs_groups``/``split_gap_factor``); each sub-observation is keyed
     ``<obs>`` (no split) or ``<obs>a``, ``<obs>b``, ... (N-way split) and
     processed fully independently below.
@@ -1583,6 +1662,15 @@ def qu_slice_pcubes(obs: str,
         Slice-count clipping bounds per sub-observation. Defaults 8, 25.
     split_gap_factor : float
         Outlier-ratio threshold for the N-way GTI-gap split. Default 10.0.
+        Only consulted at all when the split is attempted -- see
+        ``split_multiobs``.
+    split_multiobs : bool or None
+        Force (``True``) or forbid (``False``) attempting the N-way GTI-gap
+        split at all. ``None`` (default) auto-decides via
+        ``_should_split_subobs``: an obsid ending in ``'99'`` (e.g.
+        03002599) is judged literature-merged and the split runs; any other
+        obsid is treated as one whole-span sub-observation regardless of its
+        own GTI gap sizes.
     irf_date : str or None
         IRF calibration epoch; ``None`` auto-selects the installed epoch
         nearest the observation date.
@@ -1631,7 +1719,7 @@ def qu_slice_pcubes(obs: str,
         deadc = float(deadc)
 
     all_times = _merged_selected_times(obs_file_list, ra, dec, src_rad, emin_kev, emax_kev)
-    groups = subobs_groups(gti_start, gti_stop, split_gap_factor)
+    groups = _resolve_subobs_groups(obs, gti_start, gti_stop, split_gap_factor, split_multiobs)
     obs_dir = Path(obs_file_list[0]).resolve().parent.parent
 
     subobs_keys = []
@@ -1714,6 +1802,7 @@ def qu_slice_pcubes(obs: str,
             'bkg': subtract_background, 'bkg_inner_rad': bkg_inner_rad, 'bkg_outer_rad': bkg_outer_rad,
             'mdp_target': mdp_target, 'mdp_frac': mdp_frac, 'mdp_floor': mdp_floor,
             'n_min': n_min, 'n_max': n_max, 'split_gap_factor': split_gap_factor,
+            'split_multiobs': split_multiobs,
             'ra': ra, 'dec': dec, 'irf_date': irf_date, 'uses_rej': uses_rej,
             'subobs_span': [sub_tstart, sub_tstop],
         }

@@ -30,6 +30,7 @@ from xspec_utils.skills import TOOL_MANIFEST
 REAL_IXPE_DIR = "/data/fzhou/XSPEC/Cyg_X-1/IXPE"
 OBSID_SINGLE = "01002901"   # single continuous pointing -- no N-way split
 OBSID_MERGED = "03002599"   # literature-merged pointings -- N-way split into a/b
+OBSID_ORDINARY_GAPPY = "02008201"  # ordinary monitoring pointing that over-split pre-fix
 
 
 def _copy_real_event_files(dest_dir: str, obsid: str) -> list[str]:
@@ -156,6 +157,65 @@ def test_real_03002599_gti_split_matches_known_merge_gap():
 
 
 # --------------------------------------------------------------------------- #
+# Fix-under-test: the split-gate must fire ONLY on '...99' merged ObsIDs,
+# never on an ordinary monitoring pointing's own (possibly large) GTI gaps.
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.parametrize("obsid,split_multiobs,expected", [
+    ("03002599", None, True),
+    ("02001899", None, True),
+    ("02008201", None, False),
+    ("02008401", None, False),
+    ("01002901", None, False),
+    ("02008201", True, True),
+    ("03002599", False, False),
+])
+def test_should_split_subobs_capability_gate(obsid, split_multiobs, expected):
+    assert red_ixpe._should_split_subobs(obsid, split_multiobs) is expected
+
+
+def test_real_02008201_gate_prevents_over_split_ungated_path_still_over_splits():
+    """Differential, real-data regression for the reported crash: a cheap GTI-
+    header read (no ixpeobssim reduction) on the real 02008201 fixture shows
+    the UNGATED subobs_groups(...) call (what qu_slice_pcubes did before this
+    fix) over-splits an ordinary monitoring pointing into dozens of groups --
+    enough to have driven the old chr(ord('a')+index) past 26 and emitted a
+    non-ASCII byte -- while the new GATED path (_resolve_subobs_groups, which
+    _should_split_subobs judges this obsid as NOT merged) yields exactly one
+    whole-span sub-observation."""
+    evt_dir = os.path.join(REAL_IXPE_DIR, OBSID_ORDINARY_GAPPY, "event_l2")
+    files = sorted(glob.glob(os.path.join(evt_dir, f"ixpe{OBSID_ORDINARY_GAPPY}_det1_evt2_v[0-9][0-9]_rej.fits")))
+    if not files:
+        pytest.skip(f"real fixture ObsID {OBSID_ORDINARY_GAPPY} not local under {evt_dir}")
+    with fits.open(files[0]) as hdul:
+        gti = hdul["GTI"].data
+        gti_start = [float(x) for x in gti["START"]]
+        gti_stop = [float(x) for x in gti["STOP"]]
+
+    ungated = red_ixpe.subobs_groups(gti_start, gti_stop, 10.0)
+    assert len(ungated) > 1  # the pre-fix behaviour: a real over-split
+
+    gated = red_ixpe._resolve_subobs_groups(OBSID_ORDINARY_GAPPY, gti_start, gti_stop, 10.0, None)
+    assert len(gated) == 1
+    assert gated[0]["tstart"] == gti_start[0] and gated[0]["tstop"] == gti_stop[-1]
+
+
+# --------------------------------------------------------------------------- #
+# Fix-under-test: _subobs_key must stay pure-ASCII past a 26-way split.
+# --------------------------------------------------------------------------- #
+
+def test_subobs_key_ascii_safe_past_26_groups():
+    n_groups = 45
+    keys = [red_ixpe._subobs_key("X", i, n_groups) for i in range(41)]
+    for key in keys:
+        assert key.isascii()
+        assert all(31 < ord(c) < 127 for c in key[1:])  # no control characters
+    assert keys[25] == "Xz"
+    assert keys[26] == "Xaa"
+    assert keys[27] == "Xab"
+
+
+# --------------------------------------------------------------------------- #
 # Fast, pure-logic unit tests: r_proxy / background decision
 # --------------------------------------------------------------------------- #
 
@@ -229,6 +289,33 @@ def test_greedy_slice_edges_empty_times_is_single_noise_limited_slice():
 
 
 # --------------------------------------------------------------------------- #
+# Fix-under-test: _reduce_window must surface the real ixpeobssim abort
+# diagnostic, not a bare 'Cannot continue, abort.'
+# --------------------------------------------------------------------------- #
+
+def test_reduce_window_surfaces_captured_diagnostic_on_abort(monkeypatch):
+    """Monkeypatches the ixpeobssim pipeline call to print a sentinel line
+    then raise SystemExit -- exactly ixpeobssim's own logging_.abort() bare
+    sys.exit pattern (missing IRF, empty selection, missing extension, ...,
+    per ixpeobssim tracker #699) -- and asserts the surfaced RuntimeError
+    embeds that sentinel line, proving the captured stdout/stderr buffer
+    (not os.devnull) is what backs the raised error."""
+    sentinel = "SENTINEL: could not find IRF ixpe:obssimBOGUS_alpha075:v13"
+
+    def boom(*args, **kwargs):
+        print(sentinel)
+        raise SystemExit(1)
+
+    monkeypatch.setattr(red_ixpe.pipeline, "xpselect", boom)
+    with pytest.raises(RuntimeError) as excinfo:
+        red_ixpe._reduce_window(
+            ["dummy_det1_evt2_v01.fits"], "test", None, None, 299.59, 35.2,
+            2.0, 8.0, 1.0, False, 3.0, 5.0, "20220101",
+        )
+    assert sentinel in str(excinfo.value)
+
+
+# --------------------------------------------------------------------------- #
 # Manifest wiring (AI-facing half)
 # --------------------------------------------------------------------------- #
 
@@ -239,12 +326,14 @@ def test_tool_manifest_exposes_class_parameters():
     props = entry["args_schema"]["properties"]
     for name in ("ra", "dec", "emin_kev", "emax_kev", "src_rad", "bkg",
                  "bkg_inner_rad", "bkg_outer_rad", "mdp_target", "mdp_frac",
-                 "mdp_floor", "n_min", "n_max", "split_gap_factor"):
+                 "mdp_floor", "n_min", "n_max", "split_gap_factor",
+                 "split_multiobs"):
         assert name in props, f"{name} missing from args_schema.properties"
     assert entry["args_schema"]["required"] == ["obs_db_path", "obsid"]
     assert props["n_min"]["type"] == "integer"
     assert props["n_max"]["type"] == "integer"
     assert props["bkg"]["type"] == "boolean"
+    assert props["split_multiobs"]["type"] == "boolean"
     assert "irf_date" not in props  # auto-selected internally, not AI-facing
 
 

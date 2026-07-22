@@ -1653,13 +1653,21 @@ TOOL_MANIFEST: dict = {
             "ixpe_pcube_timeseg/ixpe_reduce_pha, which naturally resolves a literature- "
             "merged ObsID such as 03002599 to its plain files). This tool does not download "
             "data, so check ObsID locality with a data-catalog tool first. "
-            "N-WAY SPLIT: the observation's GTI list is partitioned into one or more "
-            "sub-observations at genuine multi-pointing merge gaps -- an outlier-ratio test "
+            "N-WAY SPLIT: attempted at all ONLY when split_multiobs (or, when omitted, "
+            "the '...99' literature-merged-ObsID naming convention -- e.g. 03002599) "
+            "judges this obsid a merged observation; an ordinary single monitoring "
+            "pointing (e.g. Cyg X-1's 02008201/02008301) is NEVER assumed merged, "
+            "however large its own GTI gaps happen to be, and is always reduced as one "
+            "whole-span sub-observation. When the gate is open, the observation's GTI "
+            "list is partitioned into one or more sub-observations at genuine "
+            "multi-pointing merge gaps -- an outlier-ratio test "
             "on the SORTED inter-GTI gap list (never against the population median, which "
             "misfires on real IXPE GTI structure: on-orbit dropout gaps span orders of "
             "magnitude below a genuine month-scale merge gap) -- gated by split_gap_factor. "
             "No split -> one sub-obs keyed <obsid>; an N-way split (e.g. two merged "
-            "pointings) -> <obsid>a, <obsid>b, ... in time order, each analysed fully "
+            "pointings) -> <obsid>a, <obsid>b, ... in time order (bijective base-26 letter "
+            "suffixes -- 'a'..'z' then 'aa','ab',... past 26 sub-obs -- pure ASCII, never a "
+            "non-printable byte in a FITS header), each analysed fully "
             "independently and NEVER straddled by a single slice. "
             "PER SUB-OBSERVATION: (1) BACKGROUND -- bkg=None auto-decides from a "
             "source-region count-rate surface-brightness proxy r_proxy (cps/arcmin^2, "
@@ -1815,7 +1823,21 @@ TOOL_MANIFEST: dict = {
                         "multi-pointing merge boundary only when it exceeds this many times "
                         "its own next-largest neighbour in the sorted gap list (an outlier "
                         "test on the sorted gaps, never against the population median/mean "
-                        "of all gaps). Default 10.0."
+                        "of all gaps). Default 10.0. Only consulted when the split is "
+                        "attempted at all -- see split_multiobs."
+                    ),
+                },
+                "split_multiobs": {
+                    "type": "boolean",
+                    "description": (
+                        "Force (true) or forbid (false) attempting the N-way GTI-gap split "
+                        "at all. Omit (null/default) to auto-decide from the IXPE "
+                        "literature-merged-ObsID naming convention: an obsid ending in "
+                        "'99' (e.g. 03002599) is judged merged and split_gap_factor is "
+                        "applied; any other obsid -- an ordinary single monitoring "
+                        "pointing, however large its own GTI gaps happen to be (e.g. "
+                        "02008201) -- is treated as one whole-span sub-observation and "
+                        "never split."
                     ),
                 },
             },

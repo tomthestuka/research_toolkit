@@ -622,6 +622,7 @@ def ixpe_qu_slice_pcubes(
     n_min: int = 8,
     n_max: int = 25,
     split_gap_factor: float = 10.0,
+    split_multiobs: bool | None = None,
 ) -> dict:
     """MDP-anchored adaptive q(t)=Q/I, u(t)=U/I intra-observation time series
     for one local IXPE ObsID, with data-driven N-way splitting of a
@@ -636,6 +637,13 @@ def ixpe_qu_slice_pcubes(
     plain files), then calls ``red_ixpe.qu_slice_pcubes`` -- see that
     function's docstring for the full N-way-split / background-decision /
     MDP-anchored-slicing / mean-arrival-timestamp procedure.
+
+    The N-way split is attempted at all only when ``split_multiobs`` (or,
+    when omitted, the ``'...99'`` literature-merged-ObsID naming convention)
+    judges this obsid merged -- an ordinary single monitoring pointing
+    (e.g. Cyg X-1's 02008201) is never assumed merged, however large its own
+    GTI gaps happen to be, and is always reduced as one whole-span
+    sub-observation.
 
     Records one ``kind='qu_slices'`` product per sub-observation CSV in the
     mission catalog at level 3 via ``obsdb_catalog.neutral.advance`` (all
@@ -667,6 +675,7 @@ def ixpe_qu_slice_pcubes(
             src_rad=src_rad, bkg=bkg, bkg_inner_rad=bkg_inner_rad, bkg_outer_rad=bkg_outer_rad,
             mdp_target=mdp_target, mdp_frac=mdp_frac, mdp_floor=mdp_floor,
             n_min=n_min, n_max=n_max, split_gap_factor=split_gap_factor,
+            split_multiobs=split_multiobs,
         )
     except (Exception, SystemExit) as exc:
         return {"exit_code": 1, "stdout": "", "stderr": str(exc)}
