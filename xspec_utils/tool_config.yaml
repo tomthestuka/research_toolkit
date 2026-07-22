@@ -55,6 +55,16 @@ call_timeout_s:
   # magnitude backstop rather than the 300s orchestration default.
   ixpe_qu_slice_pcubes: 5400
 
+  # ixpe_qu_lag_dcf is pure numpy/scipy (no xspec/ixpeobssim reduction) -- its
+  # cost is O(n_permutations + n_bootstrap) O(N^2)-pair DCF binnings per
+  # subobs, N being that subobs's own slice count (n_max<=25 by default in
+  # ixpe_qu_slice_pcubes). Measured: 3 ObsIDs (40/50/20 slices) at the full
+  # production defaults (n_permutations=1000, n_bootstrap=1000) took ~4.3s
+  # end to end; a much larger batch (e.g. a 40-ObsID lag census) stays
+  # comfortably under a minute by the same scaling. Backstop set well above
+  # that measured cost, not because the tool is expected to need it.
+  ixpe_qu_lag_dcf: 900
+
 # Per-package Layer-B (pytest) budget, applied to EACH of the gate's two runs.
 # ixpe_pcube_timeseg's tests exercise several real xpselect+xpbin PCUBE
 # reductions on real, already-local IXPE Level-2 event files (01250401,

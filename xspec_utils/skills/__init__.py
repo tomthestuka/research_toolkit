@@ -72,6 +72,16 @@ Workflow (all steps share the persistent XSPEC session):
       adaptive greedy slice-edge placement anchored to a per-slice MDP99
       target, and mean-event-arrival-time (not window-midpoint) slice
       timestamps
+  20. ixpe_qu_lag_dcf — model-independent Edelson & Krolik (1988) discrete
+      correlation function between mean-subtracted q(t) and u(t) for every
+      subobs of a set of local IXPE ObsIDs, from each ObsID's existing
+      qu_slices_<subobs_key>.csv series (produced by ixpe_qu_slice_pcubes),
+      with Monte-Carlo permutation-null significance, bootstrap peak-lag/
+      peak-value uncertainty, a masked-uniform-grid cross-correlation
+      cross-check, and a cross-observation population Spearman correlation
+      of the recovered lag against two reconstructed covariates (a source-
+      brightness proxy and a combined PD significance) (no XSPEC/ixpeobssim
+      required)
 """
 
 from __future__ import annotations
@@ -1842,6 +1852,173 @@ TOOL_MANIFEST: dict = {
                 },
             },
             "required": ["obs_db_path", "obsid"],
+        },
+    },
+
+    # ── Model-independent q(t)-u(t) discrete correlation function ──────────
+    "research_toolkit.xspec_utils.ixpe_qu_lag_dcf": {
+        "module": "xspec_utils.lib.qu_lag_dcf",
+        "fn": "qu_lag_dcf",
+        "description": (
+            "Model-independent Edelson & Krolik (1988) discrete correlation function "
+            "(DCF) between mean-subtracted q(t)=Q/I and u(t)=U/I for every subobs of a "
+            "set of local IXPE ObsIDs, from each ObsID's existing "
+            "qu_slices_<subobs_key>.csv series -- run ixpe_qu_slice_pcubes first; this "
+            "tool never reduces data itself, so it needs no XSPEC/ixpeobssim and runs "
+            "fast. Globs <obs_db_path>/<obsid>/qu_slices_*.csv per obsid (one file per "
+            "subobs). Every requested obsid/subobs is recorded explicitly, never "
+            "silently dropped: an obsid with NO qu_slices files on disk at all gets "
+            "status='no_qu_slices' (subobs_key=obsid) -- surfacing a failed or "
+            "not-yet-run ixpe_qu_slice_pcubes step rather than a plausible-looking "
+            "partial result; a qu_slices file that exists but fails the provenance-"
+            "header check gets status='unreadable_qu_slices'; a subobs with fewer than "
+            "n_min_slices rows gets status='insufficient_slices'. All three are "
+            "excluded from every statistic below and from the population correlations, "
+            "but each still gets one row in ccf_master.csv and one per_subobs entry "
+            "(csv_path=None) -- never raised. For the rest: mean-subtracts q/u, forms UDCF_ij=a_i*b_j/"
+            "sqrt(D) over every (i,j) pair (dt_ij=t_mean_j-t_mean_i, MET seconds; D is "
+            "the measurement-noise-corrected (var(q)-mean(q_err^2))*(var(u)-"
+            "mean(u_err^2)), falling back to the uncorrected var(q)*var(u) -- flagged "
+            "dcf_uncorrected_denominator -- when either corrected variance is <= "
+            "variance_floor), bins UDCF by dt at width max(lag_bin_s or median_dt, "
+            "median_dt) over +/-max_lag_frac*span (NEVER scipy.signal.correlate, which "
+            "assumes uniform sampling this irregular slice series does not have), and "
+            "records tau_peak_s/dcf_peak (the bin of max |DCF|), dcf_zero (the bin "
+            "centered on lag 0, NaN if it has no pairs), n_pairs_peak. Cross-checks "
+            "against a masked-uniform-grid cross-correlation (resample onto a "
+            "median-spacing grid, nearest sample within half a bin, gaps masked) -> "
+            "tau_peak_uniform_s. Significance: n_permutations time-shuffles of u(t) "
+            "give an empirical perm_p on max |DCF| (add-one smoothed) plus a per-bin "
+            "1st/99th-percentile envelope (perm_lo99/perm_hi99, for a future plotter's "
+            "band); n_bootstrap draws of q_i+N(0,q_err_i)/u_i+N(0,u_err_i) give a 68% "
+            "interval on the recovered tau_peak/dcf_peak (tau_boot_lo/hi, "
+            "dcf_peak_boot_lo/hi). coherent_rotation = (perm_p < coherent_p_threshold) "
+            "AND (the bootstrap tau_peak 68% interval excludes 0). Also reconstructs the "
+            "two population covariates the qu_slices CSV does not itself carry (per the "
+            "human's confirmed decision, from the CSV rather than an expensive "
+            "re-slicing of every ObsID): r_proxy = sum(counts)/(sum(good_exposure_s)*pi*"
+            "src_rad^2) (src_rad taken exactly from the qu_slices provenance header), "
+            "and pd_significance = an inverse-variance-weighted combined "
+            "normalized-Stokes PD/sigma_PD from the per-slice q/u (a numpy weighted "
+            "combination, not an event-level reduction). Runs a cross-observation "
+            "Spearman correlation of tau_peak_s against each covariate over "
+            "status=='ok' subobs (dropping noise_limited ones -- reconstructed as "
+            "n_rows < the qu_slices provenance's own n_min, a DIFFERENT threshold from "
+            "this tool's own n_min_slices -- when exclude_noise_limited=true). All "
+            "random draws (permutation shuffles, bootstrap noise) come from one "
+            "numpy.random.default_rng(seed), so two calls with the same seed over the "
+            "same inputs reproduce identically. Writes one provenance-headed "
+            "qu_dcf_<subobs_key>.csv per successfully-processed subobs (lag_s, dcf, "
+            "n_pairs, perm_lo99, perm_hi99) under <obs_db_path>/<obsid>/, recorded at "
+            "level 3 (kind='qu_dcf') via obsdb_catalog.neutral.advance; ccf_master.csv "
+            "(one row per subobs) and population_correlations.csv under output_dir. "
+            "This is a data tool -- it writes no plot. Returns 'ccf_master_csv', "
+            "'population_csv', 'per_subobs' (subobs_key -> a bounded summary: 'status' "
+            "-- 'ok', 'no_qu_slices', 'unreadable_qu_slices', or 'insufficient_slices' "
+            "-- 'n_slices', 'tau_peak_s', 'dcf_peak', 'perm_p', 'coherent_rotation', "
+            "'csv_path' or None for any non-'ok' status), 'population_correlations' "
+            "(computed over status=='ok' rows only), 'stdout', 'exit_code' "
+            "(always 0 -- a per-obsid/per-subobs problem is recorded, never raised or "
+            "silently dropped)."
+        ),
+        "args_schema": {
+            "type": "object",
+            "properties": {
+                "obs_db_path": {
+                    "type": "string",
+                    "description": (
+                        "The IXPE mission's obs-db directory (e.g. "
+                        "'/data/fzhou/XSPEC/Cyg_X-1/IXPE'). Each ObsID's subobs series "
+                        "are read from <obs_db_path>/<obsid>/qu_slices_*.csv; each "
+                        "subobs's qu_dcf_<subobs_key>.csv lands alongside it."
+                    ),
+                },
+                "obsids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "IXPE ObsIDs to process (each must already carry qu_slices CSV(s)).",
+                },
+                "output_dir": {
+                    "type": "string",
+                    "description": (
+                        "Directory ccf_master.csv and population_correlations.csv are "
+                        "written to (created if absent)."
+                    ),
+                },
+                "sources": {
+                    "type": "object",
+                    "additionalProperties": {"type": "string"},
+                    "description": (
+                        "Optional {obsid: source_name} label map for ccf_master.csv. "
+                        "Falls back to the obsid itself when omitted or an obsid is "
+                        "absent from it."
+                    ),
+                },
+                "lag_bin_s": {
+                    "type": "number",
+                    "description": (
+                        "DCF bin width in seconds. Omit (null/default) to use each "
+                        "subobs's own median inter-slice spacing; an explicit value is "
+                        "still floored at that median -- never finer than the data "
+                        "actually resolves."
+                    ),
+                },
+                "n_min_slices": {
+                    "type": "integer",
+                    "description": (
+                        "Minimum slice-row count a subobs needs before its DCF is "
+                        "computed at all; fewer gets status='insufficient_slices' and is "
+                        "excluded. Default 8. This is this tool's OWN threshold, "
+                        "distinct from the qu_slices provenance's own n_min (used only "
+                        "to reconstruct noise_limited)."
+                    ),
+                },
+                "n_permutations": {
+                    "type": "integer",
+                    "description": "Time-shuffle draw count for the permutation-null significance test. Default 1000.",
+                },
+                "n_bootstrap": {
+                    "type": "integer",
+                    "description": "Noise-draw count for the bootstrap peak-lag/peak-value uncertainty. Default 1000.",
+                },
+                "variance_floor": {
+                    "type": "number",
+                    "description": (
+                        "Threshold below which a measurement-noise-corrected variance is "
+                        "treated as degenerate, triggering the uncorrected-denominator "
+                        "fallback. Default 1e-12."
+                    ),
+                },
+                "coherent_p_threshold": {
+                    "type": "number",
+                    "description": (
+                        "perm_p below this (together with a zero-excluding bootstrap "
+                        "tau_peak 68% interval) flags coherent_rotation. Default 0.01."
+                    ),
+                },
+                "max_lag_frac": {
+                    "type": "number",
+                    "description": (
+                        "DCF lag range as a fraction of the subobs's own time span "
+                        "(+/-max_lag_frac*span). Default 0.5."
+                    ),
+                },
+                "exclude_noise_limited": {
+                    "type": "boolean",
+                    "description": (
+                        "Drop noise_limited subobs from the population Spearman "
+                        "correlations (they still appear in ccf_master.csv). Default true."
+                    ),
+                },
+                "seed": {
+                    "type": "integer",
+                    "description": (
+                        "Seed for every permutation/bootstrap random draw -- drives exact "
+                        "reproducibility across repeated calls. Default 0."
+                    ),
+                },
+            },
+            "required": ["obs_db_path", "obsids", "output_dir"],
         },
     },
 }
