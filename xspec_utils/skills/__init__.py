@@ -82,6 +82,13 @@ Workflow (all steps share the persistent XSPEC session):
       of the recovered lag against two reconstructed covariates (a source-
       brightness proxy and a combined PD significance) (no XSPEC/ixpeobssim
       required)
+  21. ixpe_qu_lag_dcf_plot — the three standard reviewer figures for an
+      ixpe_qu_lag_dcf run: per-subobs DCF-vs-lag panels (permutation 99%
+      band, tau_peak/dcf_peak marker, bootstrap 68% interval drawn by its
+      own true endpoints) plus the two cross-observation population panels
+      of tau_peak vs the two reconstructed covariates, annotated with the
+      Spearman rho/p read straight from population_correlations.csv (no
+      XSPEC/ixpeobssim required)
 """
 
 from __future__ import annotations
@@ -2019,6 +2026,95 @@ TOOL_MANIFEST: dict = {
                 },
             },
             "required": ["obs_db_path", "obsids", "output_dir"],
+        },
+    },
+
+    # ── qu(t)-u(t) DCF reviewer figures (companion plotter) ─────────────────
+    "research_toolkit.xspec_utils.ixpe_qu_lag_dcf_plot": {
+        "module": "xspec_utils.lib.qu_lag_dcf",
+        "fn": "qu_lag_dcf_plot",
+        "description": (
+            "Renders the three standard reviewer figures for an ixpe_qu_lag_dcf run -- run "
+            "that tool first to get ccf_master_csv (its written sibling "
+            "population_correlations.csv, in the same directory, is read automatically). "
+            "Pure matplotlib (Agg backend); imports no XSPEC/ixpeobssim/red_ixpe, so it runs "
+            "fast and needs no science stack. Writes exactly three files, named by appending "
+            "'dcf_panels', 'population_tau_r_proxy', 'population_tau_pd_signif' (plus '.png') "
+            "to save_path_prefix: (1) dcf_panels -- a grid of up to max_panels status=='ok' "
+            "subobs in ccf_master.csv row order, each panel reading its own "
+            "<obs_db_path>/<obsid>/qu_dcf_<subobs_key>.csv for DCF vs lag, with the "
+            "permutation 99% band (perm_lo99/perm_hi99) shaded, the tau_peak_s/dcf_peak "
+            "marker, and the bootstrap 68% interval drawn as the literal segment between its "
+            "own [tau_boot_lo, tau_boot_hi] endpoints read straight from the ccf_master row -- "
+            "drawn faithfully even when that interval does not bracket tau_peak_s, never a "
+            "distance clipped at zero and anchored at tau_peak_s; either overlay drawn only "
+            "when both its values are finite. (2) population_tau_r_proxy -- tau_peak_s (its "
+            "bootstrap 68% interval as a vertical bar) vs r_proxy, over EVERY status=='ok' "
+            "subobs -- not bounded by max_panels -- annotated with the Spearman rho/p read "
+            "directly from population_correlations.csv's tau_peak_vs_r_proxy row, never "
+            "recomputed here (ixpe_qu_lag_dcf drops noise_limited subobs from that correlation "
+            "by default, and noise_limited is not itself a ccf_master column this plotter can "
+            "reconstruct). (3) population_tau_pd_signif -- the same, for pd_significance and "
+            "the tau_peak_vs_pd_significance row. Units: tau_peak_s/lag_s/tau_boot_lo/"
+            "tau_boot_hi are MET seconds; r_proxy is cps/arcmin^2; pd_significance is "
+            "dimensionless. Before any figure is drawn: a missing or wrong-schema "
+            "ccf_master_csv, zero status=='ok' rows, or a missing/wrong-schema sibling "
+            "population_correlations.csv is a hard input error -- exit_code=1 with stderr set "
+            "and no files written. A status=='ok' row whose own qu_dcf_<subobs_key>.csv is "
+            "absent or unreadable raises ValueError rather than drawing an empty panel -- an "
+            "'ok' ccf_master row promises that file exists. output_dir is created; when "
+            "save_path_prefix is omitted an auto-generated timestamped prefix is built under "
+            "it. Returns 'figures' (3 FigureRef dicts), 'plotted' (dcf_panels: subobs_key -> "
+            "lag_s/dcf/perm_lo99/perm_hi99/tau_peak_s/dcf_peak/tau_boot_lo/tau_boot_hi; each "
+            "population panel: subobs_key/x/y/tau_boot_lo/tau_boot_hi/spearman "
+            "{n, rho, p}), 'stdout', 'exit_code'."
+        ),
+        "args_schema": {
+            "type": "object",
+            "properties": {
+                "obs_db_path": {
+                    "type": "string",
+                    "description": (
+                        "The IXPE mission's obs-db directory (e.g. "
+                        "'/data/fzhou/XSPEC/Cyg_X-1/IXPE'). Each status=='ok' subobs's own "
+                        "qu_dcf_<subobs_key>.csv is read from "
+                        "<obs_db_path>/<obsid>/qu_dcf_<subobs_key>.csv."
+                    ),
+                },
+                "ccf_master_csv": {
+                    "type": "string",
+                    "description": (
+                        "Path to ccf_master.csv written by ixpe_qu_lag_dcf. Its sibling "
+                        "population_correlations.csv is located automatically at "
+                        "os.path.dirname(os.path.abspath(ccf_master_csv))/"
+                        "population_correlations.csv -- both must be present."
+                    ),
+                },
+                "output_dir": {
+                    "type": "string",
+                    "description": (
+                        "Directory created for this call's output; the auto-generated "
+                        "save_path_prefix (when one is not supplied) is built under it."
+                    ),
+                },
+                "save_path_prefix": {
+                    "type": "string",
+                    "description": (
+                        "Base path; 'dcf_panels', 'population_tau_r_proxy', "
+                        "'population_tau_pd_signif' plus '.png' are appended per figure. "
+                        "Auto-generated timestamped prefix under output_dir if omitted."
+                    ),
+                },
+                "max_panels": {
+                    "type": "integer",
+                    "description": (
+                        "Maximum status=='ok' subobs drawn in the dcf_panels grid (ccf_master "
+                        "row order). Default 12. Never bounds the two population panels, "
+                        "which always cover every status=='ok' subobs."
+                    ),
+                },
+            },
+            "required": ["obs_db_path", "ccf_master_csv", "output_dir"],
         },
     },
 }
