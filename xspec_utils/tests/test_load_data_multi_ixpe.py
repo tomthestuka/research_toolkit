@@ -348,5 +348,14 @@ def test_regression_single_obsid_unchanged_schema_and_gain_link(single_loads):
 
 def test_tool_manifest_documents_multi_obsid_ixpe():
     entry = TOOL_MANIFEST["research_toolkit.xspec_utils.load_data"]
-    assert "any number of ObsIDs" in entry["description"]
-    assert "independently resolves" in entry["description"]
+    # Under the brief/args-schema split the multi-ObsID prose lives in the schema, so
+    # assert over all manifest text the model sees rather than the one-line brief.
+    manifest_text = " ".join([
+        entry["description"],
+        entry["args_schema"].get("description", ""),
+        *(p.get("description", "") for p in entry["args_schema"]["properties"].values()),
+    ])
+    assert "any number of ObsIDs" in manifest_text
+    # each ObsID resolves its own centroid / responses / IRF epoch independently
+    assert "independently" in manifest_text
+    assert "resolves its own" in manifest_text

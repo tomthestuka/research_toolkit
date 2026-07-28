@@ -248,7 +248,13 @@ def test_tool_manifest_exposes_pollin_parameters():
                  "conf_level", "n_iterations", "log_path"):
         assert name in props, f"{name} missing from args_schema.properties"
     assert entry["args_schema"]["required"] == ["indices"]
-    assert "0.683" in entry["description"]
-    assert "one free" in entry["description"].lower()
-    assert "ixpe_changes" in entry["description"]
-    assert "pollin" in entry["description"]
+    # Brief/args-schema split: assert over all manifest text the model sees.
+    manifest_text = " ".join([
+        entry["description"],
+        entry["args_schema"].get("description", ""),
+        *(p.get("description", "") for p in props.values()),
+    ])
+    assert "0.683" in manifest_text
+    assert "one free" in manifest_text.lower()
+    assert "ixpe_changes" in manifest_text
+    assert "pollin" in manifest_text

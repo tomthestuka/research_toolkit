@@ -204,8 +204,14 @@ def test_tool_manifest_exposes_class_parameters():
     assert "1.0" in props["src_rad"]["description"]
     assert "3.0" in props["bkg_inner_rad"]["description"]
     assert "5.0" in props["bkg_outer_rad"]["description"]
-    assert "reused" in entry["description"]
-    assert "find_src" in entry["description"]
+    # Brief/args-schema split: assert over all manifest text the model sees.
+    manifest_text = " ".join([
+        entry["description"],
+        entry["args_schema"].get("description", ""),
+        *(p.get("description", "") for p in props.values()),
+    ])
+    assert "reused" in manifest_text
+    assert "find_src" in manifest_text
 
 
 # --------------------------------------------------------------------------- #

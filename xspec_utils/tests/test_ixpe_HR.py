@@ -385,8 +385,14 @@ def test_tool_manifest_exposes_class_parameters():
     for name in ("obs_db_path", "obsids", "soft_band", "hard_band", "bkg"):
         assert name in props, f"{name} missing from args_schema.properties"
     assert entry["args_schema"]["required"] == ["obs_db_path", "obsids"]
-    assert "(H-S)/(H+S)" in entry["description"]
-    assert "DU3" in entry["description"]
+    # Brief/args-schema split: assert over all manifest text the model sees.
+    manifest_text = " ".join([
+        entry["description"],
+        entry["args_schema"].get("description", ""),
+        *(p.get("description", "") for p in props.values()),
+    ])
+    assert "(H-S)/(H+S)" in manifest_text
+    assert "DU3" in manifest_text
 
 
 # --------------------------------------------------------------------------- #

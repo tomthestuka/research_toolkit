@@ -258,8 +258,14 @@ def test_tool_manifest_wired_to_lib_directly():
     for name in ("rows", "csv_path", "save_path", "title", "sigma_flag"):
         assert name in props, f"{name} missing from args_schema.properties"
     assert entry["args_schema"]["required"] == []
-    assert "png" in entry["description"].lower()
-    assert "sigma_flag" in entry["description"]
+    # Brief/args-schema split: assert over all manifest text the model sees.
+    manifest_text = " ".join([
+        entry["description"],
+        entry["args_schema"].get("description", ""),
+        *(p.get("description", "") for p in props.values()),
+    ])
+    assert "png" in manifest_text.lower()
+    assert "sigma_flag" in manifest_text
 
 
 # --------------------------------------------------------------------------- #

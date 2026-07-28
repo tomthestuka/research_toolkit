@@ -190,11 +190,17 @@ def test_tool_manifest_exposes_class_parameters():
     assert "5000" in props["segment_duration_s"]["description"]
     assert "1000" in props["min_seg_exposure_s"]["description"]
     assert "false" in props["bkg"]["description"].lower()
-    # The return contract is bounded (no full timeseries key) -- must be
-    # discoverable from the manifest description alone.
-    assert "n_segments" in entry["description"]
-    assert "csv_path" in entry["description"]
-    assert "timeseries" not in entry["description"]
+    # The return contract is bounded (no full timeseries key) -- must be discoverable
+    # from the manifest text. Under the brief/args-schema split that prose lives in
+    # args_schema["description"], so assert over all text the model sees for this tool.
+    manifest_text = " ".join([
+        entry["description"],
+        entry["args_schema"].get("description", ""),
+        *(p.get("description", "") for p in props.values()),
+    ])
+    assert "n_segments" in manifest_text
+    assert "csv_path" in manifest_text
+    assert "timeseries" not in manifest_text
 
 
 # --------------------------------------------------------------------------- #

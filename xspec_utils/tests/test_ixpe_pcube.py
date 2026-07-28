@@ -205,8 +205,12 @@ def test_tool_manifest_wiring():
     assert obs_types == {"string", "array"}
     assert props["ebinning"]["minItems"] == 2
     assert "2,3,4,6,8" in props["ebinning"]["description"].replace(" ", "")
-    assert "fraction" in entry["description"].lower()
-    assert "combined" in entry["description"]
+    # The manifest documents the units contract and the combined-ObsID mode. The one-line
+    # brief carries discovery keywords while the prose lives in args_schema["description"]
+    # (deferred-loading split), so assert over the whole manifest text, not just the brief.
+    manifest_text = f"{entry['description']} {entry['args_schema'].get('description', '')}"
+    assert "fraction" in manifest_text.lower()
+    assert "combined" in manifest_text
 
 
 # --------------------------------------------------------------------------- #

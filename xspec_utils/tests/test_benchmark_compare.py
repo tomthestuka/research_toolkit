@@ -286,7 +286,14 @@ def test_tool_manifest_wiring():
                  "paper_source", "unit", "unit_this", "unit_paper"):
         assert name in rec_props
     assert "sigma_flag" in props
-    assert "paper_source" in entry["description"]
+    # Under the brief/args-schema split the prose lives in the schema, so assert over
+    # all manifest text the model sees rather than the one-line brief alone.
+    manifest_text = " ".join([
+        entry["description"],
+        entry["args_schema"].get("description", ""),
+        *(p.get("description", "") for p in props.values()),
+    ])
+    assert "paper_source" in manifest_text
     # The extractor helpers keep unit handling out of the caller -- they stay
     # lib-only, never their own AI-facing manifest entries.
     assert "research_toolkit.xspec_utils.pcube_quantity" not in TOOL_MANIFEST
