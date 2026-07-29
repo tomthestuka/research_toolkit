@@ -129,3 +129,38 @@ def test_repair_additive_preserves_existing_params(tmp_path):
     pha = next(p for p in neutral.read(str(nicer))["entries"][obs]["products"]
                if p["kind"] == "pha")
     assert pha["params"].get("extra") == "keep-me"  # not clobbered by re-derive
+
+
+def test_repair_logs_every_change_and_is_silenceable(tmp_path):
+    """Repair narrates each change: the operator must be able to tell a cleanup from a no-op."""
+    kept = touch(tmp_path, "obs1/keep.pha")
+    gone = touch(tmp_path, "obs1/gone.pha")
+    neutral.advance(tmp_path, "m", "obs1", level=3,
+                    products=[prod("pha", kept), prod("pha", gone)])
+    os.unlink(os.path.join(tmp_path, gone))
+
+    lines: list[str] = []
+    repair(tmp_path, mission="m", log=lines.append)
+
+    dropped = [ln for ln in lines if ln.startswith("[m] - drop ")]
+    assert len(dropped) == 1, lines
+    assert "gone.pha" in dropped[0] and "file missing" in dropped[0]
+    # the surviving product is never mentioned as a change
+    assert not any("keep.pha" in ln for ln in lines), lines
+    # and a tally closes the mission out
+    assert any(ln.startswith("[m] = ") and "-1 +0" in ln for ln in lines), lines
+
+    # log=None silences without changing behaviour
+    quiet = repair(tmp_path, mission="m", log=None)
+    assert "obs1" in quiet["entries"]
+
+
+def test_repair_logs_no_changes_when_catalog_is_clean(tmp_path):
+    """A clean catalog says so explicitly, rather than printing nothing at all."""
+    p = touch(tmp_path, "obs1/a.pha")
+    neutral.advance(tmp_path, "m", "obs1", level=3, products=[prod("pha", p)])
+
+    lines: list[str] = []
+    repair(tmp_path, mission="m", log=lines.append)
+    assert not [ln for ln in lines if " - " in ln or " + " in ln], lines
+    assert any(ln.startswith("[m] = no changes") for ln in lines), lines

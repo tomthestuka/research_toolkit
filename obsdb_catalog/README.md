@@ -66,6 +66,23 @@ mission's directory (`<root>/<MISSION>`); `root` is the parent that holds them.
 `repair`/`repair_all` are the only write-side recovery — invoke them deliberately, never
 automatically.
 
+Both **narrate every change on stdout** as it is made, one line per dropped product, dropped
+entry, re-derived product and level change, closed by a per-mission tally. Because repair is
+the one path that deletes catalog rows, a bare `entries: 47` cannot tell an operator whether
+97 rows were cleaned or nothing happened — the lines are the audit trail. They are prefixed
+with the mission (so `repair_all`'s interleaved output stays attributable) and shaped to be
+greppable:
+
+```
+[ixpe] - drop 02008201 qu_slices qu_slices_02008201a.csv (file missing)
+[ixpe] + add  02008301 pcube     pcube_02008301.csv (on disk, uncatalogued)
+[ixpe] ~ level 02008201: 3 -> 2
+[ixpe] = 47 entries, 519 -> 422 products (-97 +0)
+```
+
+`-` dropped · `+` added · `~` changed · `=` tally · `!` trouble. Pass `log=None` to silence,
+or any `(str) -> None` callable (e.g. a list's `append`) to capture instead of print.
+
 Or from the command line (the same three operations, for a human/operator):
 
 ```bash

@@ -11,6 +11,11 @@ convenience for a person (or a maintenance script) to run the catalog operations
 ``obs_db_path`` is one mission's directory (``<root>/<MISSION>``); ``root`` is the parent
 that holds the mission subdirectories. ``repair``/``repair_all`` write the catalog and are the
 only write-side recovery — invoke them deliberately, never automatically.
+
+The repair commands narrate **every** change to stdout as it happens (``-`` dropped, ``+``
+added, ``~`` changed, ``=`` tally, ``!`` trouble, each prefixed with its mission), then print
+the closing JSON summary. The summary alone cannot distinguish a large cleanup from a no-op,
+which matters because repair is the only path that deletes catalog rows.
 """
 
 from __future__ import annotations
