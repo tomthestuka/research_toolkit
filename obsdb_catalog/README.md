@@ -140,7 +140,8 @@ python3 -m pytest obsdb_catalog/tests/
   and neither seen by the scan. New `neutral.split_lock`/`is_locked`/`LOCK_SUFFIX` hold the rule
   once, in the module every layer already imports (the blindness was four independent copies of
   "what a present file looks like"); `_domain`'s patterns match through the wrapper and
-  `_prefer` ranks a readable copy above an encrypted twin. NICER/NuSTAR gain a correctness fix
-  in passing: their globs already *matched* a `.gpg` file and would have recorded it as if
-  usable. `repair` and `healthcheck` needed no change — they read the scan. Tests:
+  `_prefer` ranks a readable copy above an encrypted twin. NICER/NuSTAR gain a defensive fix
+  in passing: their globs already *matched* a `.gpg` file and would have recorded it as if usable.
+  Hypothetical rather than live — those archives withhold proprietary data entirely instead of
+  serving it encrypted, so the encrypted-delivery case is IXPE's. `repair` and `healthcheck` needed no change — they read the scan. Tests:
   `tests/test_locked.py` (9).
