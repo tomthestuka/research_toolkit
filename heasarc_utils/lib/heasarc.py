@@ -27,11 +27,14 @@ import os
 import re
 import shutil
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Callable
+
+from obsdb_catalog.neutral import is_locked, split_lock
 
 __all__ = ["HeasarcError", "MissionProfile", "MISSIONS", "acquire_obsid",
            "resolve", "download", "normalize_layout", "gunzip_tree",
-           "discover_master"]
+           "discover_master", "availability"]
 
 # Notes mirrored from obsdb_catalog._domain (representative-product convention).
 _IXPE_NOTE = "det1 listed; det2/det3 follow same naming pattern"
@@ -73,6 +76,42 @@ def resolve(catalog: str, obsid: str):
             f"ObsID {obsid!r} not found in HEASARC catalog {catalog!r}"
         )
     return heasarc.locate_data(tab, catalog_name=catalog)
+
+
+def availability(catalog: str, obsid: str) -> dict:
+    """Ask the archive whether ``obsid`` is public yet — one row, no transfer.
+
+    HEASARC serves an observation still inside its proprietary period
+    GPG-encrypted, and the master table records when that period ends, so the
+    question "would downloading this again get me anything readable?" is answered
+    by a single metadata row rather than by re-transferring gigabytes. Every
+    registered mission's master table carries ``public_date`` (an MJD).
+
+    Returns ``{"obsid", "public_date_mjd", "is_public", "days_until_public"}``.
+    ``is_public`` is ``None`` when the archive does not report a ``public_date``
+    for this row — unknown, which callers treat as "no reason to hold back"
+    rather than inventing a state.
+    """
+    unknown = {"obsid": str(obsid), "public_date_mjd": None,
+               "is_public": None, "days_until_public": None}
+    try:
+        table = _heasarc().query_tap(
+            f"SELECT public_date FROM {catalog} WHERE obsid='{obsid}'"
+        ).to_table()
+        public_date = float(table["public_date"][0])
+    except Exception:
+        # Availability is an optimisation, never a gate on doing the work: an
+        # archive that will not answer leaves the caller exactly where it was.
+        return unknown
+    now_mjd = (
+        datetime.now(timezone.utc) - datetime(1858, 11, 17, tzinfo=timezone.utc)
+    ).total_seconds() / 86400.0
+    return {
+        "obsid": str(obsid),
+        "public_date_mjd": public_date,
+        "is_public": public_date <= now_mjd,
+        "days_until_public": max(0.0, public_date - now_mjd),
+    }
 
 
 def download(links, obs_db_path: str, host: str | None = None,
@@ -165,19 +204,29 @@ class MissionProfile:
 
 
 def _pick(matches: list[str]) -> str | None:
-    """Pick a single representative file, preferring an uncompressed file over its
-    ``.gz`` twin. Fresh archive downloads are gzipped (``*.evt.gz`` / ``*.fits.gz``);
-    :func:`gunzip_tree` decompresses them during acquire, so the plain file is normally
-    present — glob both and prefer the plain one (gz-tolerant for robustness).
+    """Pick a single representative file: usable over encrypted, then uncompressed
+    over its ``.gz`` twin. Fresh archive downloads are gzipped (``*.evt.gz`` /
+    ``*.fits.gz``); :func:`gunzip_tree` decompresses them during acquire, so the plain
+    file is normally present — glob both and prefer the plain one (gz-tolerant for
+    robustness). A file still wrapped in ``.gpg`` ranks last, so a decrypted copy wins
+    whenever one exists. Mirrors ``obsdb_catalog._domain._prefer`` — keep the two in sync.
     """
     if not matches:
         return None
-    plain = [m for m in matches if not m.endswith(".gz")]
-    return sorted(plain or matches)[0]
+    usable = [m for m in matches if not is_locked(m)]
+    for tier in (usable, matches):
+        if tier:
+            plain = [m for m in tier if not m.endswith(".gz")]
+            return sorted(plain or tier)[0]
+    return None
 
 
 def _one(obs_db_path: str, obsid: str, pattern: str, what: str) -> str:
-    """Return the representative file matching ``pattern`` under the ObsID; else raise."""
+    """Return the representative file matching ``pattern`` under the ObsID; else raise.
+
+    The glob is wrapper-agnostic (it ends in ``*``), so an encrypted copy is found
+    when it is all that was served; :func:`_pick` prefers a readable copy over it.
+    """
     full = _pick(glob.glob(os.path.join(obs_db_path, str(obsid), pattern)))
     if full is None:
         raise HeasarcError(f"no {what} for ObsID {obsid!r} (looked for {pattern!r})")
@@ -185,6 +234,8 @@ def _one(obs_db_path: str, obsid: str, pattern: str, what: str) -> str:
 
 
 # base det1 level-2 event (compressed or not); excludes _rej/_src/_bkg/_pcube/_pha.
+# Matched against the name with any encryption wrapper split off, so a proprietary
+# observation served as ``....fits.gz.gpg`` is recognised as the level-2 event it is.
 _IXPE_BASE_EVT = re.compile(r"_det1_evt2_(?P<ver>v\d+)\.fits(?:\.gz)?$")
 
 
@@ -192,12 +243,12 @@ def _ixpe_level2(obs_db_path: str, obsid: str) -> dict:
     cands = [
         f for f in glob.glob(os.path.join(
             obs_db_path, str(obsid), "event_l2", f"ixpe{obsid}_det1_evt2_*.fits*"))
-        if _IXPE_BASE_EVT.search(os.path.basename(f))
+        if _IXPE_BASE_EVT.search(split_lock(os.path.basename(f))[0])
     ]
     base = _pick(cands)
     if base is None:
         raise HeasarcError(f"no IXPE level-2 event for ObsID {obsid!r}")
-    ver = _IXPE_BASE_EVT.search(os.path.basename(base)).group("ver")
+    ver = _IXPE_BASE_EVT.search(split_lock(os.path.basename(base))[0]).group("ver")
     return {
         "kind": "level2_evt",
         "path": os.path.relpath(base, obs_db_path),

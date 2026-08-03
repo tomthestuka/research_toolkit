@@ -38,12 +38,56 @@ import tempfile
 from contextlib import contextmanager
 from datetime import datetime, timezone
 
-__all__ = ["CatalogError", "read", "new", "advance"]
+__all__ = ["CatalogError", "read", "new", "advance",
+           "LOCK_SUFFIX", "split_lock", "is_locked"]
 
 CATALOG_NAME = "catalog.json"
 LOCK_NAME = "catalog.json.lock"
 HISTORY_DIR = ".catalog_history"
 HISTORY_KEEP = 20
+
+#: Encryption wrapper a product file may arrive in. HEASARC serves an
+#: observation still inside its proprietary period GPG-encrypted, so the archive
+#: hands back ``<product>.gpg`` — the same bytes, under a name every
+#: product-matching pattern in this package would otherwise reject.
+LOCK_SUFFIX = ".gpg"
+
+
+# --------------------------------------------------------------------------- #
+# The encryption wrapper — one rule, shared
+# --------------------------------------------------------------------------- #
+def split_lock(name: str) -> tuple[str, bool]:
+    """Split the encryption wrapper off a filename: ``(unwrapped, locked)``.
+
+    ``"x_evt2_v03.fits.gz.gpg"`` -> ``("x_evt2_v03.fits.gz", True)``;
+    an unwrapped name comes back unchanged with ``False``.
+
+    Callers match their product patterns against the *unwrapped* name, so an
+    encrypted file is recognised as the product it is rather than dropped as
+    unrecognisable. Exactly :data:`LOCK_SUFFIX` is recognised — any other
+    trailing suffix stays unknown and unmatched, because guessing at an
+    unfamiliar wrapper would silently mislabel a file's usability.
+
+    This rule lives here, in the one module every layer already imports, because
+    the four-layer blindness it fixes was four independent copies of "what a
+    present file looks like" going out of sync.
+    """
+    if name.endswith(LOCK_SUFFIX):
+        return name[: -len(LOCK_SUFFIX)], True
+    return name, False
+
+
+def is_locked(path: str) -> bool:
+    """True when ``path`` names an encrypted (unusable-as-is) product file.
+
+    Encryption state is **derived from the recorded path, never stored**: it
+    changes out of band (a human decrypts), and a stored boolean would drift out
+    of agreement with the path beside it. A decryption therefore shows up the way
+    every other on-disk change does — the recorded ``.gpg`` path stops existing,
+    :mod:`obsdb_catalog.healthcheck` reports it missing alongside the new plain
+    file as uncatalogued, and :mod:`obsdb_catalog.repair` reconciles both.
+    """
+    return str(path).endswith(LOCK_SUFFIX)
 
 
 class CatalogError(Exception):

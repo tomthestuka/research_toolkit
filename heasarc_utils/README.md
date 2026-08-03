@@ -48,8 +48,9 @@ Two facts the live run pinned down (don't "fix" them back):
 from heasarc_utils.lib.heasarc_help import acquire
 
 acquire("01002901", "ixpe", "/data/fzhou/XSPEC/Cyg_X-1/IXPE")
-# -> downloads to <obs_db_path>/01002901/, records level2_evt at level 2,
-#    returns {"obsid", "mission", "level2_evt": <rel path>, "catalog_entry"}
+# -> downloads to <obs_db_path>/01002901/, records level2_evt at level 2, returns
+#    {"obsid", "mission", "level2_evt": <rel path>, "catalog_entry",
+#     "downloaded": True, "locked": False}
 
 # Large/slow IXPE transfers that would otherwise time out:
 acquire("03005801", "ixpe", "/data/fzhou/XSPEC/Cyg_X-1/IXPE", timeout_s=3600)
@@ -57,9 +58,21 @@ acquire("03005801", "ixpe", "/data/fzhou/XSPEC/Cyg_X-1/IXPE", timeout_s=3600)
 
 Signature: `acquire(obsid, mission, obs_db_path, *, host=None, chatter=False, timeout_s=1800.0)`
 
-- **Always (re)downloads** — the tool executes; the caller decides *when* to acquire. A
+- **Re-downloads on every call** — the tool executes; the caller decides *when* to acquire. A
   deliberate re-acquire records at level 2, regressing `max_level` to 2 and thereby flagging
-  any stale level-3 products for re-reduction.
+  any stale level-3 products for re-reduction. The single exception is an encrypted
+  observation, below.
+- **Encrypted (proprietary) observations** — HEASARC serves an observation still inside its
+  proprietary period GPG-encrypted (`…fits.gz.gpg`). That download is complete and correct;
+  it just cannot be read without the key. So it is **recorded as present** (level 2 — the file
+  genuinely is the level-2 event, and the `.gpg` path is what tells readers it is unusable)
+  rather than raising, and the summary carries `locked: True`. Asking for the same ObsID again
+  is then answered from the archive's `public_date` (`heasarc.availability`, one metadata row,
+  no transfer): while it is still proprietary the download is **skipped** and the reply reports
+  when it unlocks (`downloaded: False`); once public, acquire downloads normally and the
+  readable copy replaces the encrypted record. Before this, the deriver rejected the `.gpg`
+  name and raised *before* recording, so a finished multi-GB download left no trace and every
+  later request re-downloaded it — a loop no number of runs could break.
 - **Fails loudly** — unknown mission, ObsID not in the master table, or a download that does
   not yield the expected level-2 file all raise `heasarc.HeasarcError`; nothing is recorded.
 - `host` (`heasarc`/`sciserver`/`aws`) is optional; omit to let astroquery choose.
@@ -135,3 +148,17 @@ gzip handling were pinned by a live NICER `acquire` run on 2026-06-17 (see
   gunzip leaves the `.gz` intact. Tests: `test_acquire_gunzips_download` (3 missions); the
   offline fakes now write valid gzip content and the level-2 path assertion expects the plain
   file. The level-2 globs remain gz-tolerant.
+- 2026-08-03 — **An encrypted download is data, not an error.** HEASARC serves a still-
+  proprietary observation GPG-encrypted; `_ixpe_level2` matched the name through
+  `_IXPE_BASE_EVT`, which the `.gpg` suffix failed, so it **raised before `acquire` ever
+  reached `neutral.new`** — a completed multi-GB download recorded nothing, the catalog could
+  never learn the ObsID existed, and each later request re-downloaded it (observed live: SS 433
+  `04004001`, 46 encrypted files, re-fetched for ~25 min to no effect). Now the level-2
+  matchers run against the name with its wrapper split off (`neutral.split_lock`, the one
+  shared rule), `_pick` prefers a readable copy over an encrypted twin, and the encrypted
+  product is recorded at its honest level with `locked: True`. New `heasarc.availability(catalog,
+  obsid)` reads `public_date` from the mission master table (present in all three), so a repeat
+  request for a locked ObsID is answered from metadata instead of a re-transfer: skip while
+  proprietary, download once public. `acquire`'s summary gains `downloaded`/`locked` (+
+  `public_date_mjd`/`days_until_public`/`note` on a skip); `TOOL_MANIFEST` states the behavior.
+  Five offline tests (`test_acquire.py`), no network.

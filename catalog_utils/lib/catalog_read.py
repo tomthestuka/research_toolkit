@@ -8,10 +8,11 @@ loads and runs in the orchestration environment as well as the sandbox.
 The caller supplies ``obs_db_path`` (the orchestration layer resolves the mission's
 directory from its own obs-db-location config); this module never reads that config.
 
-Beyond "is it catalogued", the listing flags an ObsID whose data is present on disk but
-only **GPG-encrypted** (a local at-rest convention) — a live filesystem check at read
-time, since encryption state is mutable (a human may decrypt out of band). Such data is
-not directly usable: decrypt it, or re-acquire it if the remote archive is unlocked.
+Beyond "is it catalogued", the listing flags an ObsID whose data is present but
+**GPG-encrypted** — how HEASARC serves an observation still inside its proprietary
+period. Such data is not directly usable: decrypt it, or acquire it again once the
+observation is public. The flag is derived live from the recorded product paths, since
+encryption state is mutable (a human may decrypt out of band).
 """
 
 from __future__ import annotations
@@ -20,33 +21,45 @@ import os
 
 from obsdb_catalog import neutral
 
+_LOCKED_MARK = " -- LOCKED, NOT USABLE"
 _LOCKED_NOTE = (
-    "  [LOCKED ON DISK: level-2 data present but GPG-encrypted — not directly usable; "
-    "decrypt the local archive out of band, or re-acquire if the remote archive is unlocked]"
+    "  [GPG-encrypted on disk (proprietary period): the data is present but cannot be "
+    "read by any analysis tool as-is. Decrypt the local copy out of band, or acquire it "
+    "again once the observation becomes public -- re-acquiring while it is still "
+    "proprietary returns the same encrypted bytes]"
 )
 
 
-def _locked_on_disk(obs_db_path: str, obsid: str, entry: dict) -> bool:
-    """True when the ObsID's recorded products are absent on disk but a ``.gpg`` copy exists.
+def _usable_and_locked(obs_db_path: str, entry: dict) -> tuple[bool, bool]:
+    """Split an entry's recorded products into ``(has_usable, has_locked)`` — live.
 
-    The data is present but encrypted (locked): unusable until decrypted. Detected live,
-    not stored, because encryption state changes out of band. Cheap: only walks the ObsID
-    directory when no recorded product file is actually present.
+    Encryption reaches a catalogued product from two directions, and both count as
+    locked:
+
+    * the recorded path **is** the encrypted copy and it is on disk — the archive
+      served the observation that way, inside its proprietary period;
+    * the recorded path is a readable file that has since **gone**, with its ``.gpg``
+      twin sitting where it was — someone encrypted it locally after it was recorded.
+
+    Either way the product is present and unreadable. Both are read from the paths
+    on disk at call time rather than from a stored flag, because encryption state
+    changes out of band and a stored boolean would drift out of agreement with the
+    path beside it. An entry can be usable *and* locked at once; saying so beats
+    collapsing the ObsID to one verdict.
     """
-    products = entry.get("products") or []
-    if not products:
-        return False
-    for p in products:
-        rel = (p or {}).get("path")
-        if rel and os.path.exists(os.path.join(obs_db_path, rel)):
-            return False  # at least one recorded product is present & usable
-    obsid_dir = os.path.join(obs_db_path, str(obsid))
-    if not os.path.isdir(obsid_dir):
-        return False
-    for _root, _dirs, files in os.walk(obsid_dir):
-        if any(f.endswith(".gpg") for f in files):
-            return True
-    return False
+    has_usable = has_locked = False
+    for product in entry.get("products") or []:
+        rel = (product or {}).get("path")
+        if not rel:
+            continue
+        if os.path.exists(os.path.join(obs_db_path, rel)):
+            if neutral.is_locked(rel):
+                has_locked = True
+            else:
+                has_usable = True
+        elif os.path.exists(os.path.join(obs_db_path, rel + neutral.LOCK_SUFFIX)):
+            has_locked = True
+    return has_usable, has_locked
 
 
 def data_catalog(obs_db_path, min_level=None) -> str:
@@ -55,11 +68,14 @@ def data_catalog(obs_db_path, min_level=None) -> str:
     Reads ``<obs_db_path>/catalog.json`` through the trusted ``obsdb_catalog`` reader
     and returns a text listing: one line per catalogued ObsID with its highest
     processing level (HEASARC supplies up to level 2) and the product kinds derived
-    from it. An ObsID whose products are present but only GPG-encrypted is flagged
-    LOCKED ON DISK (not directly usable). ``min_level`` (optional) restricts the listing
-    to ObsIDs available at or above that processing level. An absent catalog lists zero
-    ObsIDs. Raises ``obsdb_catalog.neutral.CatalogError`` on a present-but-malformed
-    catalog (a torn inventory fails loudly rather than parsing to junk).
+    from it. An ObsID whose data is present but GPG-encrypted carries LOCKED, NOT
+    USABLE on its own line: it is catalogued at the level its products genuinely are,
+    and the mark is what says the bytes cannot be read yet. ``min_level`` (optional)
+    restricts the listing to ObsIDs available at or above that processing level — a
+    locked ObsID is levelled honestly and so still appears, which is why the mark, not
+    the level, is what a caller must read. An absent catalog lists zero ObsIDs. Raises
+    ``obsdb_catalog.neutral.CatalogError`` on a present-but-malformed catalog (a torn
+    inventory fails loudly rather than parsing to junk).
     """
     obs_db_path = str(obs_db_path)
     catalog = neutral.read(obs_db_path)
@@ -73,8 +89,13 @@ def data_catalog(obs_db_path, min_level=None) -> str:
             continue
         kinds = sorted({(p or {}).get("kind", "?") for p in (entry.get("products") or [])})
         products = ", ".join(kinds) or "(none)"
+        has_usable, has_locked = _usable_and_locked(obs_db_path, entry)
         line = f"- {obsid}: max_level={max_level}, products=[{products}]"
-        if _locked_on_disk(obs_db_path, obsid, entry):
+        if has_locked:
+            # On the ObsID's own line, not only as a trailing note: the level is
+            # honest about what the products are, so this is the part that says
+            # they cannot be read.
+            line += _LOCKED_MARK + (" (some products)" if has_usable else "")
             line += "\n" + _LOCKED_NOTE
         lines.append(line)
     body = "\n".join(lines) or "(no local data catalogued)"

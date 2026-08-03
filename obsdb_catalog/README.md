@@ -23,6 +23,18 @@ entry (`python -m obsdb_catalog …`, see Maintenance) — not an agent-callable
 | `healthcheck` | Detect-only drift report; never writes. | yes (`_domain`) |
 | `_domain` | Per-mission layout/filename conventions, `kind`→level, disk scanners. Imported only by `repair`/`healthcheck`. | — |
 
+**Encrypted products.** HEASARC serves an observation still inside its proprietary
+period GPG-encrypted, so a product can arrive as `<product>.gpg` — present, complete,
+and unreadable. `neutral.split_lock` / `neutral.is_locked` are the one shared rule for
+that wrapper: every product pattern matches the name with the wrapper split off, so an
+encrypted observation is scanned as the products it holds instead of reading as empty
+ground, and it is catalogued at the level its products genuinely are. **Encryption state
+is derived from the recorded path, never stored** — it changes out of band, and a stored
+boolean would drift out of agreement with the path beside it. A decryption therefore
+surfaces like any other on-disk change: the `.gpg` path goes missing, the readable file
+shows up as uncatalogued, and `repair` reconciles both. Only `.gpg` is recognised; an
+unfamiliar suffix stays unknown rather than being guessed at.
+
 ## Producer usage
 
 ```python
@@ -119,3 +131,16 @@ python3 -m pytest obsdb_catalog/tests/
   for deliberate human/operator maintenance; `healthcheck` exits 1 on drift (prints the report).
   Pure-stdlib (argparse/json), not an agent-callable tool — the package stays invisible to LLM
   tool discovery.
+- 2026-08-03 — **The scanners see GPG-encrypted products.** A proprietary-period observation
+  arrives as `…fits.gz.gpg`, which every anchored product pattern rejected, so `_scan_ixpe`
+  produced `products == []` and the trailing `if products:` **dropped the ObsID entirely** —
+  and because `healthcheck.uncatalogued` is computed from that same scan, the check that should
+  have caught it defined the problem in a way that excluded it. Verified live: `04004001` (46
+  encrypted files) and `05250399` (87), both complete downloads, neither in a 47-entry catalog
+  and neither seen by the scan. New `neutral.split_lock`/`is_locked`/`LOCK_SUFFIX` hold the rule
+  once, in the module every layer already imports (the blindness was four independent copies of
+  "what a present file looks like"); `_domain`'s patterns match through the wrapper and
+  `_prefer` ranks a readable copy above an encrypted twin. NICER/NuSTAR gain a correctness fix
+  in passing: their globs already *matched* a `.gpg` file and would have recorded it as if
+  usable. `repair` and `healthcheck` needed no change — they read the scan. Tests:
+  `tests/test_locked.py` (9).

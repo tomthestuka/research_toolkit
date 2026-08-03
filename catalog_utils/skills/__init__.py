@@ -18,27 +18,45 @@ TOOL_MANIFEST = {
         "module": "catalog_utils.lib.catalog_read",
         "fn": "data_catalog",
         "description": (
-            "List locally-available observation data for a mission — which ObsIDs are "
-            "already on disk, their processing level (HEASARC supplies up to level 2), and "
-            "the data products produced from them — read from the mission data catalog at "
-            "<obs_db_path>/catalog.json. Use this BEFORE requesting data acquisition so you "
-            "only acquire what is genuinely missing. Pass the mission's obs_db_path (listed "
-            "in your local observation databases)."
+            "List observation data already on disk — which ObsIDs are local, their "
+            "processing level, the products derived from them, and whether any are "
+            "encrypted and unreadable. Read it BEFORE requesting data acquisition so you "
+            "only acquire what is genuinely missing."
         ),
         "args_schema": {
             "type": "object",
+            "description": (
+                "TAKES ONE PATH: obs_db_path selects which data to list, because each "
+                "observatory's data lives in its own directory (pick the one you want from "
+                "your local observation databases list). The catalog read is "
+                "<obs_db_path>/catalog.json; the listing names the observatory it belongs "
+                "to. min_level is the only other argument.\n"
+                "LEVELS: an archive download supplies up to level 2 (cleaned events); "
+                "reduction products (pcube, pha, arf, rmf, ...) are level 3.\n"
+                "LOCKED ENTRIES: a line marked 'LOCKED, NOT USABLE' holds data that is "
+                "present but GPG-encrypted, which happens while an observation is still "
+                "inside its proprietary period. Its level is reported honestly for what the "
+                "products are, so read the mark rather than the level: no analysis tool can "
+                "open those bytes, and acquiring it again returns the same encrypted file "
+                "until the observation becomes public. Treat such an ObsID as unavailable "
+                "for analysis and say so, rather than re-acquiring it."
+            ),
             "properties": {
                 "obs_db_path": {
                     "type": "string",
                     "description": (
-                        "The mission's obs-db directory, e.g. "
+                        "Directory holding one observatory's data, e.g. "
                         "'/data/fzhou/XSPEC/Cyg_X-1/IXPE' (from your local observation "
                         "databases list). The catalog read is <obs_db_path>/catalog.json."
                     ),
                 },
                 "min_level": {
                     "type": "integer",
-                    "description": "Only list ObsIDs available at or above this processing level.",
+                    "description": (
+                        "Only list ObsIDs at or above this processing level. A locked "
+                        "(encrypted) ObsID is levelled honestly, so it can pass this "
+                        "filter while still being unreadable — check each line's mark."
+                    ),
                 },
             },
             "required": ["obs_db_path"],
