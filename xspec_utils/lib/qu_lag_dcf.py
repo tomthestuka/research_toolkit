@@ -48,6 +48,7 @@ import numpy as np
 from scipy import stats
 
 from obsdb_catalog import neutral
+from toolargs import coerce_tool_args
 
 _QU_SLICE_HEADER_PREFIX = '# qu_slice_pcubes provenance: '
 _QU_DCF_HEADER_PREFIX = '# qu_lag_dcf provenance: '
@@ -486,7 +487,44 @@ def qu_lag_dcf(
     `_spearman` results, computed over `status=='ok'` rows only), `stdout`,
     `exit_code` (always 0 -- a per-obsid/per-subobs problem is recorded, not
     raised or silently dropped).
+
+    The sandbox harness calls this as a bare `fn(**args)` with no schema
+    coercion, so a numeric/boolean keyword can arrive as a `str` (e.g.
+    `n_min_slices="8"`). Every declared numeric/boolean argument is
+    normalised through `toolargs.coerce_tool_args` (`context=
+    "ixpe_qu_lag_dcf"`) as the FIRST statement, before any glob, CSV read
+    or `output_dir` creation. An un-coercible value (e.g.
+    `n_permutations="many"`) is a caller error, not a data problem: the
+    `ValueError` it raises propagates out of this call rather than being
+    absorbed into a per-subobs `status` row, so a mis-specified analysis
+    argument can never masquerade as a completed run.
     """
+    coerced = coerce_tool_args(
+        {
+            "lag_bin_s": "float?", "n_min_slices": "int", "n_permutations": "int",
+            "n_bootstrap": "int", "variance_floor": "float",
+            "coherent_p_threshold": "float", "max_lag_frac": "float",
+            "exclude_noise_limited": "bool", "seed": "int",
+        },
+        {
+            "lag_bin_s": lag_bin_s, "n_min_slices": n_min_slices,
+            "n_permutations": n_permutations, "n_bootstrap": n_bootstrap,
+            "variance_floor": variance_floor, "coherent_p_threshold": coherent_p_threshold,
+            "max_lag_frac": max_lag_frac, "exclude_noise_limited": exclude_noise_limited,
+            "seed": seed,
+        },
+        context="ixpe_qu_lag_dcf",
+    )
+    lag_bin_s = coerced["lag_bin_s"]
+    n_min_slices = coerced["n_min_slices"]
+    n_permutations = coerced["n_permutations"]
+    n_bootstrap = coerced["n_bootstrap"]
+    variance_floor = coerced["variance_floor"]
+    coherent_p_threshold = coerced["coherent_p_threshold"]
+    max_lag_frac = coerced["max_lag_frac"]
+    exclude_noise_limited = coerced["exclude_noise_limited"]
+    seed = coerced["seed"]
+
     os.makedirs(output_dir, exist_ok=True)
     rng = np.random.default_rng(seed)
 
@@ -906,7 +944,19 @@ def qu_lag_dcf_plot(
     `exit_code` (1 with `stderr` and no files written for the hard input
     errors above; a `status=='ok'` row missing its own `qu_dcf` CSV raises
     instead of returning `exit_code=1`).
+
+    The sandbox harness calls this as a bare `fn(**args)` with no schema
+    coercion, so `max_panels` can arrive as a `str` (e.g. `"4"`). It is
+    normalised through `toolargs.coerce_tool_args` (`context=
+    "ixpe_qu_lag_dcf_plot"`) as the FIRST statement, before `ccf_master_csv`
+    is even checked for existence; an un-coercible value raises `ValueError`
+    naming the argument rather than surfacing a bare `TypeError` from the
+    slicing `ok_rows[:max_panels]` below.
     """
+    max_panels = coerce_tool_args(
+        {"max_panels": "int"}, {"max_panels": max_panels}, context="ixpe_qu_lag_dcf_plot",
+    )["max_panels"]
+
     if not os.path.exists(ccf_master_csv):
         return {
             'exit_code': 1, 'stdout': '',
