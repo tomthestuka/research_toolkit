@@ -26,6 +26,7 @@ from xspec import AllData, AllModels, Fit, Xset
 
 import xspec_help  # human-authored lib; on sys.path via xspec_utils/__init__.py
 import red_ixpe
+from toolargs import coerce_tool_args
 
 from obsdb_catalog import neutral
 
@@ -651,6 +652,22 @@ def ixpe_qu_slice_pcubes(
     ``<obsid>a`` is a virtual partition of that same ObsID, not a separate
     catalog entry).
 
+    The sandbox harness calls this as a bare ``fn(**args)`` with no schema
+    coercion, so a numeric/boolean keyword can arrive as a ``str`` (e.g.
+    ``n_max="3"``). Every such keyword is normalised through
+    ``toolargs.coerce_tool_args`` (with ``context="ixpe_qu_slice_pcubes"``,
+    so a rejection names this tool) as the first step, before any path
+    globbing, event selection or PCUBE binning -- an un-coercible value
+    (e.g. ``n_min="eight"``) raises ``ValueError`` naming this tool and the
+    argument in well under a second, rather than surfacing a bare
+    ``TypeError`` after a real reduction pass. Every one of the 15
+    coerced parameters is then rebound by name from the coercion result
+    (never ``**coerced`` at the call site) before ``red_ixpe.qu_slice_pcubes``
+    is called and before the catalog record below is built, so neither the
+    reduction nor the recorded ``params`` can ever see the original,
+    possibly str-typed value. A value already native-typed (the defaults
+    above, or an explicit native int/float/bool) passes through unchanged.
+
     Returns
     -------
     dict with 'obsid', 'subobs_keys' (list, chronological order), and
@@ -661,15 +678,53 @@ def ixpe_qu_slice_pcubes(
     'stdout'/'exit_code' (1 with 'stderr' on failure -- nothing written or
     recorded on failure).
     """
-    evt_dir = os.path.join(obs_db_path, obsid, "event_l2")
-    file_list = sorted(glob.glob(os.path.join(evt_dir, f"ixpe{obsid}_det[123]_evt2_v[0-9][0-9]_rej.fits")))
-    if not file_list:
-        file_list = sorted(glob.glob(os.path.join(evt_dir, f"ixpe{obsid}_det[123]_evt2_v[0-9][0-9].fits")))
-    if not file_list:
-        return {"exit_code": 1, "stdout": "",
-                "stderr": f"No Level-2 event files found for {obsid} under {evt_dir}"}
-
     try:
+        coerced = coerce_tool_args(
+            {
+                "ra": "float?", "dec": "float?", "emin_kev": "float", "emax_kev": "float",
+                "src_rad": "float", "bkg": "bool?", "bkg_inner_rad": "float",
+                "bkg_outer_rad": "float", "mdp_target": "float?", "mdp_frac": "float",
+                "mdp_floor": "float", "n_min": "int", "n_max": "int",
+                "split_gap_factor": "float", "split_multiobs": "bool?",
+            },
+            {
+                "ra": ra, "dec": dec, "emin_kev": emin_kev, "emax_kev": emax_kev,
+                "src_rad": src_rad, "bkg": bkg, "bkg_inner_rad": bkg_inner_rad,
+                "bkg_outer_rad": bkg_outer_rad, "mdp_target": mdp_target,
+                "mdp_frac": mdp_frac, "mdp_floor": mdp_floor, "n_min": n_min,
+                "n_max": n_max, "split_gap_factor": split_gap_factor,
+                "split_multiobs": split_multiobs,
+            },
+            context="ixpe_qu_slice_pcubes",
+        )
+        # Rebind every coerced argument by name so no raw (possibly str-typed)
+        # value can survive past this point -- explicit indexing, not **coerced,
+        # so the catalog-recording block below reads the same native values the
+        # reduction itself used, never the original un-coerced ones.
+        ra = coerced["ra"]
+        dec = coerced["dec"]
+        emin_kev = coerced["emin_kev"]
+        emax_kev = coerced["emax_kev"]
+        src_rad = coerced["src_rad"]
+        bkg = coerced["bkg"]
+        bkg_inner_rad = coerced["bkg_inner_rad"]
+        bkg_outer_rad = coerced["bkg_outer_rad"]
+        mdp_target = coerced["mdp_target"]
+        mdp_frac = coerced["mdp_frac"]
+        mdp_floor = coerced["mdp_floor"]
+        n_min = coerced["n_min"]
+        n_max = coerced["n_max"]
+        split_gap_factor = coerced["split_gap_factor"]
+        split_multiobs = coerced["split_multiobs"]
+
+        evt_dir = os.path.join(obs_db_path, obsid, "event_l2")
+        file_list = sorted(glob.glob(os.path.join(evt_dir, f"ixpe{obsid}_det[123]_evt2_v[0-9][0-9]_rej.fits")))
+        if not file_list:
+            file_list = sorted(glob.glob(os.path.join(evt_dir, f"ixpe{obsid}_det[123]_evt2_v[0-9][0-9].fits")))
+        if not file_list:
+            return {"exit_code": 1, "stdout": "",
+                    "stderr": f"No Level-2 event files found for {obsid} under {evt_dir}"}
+
         result = red_ixpe.qu_slice_pcubes(
             obsid, file_list, ra=ra, dec=dec, emin_kev=emin_kev, emax_kev=emax_kev,
             src_rad=src_rad, bkg=bkg, bkg_inner_rad=bkg_inner_rad, bkg_outer_rad=bkg_outer_rad,
