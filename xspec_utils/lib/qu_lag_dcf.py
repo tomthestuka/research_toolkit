@@ -8,8 +8,10 @@ model-independent DCF between mean-subtracted q(t) and u(t) (never
 have), a Monte-Carlo permutation-null significance, a bootstrap peak-lag/peak-
 value uncertainty, and a masked-uniform-grid cross-correlation cross-check.
 Also reconstructs the two population covariates the CSV does not itself carry
-(a source-brightness proxy and a combined PD significance) and correlates
-`tau_peak` against them (Spearman) across every processed subobs.
+(a source-brightness proxy and a combined PD significance) and correlates both
+signed `tau_peak` (lag length AND sense -- q-leads-u vs u-leads-q) and
+`abs(tau_peak)` (lag length only) against them (Spearman) across every
+processed subobs.
 
 Same module family as `pa_pd_stability`/`bhxrb_pd_hr_survey`: pure numpy/scipy,
 no `xspec`/`ixpeobssim` import, so this module -- and the `qu_lag_dcf` entry
@@ -430,9 +432,16 @@ def qu_lag_dcf(
     n_pairs, perm_lo99, perm_hi99`), recorded at level 3
     (`kind='qu_dcf'`) via `obsdb_catalog.neutral.advance`. Writes, under
     `output_dir`: `ccf_master.csv` (one row per subobs, `CCF_MASTER_FIELDS`)
-    and `population_correlations.csv` (Spearman `tau_peak_s` vs `r_proxy` and
-    vs `pd_significance`, over `status=='ok'` subobs, dropping
-    `noise_limited` ones first when `exclude_noise_limited`).
+    and `population_correlations.csv`, four `pair` rows over `status=='ok'`
+    subobs (dropping `noise_limited` ones first when `exclude_noise_limited`):
+    Spearman signed `tau_peak_s` vs `r_proxy` and vs `pd_significance`
+    (`tau_peak_vs_r_proxy`, `tau_peak_vs_pd_significance` -- conflates lag
+    length with lag SENSE, q-leads-u vs u-leads-q), then the same two Spearman
+    correlations on `abs(tau_peak_s)` (`abs_tau_peak_vs_r_proxy`,
+    `abs_tau_peak_vs_pd_significance` -- lag length only). All four use the
+    same `_spearman` helper and report the same `n` for a given covariate,
+    since the abs pairs drop exactly the rows the signed pairs already drop
+    (non-finite `tau_peak_s` or covariate).
 
     All random draws (permutation shuffles, bootstrap noise) are drawn from
     one `numpy.random.default_rng(seed)`, consumed in subobs-glob order, so
@@ -483,10 +492,11 @@ def qu_lag_dcf(
     (`subobs_key` -> a bounded summary: `status` (`'ok'`, `'no_qu_slices'`,
     `'unreadable_qu_slices'`, or `'insufficient_slices'`), `n_slices`,
     `tau_peak_s`, `dcf_peak`, `perm_p`, `coherent_rotation`, `csv_path` or
-    `None` for any non-`'ok'` status), `population_correlations` (the two
-    `_spearman` results, computed over `status=='ok'` rows only), `stdout`,
-    `exit_code` (always 0 -- a per-obsid/per-subobs problem is recorded, not
-    raised or silently dropped).
+    `None` for any non-`'ok'` status), `population_correlations` (all four
+    `_spearman` results -- `tau_peak_vs_r_proxy`, `tau_peak_vs_pd_significance`,
+    `abs_tau_peak_vs_r_proxy`, `abs_tau_peak_vs_pd_significance` -- computed
+    over `status=='ok'` rows only), `stdout`, `exit_code` (always 0 -- a
+    per-obsid/per-subobs problem is recorded, not raised or silently dropped).
 
     The sandbox harness calls this as a bare `fn(**args)` with no schema
     coercion, so a numeric/boolean keyword can arrive as a `str` (e.g.
@@ -634,10 +644,15 @@ def qu_lag_dcf(
     ok_rows = [r for r in master_rows if r['status'] == 'ok']
     if exclude_noise_limited:
         ok_rows = [r for r in ok_rows if not r.get('noise_limited')]
+    tau = [r['tau_peak_s'] for r in ok_rows]
+    abs_tau = [abs(t) for t in tau]
+    r_proxy = [r['r_proxy'] for r in ok_rows]
+    pd_significance = [r['pd_significance'] for r in ok_rows]
     pop = {
-        'tau_peak_vs_r_proxy': _spearman([r['tau_peak_s'] for r in ok_rows], [r['r_proxy'] for r in ok_rows]),
-        'tau_peak_vs_pd_significance': _spearman([r['tau_peak_s'] for r in ok_rows],
-                                                   [r['pd_significance'] for r in ok_rows]),
+        'tau_peak_vs_r_proxy': _spearman(tau, r_proxy),
+        'tau_peak_vs_pd_significance': _spearman(tau, pd_significance),
+        'abs_tau_peak_vs_r_proxy': _spearman(abs_tau, r_proxy),
+        'abs_tau_peak_vs_pd_significance': _spearman(abs_tau, pd_significance),
     }
     population_csv = os.path.join(output_dir, 'population_correlations.csv')
     _write_csv(population_csv, POPULATION_FIELDS,

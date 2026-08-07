@@ -394,7 +394,10 @@ def test_output_contract_csvs_and_catalog_recording(obs_db):
 
     with open(res["population_csv"], newline="") as f:
         pop_rows = {r["pair"]: r for r in csv.DictReader(f)}
-    assert set(pop_rows) == {"tau_peak_vs_r_proxy", "tau_peak_vs_pd_significance"}
+    assert set(pop_rows) == {
+        "tau_peak_vs_r_proxy", "tau_peak_vs_pd_significance",
+        "abs_tau_peak_vs_r_proxy", "abs_tau_peak_vs_pd_significance",
+    }
     for row in pop_rows.values():
         assert int(row["n"]) == 3
 
