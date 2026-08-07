@@ -842,28 +842,71 @@ def _build_dcf_panels_figure(obs_db_path: str, ok_rows: list[dict], max_panels: 
     return fig, axes, plotted
 
 
-def _build_population_figure(ok_rows: list[dict], population: dict, covariate_key: str,
-                              pair_key: str, xlabel: str):
-    """Build (never save) one `tau_peak_s`-vs-`covariate_key` population
-    panel, over every entry of `ok_rows` -- never bounded by `max_panels`.
+def _abs_interval(lo: float, hi: float) -> tuple[float, float]:
+    """The image of `[lo, hi]` under the absolute-value map, i.e. what
+    `{abs(v) : v in [lo, hi]}` actually spans -- never a naive
+    `(abs(lo), abs(hi))`, which is wrong whenever the interval brackets zero.
+    NaN in, NaN out (a non-finite endpoint suppresses only that bar, handled
+    by the caller). When the interval brackets zero (`lo <= 0 <= hi`) its
+    image includes 0 itself, so the mapped lower endpoint is `0.0` and the
+    upper is `max(|lo|, |hi|)`; otherwise (the interval lies entirely on one
+    side of zero) the map is monotonic on it and the endpoints simply swap
+    into sorted `(min(|lo|,|hi|), max(|lo|,|hi|))` order.
+    """
+    if not (math.isfinite(lo) and math.isfinite(hi)):
+        return float('nan'), float('nan')
+    if lo <= 0.0 <= hi:
+        return 0.0, max(abs(lo), abs(hi))
+    return min(abs(lo), abs(hi)), max(abs(lo), abs(hi))
 
-    Each point's bootstrap 68% interval is drawn as the literal vertical
-    segment from `tau_boot_lo` to `tau_boot_hi` (read straight off the
-    `ccf_master` row, drawn only when both are finite). The panel is
-    annotated with `population[pair_key]`'s `rho`/`p`/`n` -- read directly,
-    never recomputed here, since `qu_lag_dcf` drops `noise_limited` subobs
-    from the population correlation by default and `noise_limited` is not a
-    `ccf_master` column this plotter can reconstruct.
+
+def _build_population_figure(ok_rows: list[dict], population: dict, covariate_key: str,
+                              pair_key: str, xlabel: str, tau_axis: str = 'signed'):
+    """Build (never save) one tau-vs-`covariate_key` population panel, over
+    every entry of `ok_rows` -- never bounded by `max_panels`.
+
+    `tau_axis` selects the y-axis and annotation, EXACTLY as `qu_lag_dcf_plot`
+    documents:
+      - `'signed'` (default): y = `tau_peak_s` as-is, bootstrap interval drawn
+        as the literal `[tau_boot_lo, tau_boot_hi]` segment, annotation from
+        `population[pair_key]`. Bit-for-bit today's behaviour.
+      - `'abs'`: y = `abs(tau_peak_s)`, bootstrap interval mapped through
+        `_abs_interval` (the correct image of `[tau_boot_lo, tau_boot_hi]`
+        under `abs()`, not a naive `abs()` of both endpoints), annotation
+        from `population['abs_' + pair_key]`, y-axis floored at 0.
+
+    A non-finite `tau_peak_s` row still contributes NaN to `y` (skipped by
+    `ax.scatter`, never crashing); a non-finite bootstrap endpoint suppresses
+    only that row's own error bar.
 
     Returns `(fig, ax, plotted)`; `plotted` carries `subobs_key`/`x`/`y`/
-    `tau_boot_lo`/`tau_boot_hi` (all of `ok_rows`, in order) plus the
-    `spearman` dict.
+    `tau_boot_lo`/`tau_boot_hi` -- the values actually drawn -- (all of
+    `ok_rows`, in order) plus the `spearman` dict actually annotated.
     """
     xs = np.array([r[covariate_key] for r in ok_rows])
-    ys = np.array([r['tau_peak_s'] for r in ok_rows])
-    tau_lo = np.array([r['tau_boot_lo'] for r in ok_rows])
-    tau_hi = np.array([r['tau_boot_hi'] for r in ok_rows])
-    spearman = population.get(pair_key, {'n': 0, 'rho': float('nan'), 'p': float('nan')})
+    tau_signed = np.array([r['tau_peak_s'] for r in ok_rows])
+    lo_signed = np.array([r['tau_boot_lo'] for r in ok_rows])
+    hi_signed = np.array([r['tau_boot_hi'] for r in ok_rows])
+
+    if tau_axis == 'abs':
+        ys = np.abs(tau_signed)
+        mapped = [_abs_interval(lo, hi) for lo, hi in zip(lo_signed, hi_signed)]
+        tau_lo = np.array([m[0] for m in mapped])
+        tau_hi = np.array([m[1] for m in mapped])
+        ylabel = '|tau_peak| (s)'
+        pop_key = f'abs_{pair_key}'
+    else:
+        ys = tau_signed
+        tau_lo, tau_hi = lo_signed, hi_signed
+        ylabel = 'tau_peak (s)'
+        pop_key = pair_key
+
+    if pop_key not in population:
+        raise ValueError(
+            f"qu_lag_dcf_plot: population_correlations.csv has no {pop_key!r} row -- it was "
+            f"written before ixpe_qu_lag_dcf added the abs_tau_peak_* population pairs. Rerun "
+            f"ixpe_qu_lag_dcf to regenerate it before requesting tau_axis='abs'.")
+    spearman = population[pop_key]
 
     fig, ax = plt.subplots(figsize=(6, 5))
     ax.scatter(xs, ys, color='tab:blue', zorder=2, s=25)
@@ -874,7 +917,9 @@ def _build_population_figure(ok_rows: list[dict], population: dict, covariate_ke
         ax.annotate(f"Spearman rho={spearman['rho']:.3f} p={spearman['p']:.3e} (n={spearman['n']})",
                     xy=(0.02, 0.98), xycoords='axes fraction', va='top', fontsize=8)
     ax.set_xlabel(xlabel)
-    ax.set_ylabel('tau_peak (s)')
+    ax.set_ylabel(ylabel)
+    if tau_axis == 'abs':
+        ax.set_ylim(bottom=0.0)
     fig.tight_layout()
 
     plotted = {
@@ -886,12 +931,16 @@ def _build_population_figure(ok_rows: list[dict], population: dict, covariate_ke
     return fig, ax, plotted
 
 
+_TAU_AXES = ('signed', 'abs')
+
+
 def qu_lag_dcf_plot(
     obs_db_path: str,
     ccf_master_csv: str,
     output_dir: str,
     save_path_prefix: str | None = None,
     max_panels: int = 12,
+    tau_axis: str = 'signed',
 ) -> dict:
     """Render the three standard `qu_lag_dcf` reviewer figures.
 
@@ -906,26 +955,57 @@ def qu_lag_dcf_plot(
       permutation 99% band shaded, the `tau_peak_s`/`dcf_peak` marker, and
       the bootstrap 68% interval drawn by its own true `[tau_boot_lo,
       tau_boot_hi]` endpoints -- faithfully, even when that interval does
-      not bracket `tau_peak_s` (see `_build_dcf_panels_figure`).
-    - `population_tau_r_proxy`: `tau_peak_s` (bootstrap 68% interval as a
-      vertical bar) vs `r_proxy`, over every `status=='ok'` subobs -- never
-      bounded by `max_panels` -- annotated with the Spearman rho/p read
-      directly from `population_correlations.csv`'s `tau_peak_vs_r_proxy`
-      row (never recomputed here).
-    - `population_tau_pd_signif`: the same, for `pd_significance` and the
-      `tau_peak_vs_pd_significance` row.
+      not bracket `tau_peak_s` (see `_build_dcf_panels_figure`). NEVER
+      affected by `tau_axis` -- lag is signed here by definition, and this
+      panel's own filename never changes.
+    - `population_tau_r_proxy[_abs]`: tau (bootstrap interval as a vertical
+      bar) vs `r_proxy`, over every `status=='ok'` subobs -- never bounded by
+      `max_panels`.
+    - `population_tau_pd_signif[_abs]`: the same, for `pd_significance`.
+
+    `tau_axis` (`'signed'` default, or `'abs'`) selects which statistic the
+    two population panels plot -- ANY other value raises `ValueError` naming
+    the argument and the accepted values, before anything is read or drawn:
+      - `'signed'`: bit-for-bit today's behaviour. y = `tau_peak_s`,
+        bootstrap interval = the literal `[tau_boot_lo, tau_boot_hi]`
+        segment, annotation from `population_correlations.csv`'s
+        `tau_peak_vs_<covariate>` row, filenames `population_tau_r_proxy.png`
+        / `population_tau_pd_signif.png` (unchanged).
+      - `'abs'`: y = `abs(tau_peak_s)`; the bootstrap interval is mapped
+        through `_abs_interval` -- the true image of `[tau_boot_lo,
+        tau_boot_hi]` under `abs()` (when the interval brackets zero the
+        mapped lower endpoint is `0.0`, never a naive `abs()` of both raw
+        endpoints); annotation from the `abs_tau_peak_vs_<covariate>` row;
+        y-axis floored at 0 and labelled `|tau_peak| (s)`; filenames get an
+        `_abs` suffix (`population_tau_r_proxy_abs.png` /
+        `population_tau_pd_signif_abs.png`), so the two variants never
+        overwrite each other. If `population_correlations.csv` lacks either
+        `abs_tau_peak_vs_*` row (an older CSV written before `ixpe_qu_lag_dcf`
+        added them), raises `ValueError` naming the missing row and pointing
+        at `ixpe_qu_lag_dcf` -- never silently falls back to the signed
+        annotation -- before any figure (including `dcf_panels`) is drawn or
+        saved.
+
+    A row with non-finite `tau_peak_s` is plotted as today: skipped/NaN, no
+    crash, in either axis. A non-finite bootstrap endpoint suppresses only
+    that row's own error bar. Zero `status=='ok'` rows is the same empty-
+    population hard error as today, checked before `tau_axis` is even
+    consulted.
 
     Units: `tau_peak_s`/`lag_s`/`tau_boot_lo`/`tau_boot_hi` are MET seconds;
     `r_proxy` is cps/arcmin^2; `pd_significance` is dimensionless.
 
-    Before any figure is drawn: a missing or wrong-schema `ccf_master_csv`
-    (see `_read_ccf_master_csv`), zero `status=='ok'` rows, or a missing or
-    wrong-schema sibling `population_correlations.csv` (see
-    `_read_population_correlations_csv`) is a hard input error --
-    `exit_code=1` with `stderr` set and no files written. A `status=='ok'`
-    row whose own `qu_dcf_<subobs_key>.csv` is absent or unreadable raises
-    `ValueError` (see `_build_dcf_panels_figure`) rather than drawing an
-    empty panel.
+    Before any figure is drawn: a bad `tau_axis`, a missing or wrong-schema
+    `ccf_master_csv` (see `_read_ccf_master_csv`), zero `status=='ok'` rows, a
+    missing or wrong-schema sibling `population_correlations.csv` (see
+    `_read_population_correlations_csv`), or (for `tau_axis='abs'`) a
+    population CSV missing an `abs_tau_peak_vs_*` row is a hard input error --
+    `exit_code=1` with `stderr` set and no files written, EXCEPT the bad-
+    `tau_axis` and missing-abs-row cases, which raise `ValueError` directly
+    (a caller/upstream-version mistake, not a data condition to record and
+    continue past). A `status=='ok'` row whose own `qu_dcf_<subobs_key>.csv`
+    is absent or unreadable raises `ValueError` (see
+    `_build_dcf_panels_figure`) rather than drawing an empty panel.
 
     `output_dir` is created. When `save_path_prefix` is omitted, an
     auto-generated timestamped prefix is built under `output_dir`.
@@ -942,23 +1022,28 @@ def qu_lag_dcf_plot(
         Directory created for this call's output; the auto-generated
         `save_path_prefix` (when one is not supplied) is built under it.
     save_path_prefix : str or None
-        Base path; `dcf_panels`, `population_tau_r_proxy`,
-        `population_tau_pd_signif` plus `.png` are appended per figure.
+        Base path; `dcf_panels`, `population_tau_r_proxy[_abs]`,
+        `population_tau_pd_signif[_abs]` plus `.png` are appended per figure.
         Auto-generated timestamped prefix under `output_dir` when `None`.
     max_panels : int
         Maximum `status=='ok'` subobs drawn in the `dcf_panels` grid
         (ccf_master row order). Default 12. Never bounds the two population
         panels, which always cover every `status=='ok'` subobs.
+    tau_axis : str
+        `'signed'` (default) or `'abs'` -- see above. Any other value raises
+        `ValueError` naming this argument and the two accepted values.
 
     Returns
     -------
     dict with `figures` (3 `FigureRef` dicts), `plotted` (`dcf_panels`:
     `subobs_key -> lag_s/dcf/perm_lo99/perm_hi99/tau_peak_s/dcf_peak/
     tau_boot_lo/tau_boot_hi`; each population panel: `subobs_key`/`x`/`y`/
-    `tau_boot_lo`/`tau_boot_hi`/`spearman` (`n`/`rho`/`p`)), `stdout`,
-    `exit_code` (1 with `stderr` and no files written for the hard input
-    errors above; a `status=='ok'` row missing its own `qu_dcf` CSV raises
-    instead of returning `exit_code=1`).
+    `tau_boot_lo`/`tau_boot_hi`/`spearman` (`n`/`rho`/`p`), with `y`/
+    `tau_boot_lo`/`tau_boot_hi` the values actually drawn for the requested
+    `tau_axis`), `stdout`, `exit_code` (1 with `stderr` and no files written
+    for the hard input errors above; a bad `tau_axis`, a missing abs
+    population row, or a `status=='ok'` row missing its own `qu_dcf` CSV
+    raises instead of returning `exit_code=1`).
 
     The sandbox harness calls this as a bare `fn(**args)` with no schema
     coercion, so `max_panels` can arrive as a `str` (e.g. `"4"`). It is
@@ -966,11 +1051,15 @@ def qu_lag_dcf_plot(
     "ixpe_qu_lag_dcf_plot"`) as the FIRST statement, before `ccf_master_csv`
     is even checked for existence; an un-coercible value raises `ValueError`
     naming the argument rather than surfacing a bare `TypeError` from the
-    slicing `ok_rows[:max_panels]` below.
+    slicing `ok_rows[:max_panels]` below. `tau_axis` is validated right after,
+    also before `ccf_master_csv` is touched.
     """
     max_panels = coerce_tool_args(
         {"max_panels": "int"}, {"max_panels": max_panels}, context="ixpe_qu_lag_dcf_plot",
     )["max_panels"]
+    if tau_axis not in _TAU_AXES:
+        raise ValueError(
+            f"qu_lag_dcf_plot: argument 'tau_axis' expects one of {_TAU_AXES}, got {tau_axis!r}")
 
     if not os.path.exists(ccf_master_csv):
         return {
@@ -1009,6 +1098,16 @@ def qu_lag_dcf_plot(
             'stderr': f"No status=='ok' subobs in {ccf_master_csv}; nothing to plot.",
         }
 
+    if tau_axis == 'abs':
+        missing = [k for k in ('abs_tau_peak_vs_r_proxy', 'abs_tau_peak_vs_pd_significance')
+                   if k not in population]
+        if missing:
+            raise ValueError(
+                f"qu_lag_dcf_plot: population_correlations.csv ({population_csv}) is missing "
+                f"{missing} -- it was written before ixpe_qu_lag_dcf added the "
+                f"abs_tau_peak_* population pairs. Rerun ixpe_qu_lag_dcf to regenerate it "
+                f"before requesting tau_axis='abs'.")
+
     os.makedirs(output_dir, exist_ok=True)
     if save_path_prefix is None:
         ts = _time.strftime('%Y%m%dT%H%M%S')
@@ -1034,15 +1133,20 @@ def qu_lag_dcf_plot(
     fig_dcf = _save(fig1, 'dcf_panels',
                      f'q(t)-u(t) DCF vs lag for {n_plotted} of {len(ok_rows)} status==ok subobs')
 
+    suffix_tag = '_abs' if tau_axis == 'abs' else ''
+    tau_label = '|tau_peak|' if tau_axis == 'abs' else 'tau_peak'
+
     fig2, _ax2, plotted_r = _build_population_figure(
-        ok_rows, population, 'r_proxy', 'tau_peak_vs_r_proxy', 'r_proxy (cps/arcmin^2)')
-    fig_r = _save(fig2, 'population_tau_r_proxy',
-                  f'tau_peak vs r_proxy for {len(ok_rows)} status==ok subobs')
+        ok_rows, population, 'r_proxy', 'tau_peak_vs_r_proxy', 'r_proxy (cps/arcmin^2)',
+        tau_axis=tau_axis)
+    fig_r = _save(fig2, f'population_tau_r_proxy{suffix_tag}',
+                  f'{tau_label} vs r_proxy for {len(ok_rows)} status==ok subobs')
 
     fig3, _ax3, plotted_pd = _build_population_figure(
-        ok_rows, population, 'pd_significance', 'tau_peak_vs_pd_significance', 'pd_significance')
-    fig_pd = _save(fig3, 'population_tau_pd_signif',
-                   f'tau_peak vs pd_significance for {len(ok_rows)} status==ok subobs')
+        ok_rows, population, 'pd_significance', 'tau_peak_vs_pd_significance', 'pd_significance',
+        tau_axis=tau_axis)
+    fig_pd = _save(fig3, f'population_tau_pd_signif{suffix_tag}',
+                   f'{tau_label} vs pd_significance for {len(ok_rows)} status==ok subobs')
 
     return {
         'figures': [fig_dcf, fig_r, fig_pd],

@@ -86,9 +86,11 @@ Workflow (all steps share the persistent XSPEC session):
       ixpe_qu_lag_dcf run: per-subobs DCF-vs-lag panels (permutation 99%
       band, tau_peak/dcf_peak marker, bootstrap 68% interval drawn by its
       own true endpoints) plus the two cross-observation population panels
-      of tau_peak vs the two reconstructed covariates, annotated with the
-      Spearman rho/p read straight from population_correlations.csv (no
-      XSPEC/ixpeobssim required)
+      of tau_peak (or, with tau_axis='abs', abs(tau_peak) -- its own
+      abs-mapped bootstrap interval and abs_tau_peak_vs_* annotation,
+      filenames suffixed '_abs') vs the two reconstructed covariates,
+      annotated with the Spearman rho/p read straight from
+      population_correlations.csv (no XSPEC/ixpeobssim required)
 """
 
 from __future__ import annotations
@@ -2209,8 +2211,8 @@ TOOL_MANIFEST: dict = {
                 "matplotlib (Agg backend) importing neither XSPEC, ixpeobssim nor red_ixpe, so "
                 "it runs fast without the science stack.\n"
                 "FIGURES: writes exactly three files, appending 'dcf_panels', "
-                "'population_tau_r_proxy', 'population_tau_pd_signif' (plus '.png') to "
-                "'save_path_prefix'. (1) dcf_panels -- a grid of up to 'max_panels' "
+                "'population_tau_r_proxy[_abs]', 'population_tau_pd_signif[_abs]' (plus "
+                "'.png') to 'save_path_prefix'. (1) dcf_panels -- a grid of up to 'max_panels' "
                 "status=='ok' subobs in ccf_master.csv row order, each panel reading its own "
                 "<obs_db_path>/<obsid>/qu_dcf_<subobs_key>.csv for DCF vs lag, with the "
                 "permutation 99% band (perm_lo99/perm_hi99) shaded, the tau_peak_s/dcf_peak "
@@ -2218,30 +2220,54 @@ TOOL_MANIFEST: dict = {
                 "its own [tau_boot_lo, tau_boot_hi] endpoints read straight from the "
                 "ccf_master row -- reproduced faithfully even when that interval does not "
                 "bracket tau_peak_s, so an asymmetric or offset interval stays visible as "
-                "measured. Each overlay is drawn once both its values are finite. (2) "
-                "population_tau_r_proxy -- tau_peak_s (its bootstrap 68% interval as a "
-                "vertical bar) vs r_proxy over EVERY status=='ok' subobs, unbounded by "
-                "max_panels, annotated with the Spearman rho/p read directly from "
-                "population_correlations.csv's tau_peak_vs_r_proxy row. That statistic is "
-                "reused rather than recomputed because ixpe_qu_lag_dcf drops noise_limited "
-                "subobs from the correlation by default, and noise_limited is not a "
-                "ccf_master column this plotter could reconstruct. (3) "
-                "population_tau_pd_signif -- the same for pd_significance and the "
-                "tau_peak_vs_pd_significance row.\n"
+                "measured. Each overlay is drawn once both its values are finite. This panel "
+                "grid is UNCHANGED by 'tau_axis' -- lag is signed here by definition, and its "
+                "filename never changes. (2) population_tau_r_proxy[_abs] -- tau (its "
+                "bootstrap interval as a vertical bar) vs r_proxy over EVERY status=='ok' "
+                "subobs, unbounded by max_panels. (3) population_tau_pd_signif[_abs] -- the "
+                "same for pd_significance.\n"
+                "TAU_AXIS ('signed' default, or 'abs') selects what the two population panels "
+                "plot -- any other value raises ValueError naming the argument and the two "
+                "accepted values, before anything is read or drawn. 'signed': bit-for-bit the "
+                "original behaviour -- y=tau_peak_s, bootstrap interval = the literal "
+                "[tau_boot_lo, tau_boot_hi] segment, annotated from "
+                "population_correlations.csv's tau_peak_vs_<covariate> row (reused rather than "
+                "recomputed, since ixpe_qu_lag_dcf drops noise_limited subobs from the "
+                "correlation by default and noise_limited is not a ccf_master column this "
+                "plotter can reconstruct), filenames unchanged "
+                "('population_tau_r_proxy.png'/'population_tau_pd_signif.png'). 'abs': "
+                "y=abs(tau_peak_s); the bootstrap interval is mapped to the TRUE IMAGE of "
+                "[tau_boot_lo, tau_boot_hi] under abs() -- when that interval brackets zero "
+                "(tau_boot_lo<=0<=tau_boot_hi) the mapped lower endpoint is 0.0 and the upper "
+                "is max(|lo|,|hi|); otherwise it is [min(|lo|,|hi|), max(|lo|,|hi|)] -- never a "
+                "naive abs() of both raw endpoints; annotated from the "
+                "abs_tau_peak_vs_<covariate> row instead; the y-axis is floored at 0 and "
+                "labelled '|tau_peak| (s)'; filenames get an '_abs' suffix "
+                "('population_tau_r_proxy_abs.png'/'population_tau_pd_signif_abs.png') so the "
+                "two variants never overwrite each other. If population_correlations.csv lacks "
+                "either abs_tau_peak_vs_* row (an older CSV written before ixpe_qu_lag_dcf "
+                "added them), raises ValueError naming the missing row and pointing at "
+                "ixpe_qu_lag_dcf -- never silently falls back to the signed annotation -- "
+                "before any figure (including dcf_panels) is drawn or saved. A row with "
+                "non-finite tau_peak_s is skipped/NaN under either axis (no crash); a "
+                "non-finite bootstrap endpoint suppresses only that row's own error bar.\n"
                 "UNITS: tau_peak_s, lag_s, tau_boot_lo and tau_boot_hi are MET seconds; "
                 "r_proxy is cps/arcmin^2; pd_significance is dimensionless.\n"
-                "INPUT ERRORS (checked before any figure is drawn): a missing or wrong-schema "
+                "INPUT ERRORS (checked before any figure is drawn): a bad tau_axis or a "
+                "population CSV missing an abs_tau_peak_vs_* row (only relevant for "
+                "tau_axis='abs') raises ValueError directly. A missing or wrong-schema "
                 "ccf_master_csv, zero status=='ok' rows, or a missing/wrong-schema sibling "
-                "population_correlations.csv gives exit_code=1 with stderr set and no files "
-                "written. A status=='ok' row whose own qu_dcf_<subobs_key>.csv is absent or "
-                "unreadable raises ValueError in place of an empty panel, since an 'ok' "
+                "population_correlations.csv instead gives exit_code=1 with stderr set and no "
+                "files written. A status=='ok' row whose own qu_dcf_<subobs_key>.csv is absent "
+                "or unreadable raises ValueError in place of an empty panel, since an 'ok' "
                 "ccf_master row promises that file exists.\n"
                 "OUTPUT LOCATION: 'output_dir' is created as needed; omitting "
                 "'save_path_prefix' builds an auto-generated timestamped prefix under it.\n"
                 "RETURNS: 'figures' (3 FigureRef dicts), 'plotted' (dcf_panels: subobs_key -> "
                 "lag_s/dcf/perm_lo99/perm_hi99/tau_peak_s/dcf_peak/tau_boot_lo/tau_boot_hi; "
                 "each population panel: subobs_key/x/y/tau_boot_lo/tau_boot_hi/spearman "
-                "{n, rho, p}), 'stdout', 'exit_code'."
+                "{n, rho, p}, with y/tau_boot_lo/tau_boot_hi the values actually drawn for the "
+                "requested tau_axis), 'stdout', 'exit_code'."
             ),
             "properties": {
                 "obs_db_path": {
@@ -2272,9 +2298,10 @@ TOOL_MANIFEST: dict = {
                 "save_path_prefix": {
                     "type": "string",
                     "description": (
-                        "Base path; 'dcf_panels', 'population_tau_r_proxy', "
-                        "'population_tau_pd_signif' plus '.png' are appended per figure. "
-                        "Auto-generated timestamped prefix under output_dir if omitted."
+                        "Base path; 'dcf_panels', 'population_tau_r_proxy[_abs]', "
+                        "'population_tau_pd_signif[_abs]' plus '.png' are appended per figure "
+                        "(the '_abs' suffix appears only when tau_axis='abs'). Auto-generated "
+                        "timestamped prefix under output_dir if omitted."
                     ),
                 },
                 "max_panels": {
@@ -2283,6 +2310,27 @@ TOOL_MANIFEST: dict = {
                         "Maximum status=='ok' subobs drawn in the dcf_panels grid (ccf_master "
                         "row order). Default 12. Never bounds the two population panels, "
                         "which always cover every status=='ok' subobs."
+                    ),
+                },
+                "tau_axis": {
+                    "type": "string",
+                    "enum": ["signed", "abs"],
+                    "description": (
+                        "Which lag statistic the two population panels plot. Default "
+                        "'signed' (y=tau_peak_s, bootstrap interval = the literal "
+                        "[tau_boot_lo, tau_boot_hi] segment, annotation from the "
+                        "tau_peak_vs_<covariate> row -- bit-for-bit unchanged from before "
+                        "this argument existed). 'abs': y=abs(tau_peak_s); the bootstrap "
+                        "interval is mapped to the true image of [tau_boot_lo, tau_boot_hi] "
+                        "under abs() (0.0 as the lower endpoint when the interval brackets "
+                        "zero, else [min(|lo|,|hi|), max(|lo|,|hi|)]); annotation from the "
+                        "abs_tau_peak_vs_<covariate> row; y-axis floored at 0; output "
+                        "filenames get an '_abs' suffix so the two variants never overwrite "
+                        "each other. Any value other than 'signed'/'abs' raises ValueError. "
+                        "tau_axis='abs' against a population_correlations.csv written before "
+                        "ixpe_qu_lag_dcf added the abs_tau_peak_* rows raises ValueError "
+                        "naming the missing row and telling the caller to rerun "
+                        "ixpe_qu_lag_dcf, writing no PNG."
                     ),
                 },
             },
