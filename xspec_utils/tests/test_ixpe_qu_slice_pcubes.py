@@ -75,9 +75,17 @@ def test_sorted_gap_split_indices_single_dominant_gap():
 
 
 def test_sorted_gap_split_indices_two_dominant_gaps():
+    # ~2e9s total span: with the new scale floors at their DEFAULTS the
+    # first (~1e6s) dominant gap would fail split_gap_min_frac (10% of a
+    # ~2e9s span is ~2e8s) even though it clears the ratio cliff -- disable
+    # both floors and the cap explicitly to keep testing the ratio cliff
+    # (Step 1) in isolation, per split-scale-guard fix.
     gti_start = [0.0, 10.0, 1000010.0, 1000020.0, 2000000030.0, 2000000042.0]
     gti_stop = [5.0, 15.0, 1000015.0, 1000025.0, 2000000035.0, 2000000047.0]
-    assert red_ixpe._sorted_gap_split_indices(gti_start, gti_stop, 10.0) == [1, 3]
+    assert red_ixpe._sorted_gap_split_indices(
+        gti_start, gti_stop, 10.0,
+        split_gap_min_s=0.0, split_gap_min_frac=0.0, max_subobs=None,
+    ) == [1, 3]
 
 
 def test_sorted_gap_split_indices_two_comparable_dominant_gaps():
@@ -98,12 +106,21 @@ def test_sorted_gap_split_indices_tiered_prefers_largest_cliff():
     """A tiered gap structure (sorted gaps 5e6, 4e5, 2e3 -- adjacent ratios
     12.5 then 200) must prefer the LARGEST cliff (the 200x drop), accepting
     the top TWO gaps, not just the single largest gap (which only clears the
-    smaller 12.5x cliff)."""
+    smaller 12.5x cliff). The second gap (4e5s) is below split_gap_min_frac's
+    DEFAULT threshold for this ~5.4e6s total span, so both floors and the
+    cap are explicitly disabled to keep testing the ratio cliff (Step 1) in
+    isolation, per split-scale-guard fix."""
     gti_start = [0.0, 5000000.0, 5400000.0, 5402000.0]
     gti_stop = [0.0, 4999999.0, 5399999.0, 5402001.0]
-    idxs = red_ixpe._sorted_gap_split_indices(gti_start, gti_stop, 10.0)
+    idxs = red_ixpe._sorted_gap_split_indices(
+        gti_start, gti_stop, 10.0,
+        split_gap_min_s=0.0, split_gap_min_frac=0.0, max_subobs=None,
+    )
     assert idxs == [0, 1]
-    assert len(red_ixpe.subobs_groups(gti_start, gti_stop, 10.0)) == 3
+    assert len(red_ixpe.subobs_groups(
+        gti_start, gti_stop, 10.0,
+        split_gap_min_s=0.0, split_gap_min_frac=0.0, max_subobs=None,
+    )) == 3
 
 
 def test_sorted_gap_split_indices_fewer_than_two_gtis():
@@ -177,12 +194,15 @@ def test_should_split_subobs_capability_gate(obsid, split_multiobs, expected):
 def test_real_02008201_gate_prevents_over_split_ungated_path_still_over_splits():
     """Differential, real-data regression for the reported crash: a cheap GTI-
     header read (no ixpeobssim reduction) on the real 02008201 fixture shows
-    the UNGATED subobs_groups(...) call (what qu_slice_pcubes did before this
-    fix) over-splits an ordinary monitoring pointing into dozens of groups --
-    enough to have driven the old chr(ord('a')+index) past 26 and emitted a
-    non-ASCII byte -- while the new GATED path (_resolve_subobs_groups, which
-    _should_split_subobs judges this obsid as NOT merged) yields exactly one
-    whole-span sub-observation."""
+    the UNGATED subobs_groups(...) call with the ratio cliff run in
+    isolation (both scale floors and the cap explicitly disabled --
+    reproducing what qu_slice_pcubes did before either the '...99' gate fix
+    or the split-scale-guard floors) over-splits an ordinary monitoring
+    pointing into dozens of groups -- enough to have driven the old
+    chr(ord('a')+index) past 26 and emitted a non-ASCII byte -- while the new
+    GATED path (_resolve_subobs_groups, which _should_split_subobs judges
+    this obsid as NOT merged) yields exactly one whole-span sub-observation.
+    """
     evt_dir = os.path.join(REAL_IXPE_DIR, OBSID_ORDINARY_GAPPY, "event_l2")
     files = sorted(glob.glob(os.path.join(evt_dir, f"ixpe{OBSID_ORDINARY_GAPPY}_det1_evt2_v[0-9][0-9]_rej.fits")))
     if not files:
@@ -192,12 +212,35 @@ def test_real_02008201_gate_prevents_over_split_ungated_path_still_over_splits()
         gti_start = [float(x) for x in gti["START"]]
         gti_stop = [float(x) for x in gti["STOP"]]
 
-    ungated = red_ixpe.subobs_groups(gti_start, gti_stop, 10.0)
+    ungated = red_ixpe.subobs_groups(
+        gti_start, gti_stop, 10.0,
+        split_gap_min_s=0.0, split_gap_min_frac=0.0, max_subobs=None,
+    )
     assert len(ungated) > 1  # the pre-fix behaviour: a real over-split
 
     gated = red_ixpe._resolve_subobs_groups(OBSID_ORDINARY_GAPPY, gti_start, gti_stop, 10.0, None)
     assert len(gated) == 1
     assert gated[0]["tstart"] == gti_start[0] and gated[0]["tstop"] == gti_stop[-1]
+
+
+def test_real_02008201_ungated_default_floors_also_prevent_over_split():
+    """Belt-and-suspenders regression at the split-scale-guard fix's own
+    DEFAULTS: on this same real, ordinary monitoring pointing, even the
+    UNGATED subobs_groups(...) call (no '...99' naming-convention gate at
+    all) no longer over-splits once the new absolute/fractional scale floors
+    are applied at their defaults -- every one of 02008201's real inter-GTI
+    gaps is order ~1-3 ks, far below the 1-day absolute floor."""
+    evt_dir = os.path.join(REAL_IXPE_DIR, OBSID_ORDINARY_GAPPY, "event_l2")
+    files = sorted(glob.glob(os.path.join(evt_dir, f"ixpe{OBSID_ORDINARY_GAPPY}_det1_evt2_v[0-9][0-9]_rej.fits")))
+    if not files:
+        pytest.skip(f"real fixture ObsID {OBSID_ORDINARY_GAPPY} not local under {evt_dir}")
+    with fits.open(files[0]) as hdul:
+        gti = hdul["GTI"].data
+        gti_start = [float(x) for x in gti["START"]]
+        gti_stop = [float(x) for x in gti["STOP"]]
+
+    ungated_default_floors = red_ixpe.subobs_groups(gti_start, gti_stop, 10.0)
+    assert len(ungated_default_floors) == 1
 
 
 # --------------------------------------------------------------------------- #
@@ -249,43 +292,48 @@ def test_greedy_slice_edges_exact_multiple_no_empty_trailing_slice():
     spurious empty trailing slice -- the residual (0..target-1 events) is
     always folded into the previous slice."""
     times = np.arange(0.0, 100.0, 1.0)
-    edges, noise_limited, clipped = red_ixpe._greedy_slice_edges(times, 0.0, 100.0, 10.0, n_min=2, n_max=25)
+    edges, noise_limited, clipped, n_natural = red_ixpe._greedy_slice_edges(times, 0.0, 100.0, 10.0, n_min=2, n_max=25)
     assert edges[0] == 0.0 and edges[-1] == 100.0
     assert all(edges[i] < edges[i + 1] for i in range(len(edges) - 1))
     assert not noise_limited and not clipped
     assert len(edges) - 1 == 10
+    assert n_natural == 10
 
 
 def test_greedy_slice_edges_non_exact_remainder_merged():
     times = np.arange(0.0, 103.0, 1.0)
-    edges, noise_limited, clipped = red_ixpe._greedy_slice_edges(times, 0.0, 103.0, 10.0, n_min=2, n_max=25)
+    edges, noise_limited, clipped, n_natural = red_ixpe._greedy_slice_edges(times, 0.0, 103.0, 10.0, n_min=2, n_max=25)
     assert edges[0] == 0.0 and edges[-1] == 103.0
     assert all(edges[i] < edges[i + 1] for i in range(len(edges) - 1))
     # The 3-event remainder folds into the last full slice -- still 10 slices.
     assert len(edges) - 1 == 10
+    assert n_natural == 10
 
 
 def test_greedy_slice_edges_clips_to_n_max():
     times = np.arange(0.0, 100.0, 1.0)
-    edges, noise_limited, clipped = red_ixpe._greedy_slice_edges(times, 0.0, 100.0, 10.0, n_min=2, n_max=3)
+    edges, noise_limited, clipped, n_natural = red_ixpe._greedy_slice_edges(times, 0.0, 100.0, 10.0, n_min=2, n_max=3)
     assert clipped is True
     assert noise_limited is False
     assert len(edges) - 1 == 3
     assert edges[0] == 0.0 and edges[-1] == 100.0
+    assert n_natural == 10  # the natural (pre-clip) slice count, not the clipped 3
 
 
 def test_greedy_slice_edges_below_n_min_is_noise_limited_not_invented():
     times = np.arange(0.0, 100.0, 1.0)
-    edges, noise_limited, clipped = red_ixpe._greedy_slice_edges(times, 0.0, 100.0, 1000.0, n_min=2, n_max=25)
+    edges, noise_limited, clipped, n_natural = red_ixpe._greedy_slice_edges(times, 0.0, 100.0, 1000.0, n_min=2, n_max=25)
     assert noise_limited is True
     assert clipped is False
     assert len(edges) - 1 == 1  # never invents slices the real events don't support
+    assert n_natural == 1
 
 
 def test_greedy_slice_edges_empty_times_is_single_noise_limited_slice():
-    edges, noise_limited, clipped = red_ixpe._greedy_slice_edges(np.array([]), 0.0, 100.0, 10.0, n_min=2, n_max=25)
+    edges, noise_limited, clipped, n_natural = red_ixpe._greedy_slice_edges(np.array([]), 0.0, 100.0, 10.0, n_min=2, n_max=25)
     assert edges == [0.0, 100.0]
     assert noise_limited is True and clipped is False
+    assert n_natural == 1
 
 
 # --------------------------------------------------------------------------- #
@@ -500,13 +548,18 @@ def test_tool_manifest_exposes_class_parameters():
     for name in ("ra", "dec", "emin_kev", "emax_kev", "src_rad", "bkg",
                  "bkg_inner_rad", "bkg_outer_rad", "mdp_target", "mdp_frac",
                  "mdp_floor", "n_min", "n_max", "split_gap_factor",
-                 "split_multiobs"):
+                 "split_multiobs", "split_gap_min_s", "split_gap_min_frac",
+                 "max_subobs", "max_return_subobs"):
         assert name in props, f"{name} missing from args_schema.properties"
     assert entry["args_schema"]["required"] == ["obs_db_path", "obsid"]
     assert props["n_min"]["type"] == "integer"
     assert props["n_max"]["type"] == "integer"
     assert props["bkg"]["type"] == "boolean"
     assert props["split_multiobs"]["type"] == "boolean"
+    assert props["max_subobs"]["type"] == "integer"
+    assert props["max_return_subobs"]["type"] == "integer"
+    assert props["split_gap_min_s"]["type"] == "number"
+    assert props["split_gap_min_frac"]["type"] == "number"
     assert "irf_date" not in props  # auto-selected internally, not AI-facing
 
 
@@ -706,7 +759,12 @@ def test_skill_wrapper_falls_back_to_plain_evt2_and_records_catalog(tmp_path):
     must fall back to plain evt2_v*.fits (mirroring get_all_file_list's own
     03002599 special case). Confirms end-to-end: file discovery, reduction,
     CSV(s) on disk, level-3 catalog recording (one product per sub-obs, all
-    against the real 9-digit obsid), and a bounded return (no 'rows' key)."""
+    against the real 9-digit obsid), a bounded return (no 'rows' key), and
+    -- since this call's sub-obs count is well under the default
+    max_return_subobs -- the split-scale-guard fix's UN-TRUNCATED bounded-
+    return contract: 'per_subobs_truncated'/'n_subobs_total'/
+    'subobs_listing_path' are always present, the listing CSV is always
+    written and lists every sub-obs, and stdout never enumerates paths."""
     obs_db_path = str(tmp_path)
     _copy_real_event_files(obs_db_path, OBSID_MERGED)
 
@@ -727,6 +785,18 @@ def test_skill_wrapper_falls_back_to_plain_evt2_and_records_catalog(tmp_path):
     assert recorded_keys == set(result["subobs_keys"])
     for p in products:
         assert p["produced_by"] == "xspec_utils.red_ixpe.qu_slice_pcubes"
+
+    # Un-truncated branch: the three bounded-return keys are always present.
+    assert result["per_subobs_truncated"] is False
+    n_total = result["n_subobs_total"]
+    assert n_total == len(result["subobs_keys"]) == len(result["per_subobs"])
+    listing_path = result["subobs_listing_path"]
+    assert os.path.exists(listing_path)
+    with open(listing_path, newline="") as f:
+        listing_rows = list(csv.DictReader(f))
+    assert len(listing_rows) == n_total
+    assert {r["subobs_key"] for r in listing_rows} == set(result["subobs_keys"])
+    assert ".csv" not in result["stdout"] and len(result["stdout"]) < 400
 
 
 def test_skill_wrapper_missing_event_files_fails_loudly_no_record(tmp_path):

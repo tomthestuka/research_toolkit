@@ -1430,28 +1430,33 @@ def _decide_background(bkg: bool | None, r_proxy_val: float,
 
 
 def _sorted_gap_split_indices(gti_start: list[float], gti_stop: list[float],
-                               split_gap_factor: float) -> list[int]:
+                               split_gap_factor: float,
+                               split_gap_min_s: float = 86400.0,
+                               split_gap_min_frac: float = 0.10,
+                               max_subobs: int | None = 4) -> list[int]:
     """GTI-array indices after which a genuine multi-pointing merge gap
     sits, found by a MAX-RATIO CLIFF on the SORTED gap list -- never against
-    the population median/mean of all gaps. Real IXPE GTI structure mixes
+    the population median/mean of all gaps -- and then narrowed to two
+    absolute scale floors and a hard cap. Real IXPE GTI structure mixes
     many small on-orbit dropout gaps (fractions of a second to a few ks)
     with, at most, a handful of genuine month-scale merge gaps; comparing
     every gap to the population median flags hundreds of ordinary orbital
     dropouts as "splits".
 
-    Ranks every inter-GTI gap descending, then finds the single LARGEST
-    adjacent ratio ``gaps[k] / gaps[k+1]`` in that sorted list -- the cliff
-    separating the top tier of genuine (comparable-magnitude) merge gaps
-    from the ordinary orbital-dropout gaps below it -- and accepts every gap
-    at or above that cliff. This differs from (and replaces) a strictly
-    descending chain of outliers, which fails outright on a merge with two
-    or more comparable dominant gaps (e.g. sorted gaps
-    ``[5.0e6, 4.8e6, 2.8e3, ...]``: the top-vs-second-largest ratio
-    ``5.0e6/4.8e6 ~ 1.04`` never clears ``split_gap_factor``, so a naive
-    top-down chain returns no split at all -- even though BOTH gaps are
-    genuine merge boundaries, comparably huge against every ordinary gap
-    below them). The max-ratio cliff instead looks for where the biggest
-    proportional DROP occurs, wherever that is in the ranked list:
+    **Step 1 -- the ratio cliff (unchanged).** Ranks every inter-GTI gap
+    descending, then finds the single LARGEST adjacent ratio
+    ``gaps[k] / gaps[k+1]`` in that sorted list -- the cliff separating the
+    top tier of genuine (comparable-magnitude) merge gaps from the ordinary
+    orbital-dropout gaps below it -- and accepts every gap at or above that
+    cliff. This differs from (and replaces) a strictly descending chain of
+    outliers, which fails outright on a merge with two or more comparable
+    dominant gaps (e.g. sorted gaps ``[5.0e6, 4.8e6, 2.8e3, ...]``: the
+    top-vs-second-largest ratio ``5.0e6/4.8e6 ~ 1.04`` never clears
+    ``split_gap_factor``, so a naive top-down chain returns no split at all
+    -- even though BOTH gaps are genuine merge boundaries, comparably huge
+    against every ordinary gap below them). The max-ratio cliff instead
+    looks for where the biggest proportional DROP occurs, wherever that is
+    in the ranked list:
 
     - A single dominant gap (e.g. ObsID 03002599's ~5.4e6s literature-merge
       gap against its next-largest ~2.8e3s ordinary gap, ratio ~1900) puts
@@ -1468,9 +1473,40 @@ def _sorted_gap_split_indices(gti_start: list[float], gti_stop: list[float],
       ranked list means no genuine cliff was found at all -- no split.
 
     A ``gap_next <= 0`` (degenerate/overlapping GTI) is treated as an
-    infinite ratio, i.e. a definite cliff.
+    infinite ratio for the cliff itself, but a gap surviving the cliff this
+    way must still clear both floors below like any other candidate.
+
+    **Step 2 -- two scale floors (new).** In a long, gap-riddled campaign
+    the biggest proportional drop in the ranked list can sit between the
+    routine orbital-visibility-gap tier (order of IXPE's ~96.6 min orbit,
+    at most a few ks) and the sub-second dropout tier, so the cliff alone
+    accepts every orbital gap as a "merge boundary" (the reported defect: a
+    386 ks '...99' campaign produced ~230 single-slice fragments). A
+    cliff-accepted gap must ALSO clear both:
+
+    - ``split_gap_min_s`` (default 86400.0, one day): far above any routine
+      IXPE occultation/SAA visibility gap, far below a real merged-pointing
+      boundary (days to months).
+    - ``split_gap_min_frac`` (default 0.10) of the observation's own total
+      elapsed span (``gti_stop[-1] - gti_start[0]``): separates "two
+      distinct pointings merged" (a dominant fraction of the elapsed span
+      is empty) from "one campaign with many day-scale visit gaps" (each
+      gap a small fraction of the whole span). A non-positive elapsed span
+      fails this floor outright (an effective infinite threshold -- never a
+      ``ZeroDivisionError``, never a split from this term alone).
+
+    **Step 3 -- hard cap (new).** After the cliff and both floors, at most
+    ``max_subobs - 1`` boundaries survive: when more remain, only the
+    ``max_subobs - 1`` LARGEST are kept (ties broken by earlier GTI index).
+    ``max_subobs=None`` disables the cap; ``max_subobs <= 1`` forbids any
+    split outright, before either the cliff or the floors are evaluated.
+
+    A gap must clear the ratio cliff AND both floors to become a boundary;
+    the cap is applied last, over whatever survives that.
     """
     if len(gti_start) < 2:
+        return []
+    if max_subobs is not None and max_subobs <= 1:
         return []
     gaps = [(gti_start[i + 1] - gti_stop[i], i) for i in range(len(gti_start) - 1)]
     ranked = sorted(gaps, key=lambda pair: -pair[0])
@@ -1488,22 +1524,40 @@ def _sorted_gap_split_indices(gti_start: list[float], gti_stop: list[float],
     if best_ratio <= split_gap_factor:
         return []
 
-    accepted = [ranked[j][1] for j in range(best_k + 1)]
-    return sorted(accepted)
+    cliff_accepted = [ranked[j] for j in range(best_k + 1)]
+
+    total_elapsed_span = gti_stop[-1] - gti_start[0]
+    frac_floor = split_gap_min_frac * total_elapsed_span if total_elapsed_span > 0 else float('inf')
+    scale_floor = max(split_gap_min_s, frac_floor)
+    eligible = [(gap, idx) for gap, idx in cliff_accepted if gap >= scale_floor]
+
+    if max_subobs is not None and len(eligible) > max_subobs - 1:
+        eligible = sorted(eligible, key=lambda pair: (-pair[0], pair[1]))[:max_subobs - 1]
+
+    return sorted(idx for _, idx in eligible)
 
 
 def subobs_groups(gti_start: list[float], gti_stop: list[float],
-                   split_gap_factor: float = 10.0) -> list[dict]:
+                   split_gap_factor: float = 10.0,
+                   split_gap_min_s: float = 86400.0,
+                   split_gap_min_frac: float = 0.10,
+                   max_subobs: int | None = 4) -> list[dict]:
     """Partition one observation's GTI list into N sub-observations at
-    genuine multi-pointing merge gaps (see ``_sorted_gap_split_indices``).
+    genuine multi-pointing merge gaps (see ``_sorted_gap_split_indices`` for
+    the ratio-cliff-plus-scale-floors-plus-cap criterion; ``split_gap_min_s``,
+    ``split_gap_min_frac`` and ``max_subobs`` are passed straight through).
 
     Returns a chronologically-ordered list of dicts, each with ``gti_start``,
     ``gti_stop`` (that sub-observation's own GTI sub-lists) and ``tstart``,
     ``tstop`` (first GTI start / last GTI stop in the group). A single-group
     result (no split detected) is still returned as a 1-element list, so
     callers never special-case "no split" separately from "N-way split".
+    Concatenating every group's ``gti_start``/``gti_stop`` reproduces the
+    full input GTI list exactly -- the partition never drops or duplicates
+    a GTI.
     """
-    cuts = _sorted_gap_split_indices(gti_start, gti_stop, split_gap_factor)
+    cuts = _sorted_gap_split_indices(gti_start, gti_stop, split_gap_factor,
+                                      split_gap_min_s, split_gap_min_frac, max_subobs)
     groups = []
     start = 0
     for cut in cuts + [len(gti_start) - 1]:
@@ -1534,16 +1588,21 @@ def _should_split_subobs(obsid: str, split_multiobs: bool | None = None) -> bool
 
 
 def _resolve_subobs_groups(obs: str, gti_start: list[float], gti_stop: list[float],
-                            split_gap_factor: float, split_multiobs: bool | None) -> list[dict]:
+                            split_gap_factor: float, split_multiobs: bool | None,
+                            split_gap_min_s: float = 86400.0,
+                            split_gap_min_frac: float = 0.10,
+                            max_subobs: int | None = 4) -> list[dict]:
     """The exact GTI partition ``qu_slice_pcubes`` reduces per sub-observation:
     ``subobs_groups(...)`` when ``_should_split_subobs(obs, split_multiobs)``
     is True, else a single group spanning the whole GTI list unchanged.
     ``subobs_groups``/``_sorted_gap_split_indices`` themselves stay fully
     general and untouched -- this is the one gate deciding whether they run
-    at all.
+    at all. ``split_gap_min_s``/``split_gap_min_frac``/``max_subobs`` are
+    passed straight through to ``subobs_groups`` when the gate is open.
     """
     if _should_split_subobs(obs, split_multiobs):
-        return subobs_groups(gti_start, gti_stop, split_gap_factor)
+        return subobs_groups(gti_start, gti_stop, split_gap_factor,
+                              split_gap_min_s, split_gap_min_frac, max_subobs)
     return [{'gti_start': list(gti_start), 'gti_stop': list(gti_stop),
              'tstart': gti_start[0], 'tstop': gti_stop[-1]}]
 
@@ -1573,7 +1632,7 @@ def _subobs_key(obs: str, index: int, n_groups: int) -> str:
 
 
 def _greedy_slice_edges(times: np.ndarray, tstart: float, tstop: float,
-                         target_raw: float, n_min: int, n_max: int) -> tuple[list[float], bool, bool]:
+                         target_raw: float, n_min: int, n_max: int) -> tuple[list[float], bool, bool, int]:
     """Adaptive greedy time-edge placement within one sub-observation.
 
     Walks ``times`` (sorted MET s, already scoped to the sub-observation's
@@ -1587,12 +1646,15 @@ def _greedy_slice_edges(times: np.ndarray, tstart: float, tstop: float,
     slices past what the real events support) and signalled via the
     returned ``noise_limited``.
 
-    Returns ``(edges, noise_limited, clipped_to_n_max)`` where ``edges`` has
-    ``n_slices + 1`` entries (``edges[0] == tstart``, ``edges[-1] == tstop``).
+    Returns ``(edges, noise_limited, clipped_to_n_max, n_natural)`` where
+    ``edges`` has ``n_slices + 1`` entries (``edges[0] == tstart``,
+    ``edges[-1] == tstop``) and ``n_natural`` is the slice count the greedy
+    walk produced BEFORE any ``n_max`` re-partition (equal to
+    ``len(edges) - 1`` when ``clipped_to_n_max`` is False).
     """
     n_events = len(times)
     if n_events == 0 or target_raw <= 0:
-        return [tstart, tstop], True, False
+        return [tstart, tstop], True, False, 1
 
     edges = [tstart]
     cum = 0
@@ -1617,9 +1679,9 @@ def _greedy_slice_edges(times: np.ndarray, tstart: float, tstop: float,
         idxs = sorted({int(round(k * n_events / n_max)) for k in range(1, n_max)})
         idxs = [i for i in idxs if 0 < i < n_events]
         edges = [tstart] + [float(times[i]) for i in idxs] + [tstop]
-        return edges, False, True
+        return edges, False, True, n_natural
 
-    return edges, n_natural < n_min, False
+    return edges, n_natural < n_min, False, n_natural
 
 
 def qu_slice_pcubes(obs: str,
@@ -1639,6 +1701,9 @@ def qu_slice_pcubes(obs: str,
                      n_max: int = 25,
                      split_gap_factor: float = 10.0,
                      split_multiobs: bool | None = None,
+                     split_gap_min_s: float = 86400.0,
+                     split_gap_min_frac: float = 0.10,
+                     max_subobs: int | None = 4,
                      irf_date: str | None = None,
                      overwrite: bool = True,
                      chatter: bool = False,
@@ -1658,10 +1723,13 @@ def qu_slice_pcubes(obs: str,
     (the scale-free gap-outlier machinery itself) stay fully general and
     untouched; they simply are not invoked at all when the gate is closed.
     When the gate is open, the observation's GTI list is partitioned into
-    one or more sub-observations at genuine multi-pointing merge gaps
-    (``subobs_groups``/``split_gap_factor``); each sub-observation is keyed
-    ``<obs>`` (no split) or ``<obs>a``, ``<obs>b``, ... (N-way split) and
-    processed fully independently below.
+    one or more sub-observations at genuine multi-pointing merge gaps: a
+    gap must clear the sorted-gap ratio cliff (``split_gap_factor``) AND
+    two absolute scale floors (``split_gap_min_s``, ``split_gap_min_frac``)
+    to become a boundary, and at most ``max_subobs`` groups are ever
+    emitted (see ``_sorted_gap_split_indices``/``subobs_groups``). Each
+    sub-observation is keyed ``<obs>`` (no split) or ``<obs>a``, ``<obs>b``,
+    ... (N-way split) and processed fully independently below.
 
     **Per sub-observation:**
 
@@ -1726,9 +1794,9 @@ def qu_slice_pcubes(obs: str,
     n_min, n_max : int
         Slice-count clipping bounds per sub-observation. Defaults 8, 25.
     split_gap_factor : float
-        Outlier-ratio threshold for the N-way GTI-gap split. Default 10.0.
-        Only consulted at all when the split is attempted -- see
-        ``split_multiobs``.
+        Outlier-ratio threshold for the N-way GTI-gap split's max-ratio
+        cliff (``_sorted_gap_split_indices``). Default 10.0. Only consulted
+        at all when the split is attempted -- see ``split_multiobs``.
     split_multiobs : bool or None
         Force (``True``) or forbid (``False``) attempting the N-way GTI-gap
         split at all. ``None`` (default) auto-decides via
@@ -1736,17 +1804,47 @@ def qu_slice_pcubes(obs: str,
         03002599) is judged literature-merged and the split runs; any other
         obsid is treated as one whole-span sub-observation regardless of its
         own GTI gap sizes.
+    split_gap_min_s : float
+        Absolute scale floor (seconds) a cliff-accepted gap must also clear
+        to become a boundary. Default 86400.0 (1 day) -- far above any
+        routine IXPE orbital-visibility gap (~96.6 min orbit), far below a
+        genuine merged-pointing gap (days to months). Only consulted when
+        the split is attempted.
+    split_gap_min_frac : float
+        Fractional scale floor: a cliff-accepted gap must also be at least
+        this fraction of the observation's own total elapsed span
+        (``gti_stop[-1] - gti_start[0]``) to become a boundary. Default 0.10.
+        Separates a genuine merged-pointing gap from a long campaign's own
+        routine day-scale visit gaps. Only consulted when the split is
+        attempted.
+    max_subobs : int or None
+        Hard cap on the number of sub-observations the split can ever
+        produce: after the cliff and both floors, only the
+        ``max_subobs - 1`` LARGEST surviving boundaries are kept (ties
+        broken by earlier GTI index). Default 4. ``None`` disables the cap;
+        ``<= 1`` forbids any split outright. Only consulted when the split
+        is attempted.
     irf_date : str or None
         IRF calibration epoch; ``None`` auto-selects the installed epoch
         nearest the observation date.
 
     Returns
     -------
-    dict with ``subobs_keys`` (list) and ``per_subobs`` (key -> dict with
+    dict with ``subobs_keys`` (list), ``per_subobs`` (key -> dict with
     ``mdp99_obs_pct``, ``r_proxy``, ``subtract_background``, ``uses_rej``,
     ``n_slice``, ``noise_limited``, ``whole_pd_pct``, ``whole_pd_err``,
-    ``whole_pa_deg``, ``whole_signif``, ``csv_path``, and ``rows`` -- the
-    per-slice row dicts written to that sub-obs's CSV).
+    ``whole_pa_deg``, ``whole_signif``, ``whole_counts``, ``whole_exposure_s``,
+    ``csv_path``, ``rows`` -- the per-slice row dicts written to that
+    sub-obs's CSV -- plus the diagnostics ``mdp_target_frac_used`` (the
+    resolved per-slice MDP99 target fraction actually used),
+    ``c_target_counts`` (the derived target raw-proxy count),
+    ``n_natural_slices`` (the greedy walk's slice count before any
+    ``n_max`` clipping) and ``clipped_to_n_max`` (bool)), and the
+    whole-observation GTI diagnostics ``n_gti`` (int), ``median_gti_gap_s``
+    (0.0 when the observation has a single GTI), ``total_elapsed_span_s``
+    and ``split_gaps_s`` (one entry per accepted split boundary gap
+    duration in seconds, chronological order; ``len(split_gaps_s) ==
+    len(subobs_keys) - 1``; empty when no split occurred).
 
     Raises
     ------
@@ -1783,8 +1881,15 @@ def qu_slice_pcubes(obs: str,
             raise ValueError(f'{obs_file_list[0]}: PRIMARY header missing DEADC keyword')
         deadc = float(deadc)
 
+    n_gti = len(gti_start)
+    _all_gaps = [gti_start[i + 1] - gti_stop[i] for i in range(n_gti - 1)]
+    median_gti_gap_s = float(np.median(_all_gaps)) if _all_gaps else 0.0
+    total_elapsed_span_s = gti_stop[-1] - gti_start[0]
+
     all_times = _merged_selected_times(obs_file_list, ra, dec, src_rad, emin_kev, emax_kev)
-    groups = _resolve_subobs_groups(obs, gti_start, gti_stop, split_gap_factor, split_multiobs)
+    groups = _resolve_subobs_groups(obs, gti_start, gti_stop, split_gap_factor, split_multiobs,
+                                     split_gap_min_s, split_gap_min_frac, max_subobs)
+    split_gaps_s = [groups[i + 1]['tstart'] - groups[i]['tstop'] for i in range(len(groups) - 1)]
     obs_dir = Path(obs_file_list[0]).resolve().parent.parent
 
     subobs_keys = []
@@ -1836,8 +1941,8 @@ def qu_slice_pcubes(obs: str,
         c_target = c_obs * (mdp99_obs_frac / target_frac) ** 2
         raw_target = c_target * (n_sub_raw / c_obs)
 
-        edges, noise_limited, clipped = _greedy_slice_edges(sub_times, sub_tstart, sub_tstop,
-                                                             raw_target, n_min, n_max)
+        edges, noise_limited, clipped, n_natural_slices = _greedy_slice_edges(
+            sub_times, sub_tstart, sub_tstop, raw_target, n_min, n_max)
         n_slices = len(edges) - 1
         target_counts = (c_obs / n_slices) if clipped else c_target
 
@@ -1887,7 +1992,8 @@ def qu_slice_pcubes(obs: str,
             'bkg': subtract_background, 'bkg_inner_rad': bkg_inner_rad, 'bkg_outer_rad': bkg_outer_rad,
             'mdp_target': mdp_target, 'mdp_frac': mdp_frac, 'mdp_floor': mdp_floor,
             'n_min': n_min, 'n_max': n_max, 'split_gap_factor': split_gap_factor,
-            'split_multiobs': split_multiobs,
+            'split_multiobs': split_multiobs, 'split_gap_min_s': split_gap_min_s,
+            'split_gap_min_frac': split_gap_min_frac, 'max_subobs': max_subobs,
             'ra': ra, 'dec': dec, 'irf_date': irf_date, 'uses_rej': uses_rej,
             'subobs_span': [sub_tstart, sub_tstop],
         }
@@ -1908,6 +2014,10 @@ def qu_slice_pcubes(obs: str,
             'whole_exposure_s': good_exposure_whole,
             'csv_path': csv_path,
             'rows': rows,
+            'mdp_target_frac_used': target_frac,
+            'c_target_counts': c_target,
+            'n_natural_slices': n_natural_slices,
+            'clipped_to_n_max': clipped,
         }
 
         if chatter:
@@ -1926,4 +2036,8 @@ def qu_slice_pcubes(obs: str,
             writer.writeheader()
             writer.writerows(rows)
 
-    return {'subobs_keys': subobs_keys, 'per_subobs': per_subobs}
+    return {
+        'subobs_keys': subobs_keys, 'per_subobs': per_subobs,
+        'n_gti': n_gti, 'median_gti_gap_s': median_gti_gap_s,
+        'total_elapsed_span_s': total_elapsed_span_s, 'split_gaps_s': split_gaps_s,
+    }

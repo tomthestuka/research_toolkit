@@ -306,6 +306,7 @@ _EXPECTED_DEFAULTS = {
     "bkg": None, "bkg_inner_rad": 3.0, "bkg_outer_rad": 5.0, "mdp_target": None,
     "mdp_frac": 0.5, "mdp_floor": 0.015, "n_min": 8, "n_max": 25,
     "split_gap_factor": 10.0, "split_multiobs": None,
+    "split_gap_min_s": 86400.0, "split_gap_min_frac": 0.10, "max_subobs": 4,
 }
 
 
@@ -351,6 +352,7 @@ def test_string_kwargs_reach_library_as_native_types(shared_event_dir, monkeypat
         bkg="false", bkg_inner_rad="2.5", bkg_outer_rad="4.0", mdp_target="0.06",
         mdp_frac="0.5", mdp_floor="0.015", n_min="8", n_max="40",
         split_gap_factor="10.0", split_multiobs="false",
+        split_gap_min_s="43200.0", split_gap_min_frac="0.2", max_subobs="3",
     )
 
     assert result["exit_code"] == 1
@@ -373,6 +375,9 @@ def test_string_kwargs_reach_library_as_native_types(shared_event_dir, monkeypat
     assert captured["split_gap_factor"] == 10.0 and type(captured["split_gap_factor"]) is float
     assert captured["split_multiobs"] is False
     assert isinstance(captured["split_multiobs"], bool)
+    assert captured["split_gap_min_s"] == 43200.0 and type(captured["split_gap_min_s"]) is float
+    assert captured["split_gap_min_frac"] == 0.2 and type(captured["split_gap_min_frac"]) is float
+    assert captured["max_subobs"] == 3 and type(captured["max_subobs"]) is int
 
 
 # --------------------------------------------------------------------------- #

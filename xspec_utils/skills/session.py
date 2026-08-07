@@ -624,6 +624,10 @@ def ixpe_qu_slice_pcubes(
     n_max: int = 25,
     split_gap_factor: float = 10.0,
     split_multiobs: bool | None = None,
+    split_gap_min_s: float = 86400.0,
+    split_gap_min_frac: float = 0.10,
+    max_subobs: int | None = 4,
+    max_return_subobs: int = 25,
 ) -> dict:
     """MDP-anchored adaptive q(t)=Q/I, u(t)=U/I intra-observation time series
     for one local IXPE ObsID, with data-driven N-way splitting of a
@@ -644,13 +648,36 @@ def ixpe_qu_slice_pcubes(
     judges this obsid merged -- an ordinary single monitoring pointing
     (e.g. Cyg X-1's 02008201) is never assumed merged, however large its own
     GTI gaps happen to be, and is always reduced as one whole-span
-    sub-observation.
+    sub-observation. When the gate is open, a gap becomes a split boundary
+    only when it clears the sorted-gap ratio cliff (``split_gap_factor``)
+    AND both absolute scale floors (``split_gap_min_s``, a day by default;
+    ``split_gap_min_frac``, 10% of the observation's own elapsed span by
+    default) -- this is what stops a long, gap-riddled campaign's own
+    routine orbital-visibility gaps from being accepted as merge
+    boundaries. At most ``max_subobs`` sub-observations are ever emitted.
 
     Records one ``kind='qu_slices'`` product per sub-observation CSV in the
     mission catalog at level 3 via ``obsdb_catalog.neutral.advance`` (all
     against the real 9-digit ``obsid`` -- a sub-observation key such as
     ``<obsid>a`` is a virtual partition of that same ObsID, not a separate
-    catalog entry).
+    catalog entry) -- every sub-obs CSV is written and recorded regardless
+    of the ``max_return_subobs`` payload bound below.
+
+    **Bounded return.** A long, genuinely many-way split (e.g. before this
+    fix, ~230 single-slice sub-observations from one over-split campaign)
+    can return so many ``per_subobs`` entries that the sandbox transport
+    layer truncates the response mid-message. ``stdout`` is therefore always
+    a short, fixed-size summary line -- it never enumerates per-sub-obs
+    paths. A sidecar ``qu_slice_subobs_listing_<obsid>.csv`` (columns
+    ``subobs_key``, ``csv_path``, ``n_slice``; one row per sub-observation,
+    chronological order) is ALWAYS written next to the sub-obs CSVs -- never
+    catalogued, a listing index only -- and ``per_subobs_truncated`` (bool),
+    ``n_subobs_total`` (the real count) and ``subobs_listing_path`` are
+    ALWAYS present in the return value. When the true sub-observation count
+    exceeds ``max_return_subobs``, ``subobs_keys`` and ``per_subobs`` in the
+    return value are truncated to the first ``max_return_subobs``
+    (chronological order) and ``per_subobs_truncated=True``; otherwise every
+    sub-obs is returned and ``per_subobs_truncated=False``.
 
     The sandbox harness calls this as a bare ``fn(**args)`` with no schema
     coercion, so a numeric/boolean keyword can arrive as a ``str`` (e.g.
@@ -660,23 +687,33 @@ def ixpe_qu_slice_pcubes(
     globbing, event selection or PCUBE binning -- an un-coercible value
     (e.g. ``n_min="eight"``) raises ``ValueError`` naming this tool and the
     argument in well under a second, rather than surfacing a bare
-    ``TypeError`` after a real reduction pass. Every one of the 15
-    coerced parameters is then rebound by name from the coercion result
-    (never ``**coerced`` at the call site) before ``red_ixpe.qu_slice_pcubes``
-    is called and before the catalog record below is built, so neither the
-    reduction nor the recorded ``params`` can ever see the original,
-    possibly str-typed value. A value already native-typed (the defaults
-    above, or an explicit native int/float/bool) passes through unchanged.
+    ``TypeError`` after a real reduction pass. Every coerced parameter is
+    then rebound by name from the coercion result (never ``**coerced`` at
+    the call site) before ``red_ixpe.qu_slice_pcubes`` is called and before
+    the catalog record below is built, so neither the reduction nor the
+    recorded ``params`` can ever see the original, possibly str-typed value.
+    A value already native-typed (the defaults above, or an explicit native
+    int/float/bool) passes through unchanged. ``max_return_subobs`` governs
+    only this wrapper's own return-value bounding and is never passed to
+    ``red_ixpe.qu_slice_pcubes``.
 
     Returns
     -------
-    dict with 'obsid', 'subobs_keys' (list, chronological order), and
-    'per_subobs' (sub-obs key -> dict with 'mdp99_obs_pct', 'r_proxy',
-    'subtract_background', 'uses_rej', 'n_slice', 'noise_limited',
-    'whole_pd_pct', 'whole_pd_err', 'whole_pa_deg', 'whole_signif',
-    'csv_path' -- read that CSV for the full per-slice table), plus
-    'stdout'/'exit_code' (1 with 'stderr' on failure -- nothing written or
-    recorded on failure).
+    dict with 'obsid', 'subobs_keys' (list, chronological order, possibly
+    truncated -- see above), 'per_subobs' (sub-obs key -> dict with
+    'mdp99_obs_pct', 'r_proxy', 'subtract_background', 'uses_rej', 'n_slice',
+    'noise_limited', 'whole_pd_pct', 'whole_pd_err', 'whole_pa_deg',
+    'whole_signif', 'whole_counts', 'whole_exposure_s', 'csv_path' -- read
+    that CSV for the full per-slice table -- plus the diagnostics
+    'mdp_target_frac_used', 'c_target_counts', 'n_natural_slices',
+    'clipped_to_n_max'), 'n_gti', 'median_gti_gap_s', 'total_elapsed_span_s',
+    'split_gaps_s' (one entry per accepted split boundary, chronological;
+    len(split_gaps_s) == len(subobs_keys)-1; empty when no split occurred),
+    'per_subobs_truncated' (bool, ALWAYS present), 'n_subobs_total' (int,
+    ALWAYS present, the true count irrespective of truncation),
+    'subobs_listing_path' (str, ALWAYS present -- the sidecar CSV listing
+    every sub-obs), plus 'stdout'/'exit_code' (1 with 'stderr' on failure --
+    nothing written or recorded on failure).
     """
     try:
         coerced = coerce_tool_args(
@@ -686,6 +723,8 @@ def ixpe_qu_slice_pcubes(
                 "bkg_outer_rad": "float", "mdp_target": "float?", "mdp_frac": "float",
                 "mdp_floor": "float", "n_min": "int", "n_max": "int",
                 "split_gap_factor": "float", "split_multiobs": "bool?",
+                "split_gap_min_s": "float", "split_gap_min_frac": "float",
+                "max_subobs": "int?", "max_return_subobs": "int",
             },
             {
                 "ra": ra, "dec": dec, "emin_kev": emin_kev, "emax_kev": emax_kev,
@@ -693,7 +732,9 @@ def ixpe_qu_slice_pcubes(
                 "bkg_outer_rad": bkg_outer_rad, "mdp_target": mdp_target,
                 "mdp_frac": mdp_frac, "mdp_floor": mdp_floor, "n_min": n_min,
                 "n_max": n_max, "split_gap_factor": split_gap_factor,
-                "split_multiobs": split_multiobs,
+                "split_multiobs": split_multiobs, "split_gap_min_s": split_gap_min_s,
+                "split_gap_min_frac": split_gap_min_frac, "max_subobs": max_subobs,
+                "max_return_subobs": max_return_subobs,
             },
             context="ixpe_qu_slice_pcubes",
         )
@@ -716,6 +757,10 @@ def ixpe_qu_slice_pcubes(
         n_max = coerced["n_max"]
         split_gap_factor = coerced["split_gap_factor"]
         split_multiobs = coerced["split_multiobs"]
+        split_gap_min_s = coerced["split_gap_min_s"]
+        split_gap_min_frac = coerced["split_gap_min_frac"]
+        max_subobs = coerced["max_subobs"]
+        max_return_subobs = coerced["max_return_subobs"]
 
         evt_dir = os.path.join(obs_db_path, obsid, "event_l2")
         file_list = sorted(glob.glob(os.path.join(evt_dir, f"ixpe{obsid}_det[123]_evt2_v[0-9][0-9]_rej.fits")))
@@ -730,7 +775,8 @@ def ixpe_qu_slice_pcubes(
             src_rad=src_rad, bkg=bkg, bkg_inner_rad=bkg_inner_rad, bkg_outer_rad=bkg_outer_rad,
             mdp_target=mdp_target, mdp_frac=mdp_frac, mdp_floor=mdp_floor,
             n_min=n_min, n_max=n_max, split_gap_factor=split_gap_factor,
-            split_multiobs=split_multiobs,
+            split_multiobs=split_multiobs, split_gap_min_s=split_gap_min_s,
+            split_gap_min_frac=split_gap_min_frac, max_subobs=max_subobs,
         )
     except (Exception, SystemExit) as exc:
         return {"exit_code": 1, "stdout": "", "stderr": str(exc)}
@@ -751,16 +797,48 @@ def ixpe_qu_slice_pcubes(
                        "n_slice": info["n_slice"], "noise_limited": info["noise_limited"]},
         }])
 
+    subobs_keys_full = result["subobs_keys"]
+    n_subobs_total = len(subobs_keys_full)
     summary = {k: {kk: vv for kk, vv in v.items() if kk != "rows"} for k, v in per_subobs.items()}
-    return {
+    total_slices = sum(v["n_slice"] for v in per_subobs.values())
+    csv_dir = os.path.join(obs_db_path, obsid)
+
+    # Always write the sub-obs listing sidecar (chronological order) -- this
+    # runs only after every sub-obs CSV is confirmed on disk above, so the
+    # "nothing written on failure" contract is unaffected. It is a listing
+    # index for the caller, never recorded in the catalog (the per-sub-obs
+    # qu_slices products above are the real, catalogued science products).
+    listing_path = os.path.join(csv_dir, f"qu_slice_subobs_listing_{obsid}.csv")
+    with open(listing_path, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["subobs_key", "csv_path", "n_slice"])
+        for key in subobs_keys_full:
+            writer.writerow([key, per_subobs[key]["csv_path"], per_subobs[key]["n_slice"]])
+
+    truncated = n_subobs_total > max_return_subobs
+    if truncated:
+        subobs_keys_out = subobs_keys_full[:max_return_subobs]
+        per_subobs_out = {k: summary[k] for k in subobs_keys_out}
+    else:
+        subobs_keys_out = subobs_keys_full
+        per_subobs_out = summary
+
+    ret = {
         "obsid": obsid,
-        "subobs_keys": result["subobs_keys"],
-        "per_subobs": summary,
-        "stdout": (f"ixpe_qu_slice_pcubes {obsid}: {len(result['subobs_keys'])} sub-obs, "
-                   f"{sum(v['n_slice'] for v in per_subobs.values())} slice(s) total -> "
-                   f"{[v['csv_path'] for v in per_subobs.values()]}"),
+        "subobs_keys": subobs_keys_out,
+        "per_subobs": per_subobs_out,
+        "per_subobs_truncated": truncated,
+        "n_subobs_total": n_subobs_total,
+        "subobs_listing_path": listing_path,
+        "n_gti": result["n_gti"],
+        "median_gti_gap_s": result["median_gti_gap_s"],
+        "total_elapsed_span_s": result["total_elapsed_span_s"],
+        "split_gaps_s": result["split_gaps_s"],
+        "stdout": (f"ixpe_qu_slice_pcubes {obsid}: {n_subobs_total} sub-obs, "
+                   f"{total_slices} slice(s) total -> {csv_dir}"),
         "exit_code": 0,
     }
+    return ret
 
 
 def ixpe_HR(
