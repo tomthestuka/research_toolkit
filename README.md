@@ -1,8 +1,7 @@
 # research_toolkit -- an ai-controlled toolkit repo.
 
-Each package's `README.md` is its briefing: read the one for the package you are working in.
-Build-time conventions live in this repository's agent-instruction file, which runtime agents
-do not read.
+Orientation and conventions for coding agents: see [CLAUDE.md](CLAUDE.md). Each package's
+`README.md` is its briefing.
 
 ## Packages
 
