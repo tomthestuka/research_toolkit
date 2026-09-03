@@ -1,7 +1,7 @@
 # heasarc_utils
 
 The **acquire** toolkit: fetch not-yet-local archive data for an ObsID into a mission's
-obs-db directory and record it in the data catalog. A `*_utils` toolkit (CLAUDE.md §5) —
+obs-db directory and record it in the data catalog. A `*_utils` toolkit —
 LLM-discoverable via `skills/TOOL_MANIFEST`, human-half in `lib/`.
 
 ## Purpose
@@ -16,7 +16,7 @@ through `obsdb_catalog.neutral.new`, the single trusted catalog writer.
 The download path is resolved **authoritatively** via `astroquery.heasarc` — never by
 hand-built FTP paths. This matters because, e.g., the NICER archive path component is the
 *observation date* (`/FTP/nicer/data/obs/2022_03/<obsid>/`), which is not derivable from the
-ObsID (CLAUDE.md §4, "ground every line — no guessing").
+ObsID: ground every line in what the archive actually reports, never in a guess.
 
 - **`lib/heasarc.py`** — the **mission-agnostic engine** (`resolve` → `download` →
   `normalize_layout`) plus the **`MissionProfile` registry** (`MISSIONS`). astroquery is

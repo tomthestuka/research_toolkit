@@ -5,7 +5,7 @@ sibling package) is the single trusted *writer* and low-level reader of a missio
 ``<obs_db_path>/catalog.json``; this package renders that catalog into the listing
 analysts consult BEFORE acquiring, so they acquire only genuinely-missing data.
 
-Split (CLAUDE.md §9.2):
+Split (the two-halves toolkit layout):
   skills/__init__.py  — TOOL_MANIFEST (pure data; no heavy imports)
   lib/catalog_read.py — the read + listing logic (pure standard library, reusing
                         ``obsdb_catalog.neutral.read``)
