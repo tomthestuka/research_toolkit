@@ -116,6 +116,8 @@ touch. State briefly what you intend to change and which READMEs you will update
     __init__.py        #   TOOL_MANIFEST — PURE DATA (no science imports); each entry wraps a
                        #   lib/ fn: {module, fn, description, args_schema}
     session.py         #   science-stack-dependent wrappers; imported ONLY in the REPL subprocess
+  tool_config.yaml     #   per-package runtime config: per-tool call timeouts, and `env: <id>` —
+                       #   the software environment the package's tools run in (§6b)
   README.md            #   the module briefing (§3)
   tests/               #   tests that ship with the toolkit
 ```
@@ -150,12 +152,48 @@ Each mission keeps its observations under an `obs_db_path` with a single
 
 ---
 
+## 6b. Software environments (`envs/`)
+
+A package names the environment its tools run in, in its `tool_config.yaml` (`env: <id>`). The
+definition is a folder of plain files at `envs/<id>/`:
+
+```
+envs/<id>/
+  env.yaml      # purpose (one line), base (a human environment to layer on, or none), externals
+  env.lock      # conda explicit list: @EXPLICIT, then a conda-forge URL#md5 per package — exact
+  env.pip       # wheels conda-forge lacks: name==version --hash=sha256:<hex> per line (optional)
+  activate.sh   # variables the tools need; sourcing a declared external's init (optional)
+  boot.py       # analyst REPL session setup, run once at REPL start (optional)
+```
+
+- **Built** (a lock, no base) or **derived** (a human `base`, no lock). Externals (HEASoft, CALDB)
+  are the human's declared software outside conda (`auto_research` config `env_externals`),
+  stamped on every receipt, never rebuilt.
+- `auto_research` builds a definition, jailed, into `<runtime_dir>/conda/envs/ar-<id>` — never
+  into this repo or a human's conda environments — runs the package's tests in it at the gate, and
+  runs its tools in it for the analysts. Several packages may share one environment; a package
+  names exactly one.
+- The runtime coder writes definitions through its environment tools (`env_solve`,
+  `env_pin_wheels`, `cand_env_activate`; it never runs conda). A human writing one by hand uses the
+  same functions (`auto_research.sandbox.env_build.solve` / `pin_wheels`) so the lock is exact.
+- Give paths in `activate.sh` and `boot.py` absolutely: the runtime sources a copy.
+- A tool routed to a pipeline environment runs only in the jail (`agent_os_jail: true`); every
+  path `activate.sh` or `boot.py` reads must be on the jail's allow-list or a declared external.
+- `envs/xspec/` serves `xspec_utils`: Python 3.13 and numpy 2.x match HEASoft 6.34's PyXspec
+  build (compiled against Python 3.13 / numpy 2.2), so its lock pins them.
+
+---
+
 ## 7. Tech & conventions
 
 - **Python ≥ 3.10**; standard scientific stack for `*_utils` toolkits, **standard library
   only** for support packages like `obsdb_catalog`.
 - **Tests:** `pytest`, deterministic only; live science-stack runs are exercised by hand, not
-  asserted. `python3 -m pytest <package>/tests/`.
+  asserted. `python3 -m pytest <package>/tests/`. The root `conftest.py` defines three classes:
+  unmarked (fast, deterministic, seconds), `slow` (real data or a real model, minutes; runs by
+  default, `-m "not slow"` gives the quick suite) and `live` (network or an external service;
+  skipped unless `--live` or `TOOLKIT_LIVE=1`). The authoring gate runs with no network, so a test
+  that needs it is `live`.
 - **Mission data paths** are real on-disk `obs_db_path`s (e.g.
   `/data/fzhou/XSPEC/Cyg_X-1/{IXPE,NICER,NuSTAR}`); never write outside them from a tool.
 
@@ -190,3 +228,9 @@ Each mission keeps its observations under an `obs_db_path` with a single
   `logs/dev/live_acquire_nicer.md`): resolve uses `query_tap` (not `query_region(column_filters)`,
   which drops the obsid filter); fresh archive event files are gzipped → level-2 globs made
   gz-tolerant in `heasarc_utils` + `obsdb_catalog._domain`; `download_data` tar is obsid-rooted.
+- 2026-10-07 — **Environments and test classes (auto_research env plan T1).** §5 layout gains
+  `tool_config.yaml`'s `env:`; new §6b, the `envs/<id>/` contract; `envs/xspec/` defined for
+  `xspec_utils` (`env: xspec`): Python 3.13 / numpy 2.3 / astropy 7.1 matching HEASoft 6.34's
+  PyXspec build, `ixpeobssim` 33.0.0 as a hash-pinned wheel, HEASoft/CALDB activation and the
+  XSPEC session boot moved in from `auto_research`'s `analyst_env.sh` / `repl_init.py`. Root
+  `conftest.py`: `slow` and `live` markers, `live` opt-in (§7).

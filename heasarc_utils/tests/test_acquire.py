@@ -1,3 +1,4 @@
+import gzip
 import os
 
 import pytest
@@ -6,8 +7,9 @@ from heasarc_utils.lib import heasarc
 from heasarc_utils.lib.heasarc_help import acquire
 from obsdb_catalog import neutral
 
-# Relative level-2 file each mission's profile expects on disk. Fresh archive
-# downloads are gzipped (the live run confirmed this); reduction later gunzips.
+# Relative level-2 file each mission's download lands on disk. Fresh archive
+# downloads are gzipped (the live run confirmed this); acquire gunzips them, so
+# the recorded path is the plain (decompressed) twin — see ``_plain``.
 LEVEL2_REL = {
     "ixpe": "{obsid}/event_l2/ixpe{obsid}_det1_evt2_v01.fits.gz",
     "nicer": "{obsid}/xti/event_cl/ni{obsid}_0mpu7_cl.evt.gz",
@@ -16,10 +18,21 @@ LEVEL2_REL = {
 OBSID = {"ixpe": "01002901", "nicer": "4690010101", "nustar": "30702017002"}
 
 
+def _plain(rel: str) -> str:
+    """The decompressed path acquire records after gunzipping the download."""
+    return rel[:-3] if rel.endswith(".gz") else rel
+
+
 def _write(path):
+    """Write a fixture file. A ``.gz`` path gets valid gzip content so that the
+    acquire-time gunzip can decompress it (mirrors a real archive download)."""
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "wb") as fh:
-        fh.write(b"x")
+    if path.endswith(".gz"):
+        with gzip.open(path, "wb") as fh:
+            fh.write(b"x")
+    else:
+        with open(path, "wb") as fh:
+            fh.write(b"x")
 
 
 def _fake(mission, obsid, *, found=True, create=True, nest=False):
@@ -59,7 +72,7 @@ def test_acquire_records_level2(tmp_path, monkeypatch, mission):
     assert entry["max_level"] == 2 and entry["levels_present"] == [1, 2]
     (prod,) = entry["products"]
     assert prod["kind"] == "level2_evt" and prod["produced_by"] == "heasarc"
-    assert prod["path"] == LEVEL2_REL[mission].format(obsid=obsid)
+    assert prod["path"] == _plain(LEVEL2_REL[mission].format(obsid=obsid))
 
     expected_params = {
         "ixpe": {"detectors": [1, 2, 3], "calibration_version": "v01",
@@ -68,6 +81,24 @@ def test_acquire_records_level2(tmp_path, monkeypatch, mission):
         "nustar": {"fpm": "A", "note": heasarc._NUSTAR_NOTE},
     }[mission]
     assert prod["params"] == expected_params
+
+
+@pytest.mark.parametrize("mission", ["ixpe", "nicer", "nustar"])
+def test_acquire_gunzips_download(tmp_path, monkeypatch, mission):
+    """Acquire decompresses the gzipped download: the plain level-2 file exists on
+    disk, its ``.gz`` source is gone, and the recorded path is the plain file."""
+    obsid = OBSID[mission]
+    monkeypatch.setattr(heasarc, "_heasarc", lambda: _fake(mission, obsid))
+    summary = acquire(obsid, mission, str(tmp_path))
+
+    gz = tmp_path / LEVEL2_REL[mission].format(obsid=obsid)
+    plain = tmp_path / _plain(LEVEL2_REL[mission].format(obsid=obsid))
+    assert plain.exists(), "decompressed level-2 file should be on disk"
+    assert not gz.exists(), "the .gz source should be removed after gunzip"
+    assert plain.read_bytes() == b"x", "decompressed content should match the source"
+
+    prod = neutral.read(tmp_path)["entries"][obsid]["products"][0]
+    assert prod["path"] == _plain(LEVEL2_REL[mission].format(obsid=obsid))
 
 
 def test_reacquire_regresses_to_level2(tmp_path, monkeypatch):
@@ -112,6 +143,287 @@ def test_normalize_layout_relocates_nested(tmp_path, monkeypatch):
 def test_unregistered_mission_raises(tmp_path):
     with pytest.raises(heasarc.HeasarcError):
         acquire("12345", "chandra", str(tmp_path))
+
+
+# ── timeout_s tests ───────────────────────────────────────────────────────
+
+
+def test_timeout_threaded_to_download(tmp_path, monkeypatch):
+    """Differential: timeout_s value threads through all three layers to the
+    astroquery object at download time.
+
+    A capturing fake reads ``cls.timeout`` inside ``download_data``; the value
+    must equal exactly what was passed to ``acquire``.  The default (omitted
+    timeout_s) must land as 1800.0, confirming the old astroquery factory
+    default (30 s) is never used when this tool is the caller.
+    """
+    obsid = OBSID["ixpe"]
+    mission = "ixpe"
+    captured: list[float] = []
+
+    class CapturingFakeHeasarc:
+        @classmethod
+        def query_tap(cls, adql):
+            class _R:
+                def to_table(self):
+                    return ["row"]
+            return _R()
+
+        @classmethod
+        def locate_data(cls, tab, catalog_name=None):
+            return {"access_url": ["u"]}
+
+        @classmethod
+        def download_data(cls, links, location=None, host=None):
+            captured.append(cls.timeout)
+            _write(os.path.join(location, LEVEL2_REL[mission].format(obsid=obsid)))
+
+    monkeypatch.setattr(heasarc, "_heasarc", lambda: CapturingFakeHeasarc)
+
+    # custom value — must arrive unchanged
+    acquire(obsid, mission, str(tmp_path), timeout_s=900.0)
+    assert captured[-1] == 900.0, (
+        f"expected timeout 900.0 at download_data, got {captured[-1]}"
+    )
+
+    # default (omitted) — must be 1800.0, NOT the astroquery factory 30 s
+    acquire(obsid, mission, str(tmp_path))
+    assert captured[-1] == 1800.0, (
+        f"default timeout must be 1800.0, got {captured[-1]}"
+    )
+
+
+def test_timeout_does_not_suppress_obsid_error(tmp_path, monkeypatch):
+    """Regression: passing timeout_s must not alter the loud-failure contract
+    for a missing ObsID — HeasarcError still raised, nothing recorded."""
+    monkeypatch.setattr(heasarc, "_heasarc",
+                        lambda: _fake("ixpe", "01002901", found=False))
+    with pytest.raises(heasarc.HeasarcError):
+        acquire("01002901", "ixpe", str(tmp_path), timeout_s=1800.0)
+    assert neutral.read(tmp_path)["entries"] == {}
+
+
+def test_timeout_default_in_all_three_layers():
+    """Regression: default timeout_s is 1800 s at every call layer, confirming
+    the old astroquery 30 s bound cannot silently reappear when the argument is
+    omitted anywhere in the chain."""
+    import inspect
+    from heasarc_utils.lib import heasarc as hm
+
+    for fn, name in [
+        (acquire, "heasarc_help.acquire"),
+        (hm.acquire_obsid, "heasarc.acquire_obsid"),
+        (hm.download, "heasarc.download"),
+    ]:
+        params = inspect.signature(fn).parameters
+        assert "timeout_s" in params, f"{name} missing timeout_s parameter"
+        assert params["timeout_s"].default == 1800.0, (
+            f"{name}: timeout_s default is {params['timeout_s'].default}, "
+            f"expected 1800.0"
+        )
+
+
+def test_tool_manifest_exposes_timeout_s():
+    """Pin the AI-facing half: TOOL_MANIFEST must expose timeout_s in args_schema.
+
+    A lib/ change that adds timeout_s to heasarc_help.acquire but forgets to
+    surface it in skills/__init__.py would leave the LLM unable to set the
+    parameter.  This test makes that gap a Layer-B failure.
+
+    Asserts:
+    - timeout_s is present in args_schema.properties
+    - its type is "number" (JSON Schema — not "float" or "integer")
+    - timeout_s is NOT listed in required (optional argument with a default)
+    - the description records the 1800 s default so the LLM knows what to expect
+    """
+    from heasarc_utils.skills import TOOL_MANIFEST
+
+    entry = TOOL_MANIFEST["research_toolkit.heasarc_utils.acquire"]
+    schema = entry["args_schema"]
+    props = schema["properties"]
+
+    assert "timeout_s" in props, (
+        "timeout_s missing from args_schema.properties — "
+        "LLM callers cannot pass it"
+    )
+    assert props["timeout_s"]["type"] == "number", (
+        f"timeout_s type should be 'number', got {props['timeout_s'].get('type')!r}"
+    )
+    assert "timeout_s" not in schema.get("required", []), (
+        "timeout_s must not be required — it has a default of 1800 s"
+    )
+    desc = props["timeout_s"].get("description", "")
+    assert "1800" in desc, (
+        "timeout_s description must mention the 1800 s default so the LLM "
+        f"knows the baseline; got: {desc!r}"
+    )
+
+
+# ── encrypted (proprietary-period) observations ───────────────────────────
+#
+# HEASARC serves an observation still inside its proprietary period GPG-encrypted.
+# That download is complete and correct; it simply cannot be read. Before this, the
+# level-2 deriver rejected the ``.gpg`` name and raised *before* anything was
+# recorded, so a finished multi-GB download left no trace — and the next request,
+# seeing nothing local, downloaded it again, forever.
+
+IXPE_LOCKED_REL = ("{obsid}/event_l2/ixpe{obsid}_det1_evt2_v03.fits.gz"
+                   + neutral.LOCK_SUFFIX)
+
+
+def _fake_locked(obsid, *, public_date_mjd=None, create=True, downloads=None):
+    """A fake archive that serves this ObsID encrypted, and reports a public_date.
+
+    ``downloads`` (a list) records each transfer, so a test can assert that a
+    re-acquire consulted metadata *instead of* re-transferring.
+    """
+    class _Result:
+        def __init__(self, adql):
+            self._adql = adql
+
+        def to_table(self):
+            if "public_date" in self._adql:
+                if public_date_mjd is None:
+                    raise RuntimeError("archive reports no public_date for this row")
+                return {"public_date": [public_date_mjd]}
+            return ["row"]
+
+    class FakeHeasarc:
+        @classmethod
+        def query_tap(cls, adql):
+            assert obsid in adql
+            return _Result(adql)
+
+        @classmethod
+        def locate_data(cls, tab, catalog_name=None):
+            return {"access_url": ["u"]}
+
+        @classmethod
+        def download_data(cls, links, location=None, host=None):
+            if downloads is not None:
+                downloads.append(location)
+            if create:
+                _write(os.path.join(location, IXPE_LOCKED_REL.format(obsid=obsid)))
+
+    return FakeHeasarc
+
+
+def _mjd(days_from_now: float) -> float:
+    import datetime
+    now = (datetime.datetime.now(datetime.timezone.utc)
+           - datetime.datetime(1858, 11, 17, tzinfo=datetime.timezone.utc))
+    return now.total_seconds() / 86400.0 + days_from_now
+
+
+def test_acquire_records_encrypted_download_instead_of_raising(tmp_path, monkeypatch):
+    """The core regression: an encrypted download is recorded, so it is never re-fetched."""
+    obsid = "04004001"
+    monkeypatch.setattr(heasarc, "_heasarc", lambda: _fake_locked(obsid))
+
+    summary = acquire(obsid, "ixpe", str(tmp_path))
+
+    assert summary["downloaded"] is True and summary["locked"] is True
+    assert "proprietary" in summary["note"]
+
+    entry = neutral.read(tmp_path)["entries"][obsid]
+    (prod,) = entry["products"]
+    assert prod["kind"] == "level2_evt"
+    assert prod["path"] == IXPE_LOCKED_REL.format(obsid=obsid)
+    assert neutral.is_locked(prod["path"])
+    assert entry["max_level"] == 2, (
+        "the file genuinely is the level-2 event; the .gpg path, not a demoted "
+        "level, is what says it cannot be read"
+    )
+
+
+def test_reacquire_of_locked_obsid_asks_instead_of_downloading(tmp_path, monkeypatch):
+    """Still proprietary → skip the transfer, report when it unlocks.
+
+    Re-downloading would spend ~25 minutes to receive the same unreadable bytes,
+    which is precisely the loop this closes.
+    """
+    obsid = "04004001"
+    downloads: list[str] = []
+    monkeypatch.setattr(heasarc, "_heasarc",
+                        lambda: _fake_locked(obsid, public_date_mjd=_mjd(72),
+                                             downloads=downloads))
+    acquire(obsid, "ixpe", str(tmp_path))          # first acquire: one transfer
+    assert len(downloads) == 1
+
+    summary = acquire(obsid, "ixpe", str(tmp_path))  # second: answered from metadata
+
+    assert len(downloads) == 1, "a proprietary re-acquire must not transfer again"
+    assert summary["downloaded"] is False and summary["locked"] is True
+    assert 71 <= summary["days_until_public"] <= 73
+    assert "still inside its proprietary period" in summary["note"]
+
+
+def test_reacquire_downloads_once_the_observation_is_public(tmp_path, monkeypatch):
+    """Public → the archive now serves readable bytes, so acquire fetches them."""
+    obsid = "04004001"
+    downloads: list[str] = []
+    monkeypatch.setattr(heasarc, "_heasarc",
+                        lambda: _fake_locked(obsid, public_date_mjd=_mjd(72),
+                                             downloads=downloads))
+    acquire(obsid, "ixpe", str(tmp_path))
+    assert len(downloads) == 1
+
+    # the proprietary period has now lapsed and the archive serves it in the clear
+    def _public():
+        return _fake_locked(obsid, public_date_mjd=_mjd(-1), downloads=downloads)
+    monkeypatch.setattr(heasarc, "_heasarc", _public)
+
+    summary = acquire(obsid, "ixpe", str(tmp_path))
+
+    assert len(downloads) == 2, "a public re-acquire downloads normally"
+    assert summary["downloaded"] is True
+
+
+def test_unknown_public_date_does_not_hold_back_a_reacquire(tmp_path, monkeypatch):
+    """No availability information is not evidence to skip work.
+
+    A mission whose row carries no ``public_date`` (or an archive that will not
+    answer) leaves the caller exactly where it was: acquire behaves as it always did.
+    """
+    obsid = "04004001"
+    downloads: list[str] = []
+    monkeypatch.setattr(heasarc, "_heasarc",
+                        lambda: _fake_locked(obsid, public_date_mjd=None,
+                                             downloads=downloads))
+    acquire(obsid, "ixpe", str(tmp_path))
+    acquire(obsid, "ixpe", str(tmp_path))
+
+    assert len(downloads) == 2
+    assert heasarc.availability("ixmaster", obsid)["is_public"] is None
+
+
+def test_decrypted_copy_wins_over_its_encrypted_twin(tmp_path, monkeypatch):
+    """With both copies on disk the readable one is what gets recorded."""
+    obsid = "04004001"
+
+    class _Fake:
+        @classmethod
+        def query_tap(cls, adql):
+            class _R:
+                def to_table(self):
+                    return ["row"]
+            return _R()
+
+        @classmethod
+        def locate_data(cls, tab, catalog_name=None):
+            return {"access_url": ["u"]}
+
+        @classmethod
+        def download_data(cls, links, location=None, host=None):
+            _write(os.path.join(location, IXPE_LOCKED_REL.format(obsid=obsid)))
+            _write(os.path.join(location, LEVEL2_REL["ixpe"].format(obsid=obsid)
+                                .replace("v01", "v03")))
+
+    monkeypatch.setattr(heasarc, "_heasarc", lambda: _Fake)
+    summary = acquire(obsid, "ixpe", str(tmp_path))
+
+    assert summary["locked"] is False
+    assert not neutral.is_locked(summary["level2_evt"])
 
 
 def test_register_new_mission_profile(tmp_path, monkeypatch):

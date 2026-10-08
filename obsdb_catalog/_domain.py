@@ -17,6 +17,12 @@ The conventions mirror the live bootstrapped catalogs:
   ``mpu:7``.
 * **NuSTAR** ``<obsid>/products/`` — per FPM A/B: ``pha_grp`` (``nustar_grp.sh``,
   ``grouping:"optimal"``), ``pha_src`` / ``arf`` / ``rmf`` (``nustar_red.sh``).
+
+Every product pattern here matches a filename with its encryption wrapper split off
+(:func:`neutral.split_lock`), so an observation the archive served GPG-encrypted —
+still inside its proprietary period — is scanned as the products it holds rather than
+read as empty ground. The scan records the ``.gpg`` path as-is; that path is what tells
+every reader the product is present but unusable (:func:`neutral.is_locked`).
 """
 
 from __future__ import annotations
@@ -24,6 +30,8 @@ from __future__ import annotations
 import glob
 import os
 import re
+
+from .neutral import is_locked, split_lock
 
 #: Marker stamped into a param whose value cannot be re-derived during repair.
 UNRECOVERABLE = "repaired session, unrecoverable"
@@ -57,16 +65,22 @@ def _rel(obs_db_path: str, full: str) -> str:
 
 
 def _prefer(matches: list[str]) -> str | None:
-    """Pick one representative, preferring an uncompressed file over its ``.gz`` twin.
+    """Pick one representative: usable over encrypted, then uncompressed over ``.gz``.
 
     Fresh archive downloads are gzipped (``*.evt.gz`` / ``*.fits.gz``) and reduction
-    later gunzips them; glob both and prefer the plain file when present. Mirrors
-    ``heasarc_utils.lib.heasarc._pick`` — keep the two in sync.
+    later gunzips them; glob both and prefer the plain file when present. A file
+    still wrapped in :data:`neutral.LOCK_SUFFIX` is ranked last, so an ObsID that
+    holds both an encrypted and a decrypted copy is represented by the copy that can
+    actually be read. Mirrors ``heasarc_utils.lib.heasarc._pick`` — keep the two in sync.
     """
     if not matches:
         return None
-    plain = [m for m in matches if not m.endswith(".gz")]
-    return sorted(plain or matches)[0]
+    usable = [m for m in matches if not is_locked(m)]
+    for tier in (usable, matches):
+        if tier:
+            plain = [m for m in tier if not m.endswith(".gz")]
+            return sorted(plain or tier)[0]
+    return None
 
 
 # --------------------------------------------------------------------------- #
@@ -173,11 +187,18 @@ def _scan_ixpe(obs_db_path: str) -> dict[str, list[dict]]:
     out: dict[str, list[dict]] = {}
     for evt_l2 in sorted(glob.glob(os.path.join(obs_db_path, "*", "event_l2"))):
         obsid = evt_l2.split(os.sep)[-2]
+        # Anchored on this directory's ObsID, mirroring heasarc._ixpe_level2: the
+        # directory name *is* the ObsID, so a file carrying a different one is a
+        # human working copy (``<obsid>_bad_gpg``, ``<obsid>_picorr``) rather than
+        # this observation's product, and cataloguing it would invent an ObsID.
         names = sorted(
             os.path.basename(f)
-            for f in glob.glob(os.path.join(evt_l2, "ixpe*_det1_evt2_*.fits*"))
+            for f in glob.glob(os.path.join(evt_l2, f"ixpe{obsid}_det1_evt2_*.fits*"))
         )
-        derived = [(n, m) for n in names if (m := _IXPE_DERIVED.search(n))]
+        # Patterns match the name with any encryption wrapper split off, so an
+        # encrypted product is recognised as the product it is. Recording it keeps
+        # the ObsID visible; readers see the ``.gpg`` path and know it is unusable.
+        derived = [(n, m) for n in names if (m := _IXPE_DERIVED.search(split_lock(n)[0]))]
         # Per the bootstrap convention, the catalogued products use the
         # instrumental-background-rejected filter when it exists, falling back to
         # the non-rejected "src" filter (the 03002599 special case). The other
@@ -187,9 +208,10 @@ def _scan_ixpe(obs_db_path: str) -> dict[str, list[dict]]:
 
         products = []
         # base det1 level-2 event (single representative; prefer uncompressed over .gz).
-        base = _prefer([os.path.join(evt_l2, n) for n in names if _IXPE_EVT.search(n)])
+        base = _prefer([os.path.join(evt_l2, n) for n in names
+                        if _IXPE_EVT.search(split_lock(n)[0])])
         if base:
-            ver = _IXPE_EVT.search(os.path.basename(base)).group("ver")
+            ver = _IXPE_EVT.search(split_lock(os.path.basename(base))[0]).group("ver")
             products.append({
                 "kind": "level2_evt",
                 "path": _rel(obs_db_path, base),

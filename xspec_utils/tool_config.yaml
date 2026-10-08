@@ -1,0 +1,6 @@
+# Per-package tool configuration, read by auto_research's ToolkitRegistry.
+# Modular by design: this lives with the package, so the orchestration layer never
+# needs to know about xspec_utils' tools.
+
+# The software environment xspec_utils' tools run in (envs/xspec/, built by the runtime as ar-xspec).
+env: xspec

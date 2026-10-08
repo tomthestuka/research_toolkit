@@ -36,10 +36,11 @@ Two facts the live run pinned down (don't "fix" them back):
 - **Resolve uses `query_tap`, not `query_region(column_filters=…)`** — the latter silently
   drops the obsid filter for a position-less query and returns the whole catalog. `SELECT *`
   carries the `__row` column `locate_data` needs.
-- **Fresh archive event files are gzipped** (`*.evt.gz` / `*.fits.gz`); reduction later
-  gunzips them. The level-2 globs are gz-tolerant and prefer the uncompressed twin when both
-  exist. `download_data` untars an obsid-rooted tar, so data lands cleanly at
-  `<obs_db_path>/<obsid>/`.
+- **Fresh archive event files are gzipped** (`*.evt.gz` / `*.fits.gz`); **acquire gunzips the
+  whole ObsID tree after download** (`heasarc.gunzip_tree`), so downstream reduction and the
+  level-2 derivers operate on plain files and the recorded level-2 path is the decompressed
+  `.fits`. The level-2 globs stay gz-tolerant and prefer the uncompressed twin for robustness.
+  `download_data` untars an obsid-rooted tar, so data lands cleanly at `<obs_db_path>/<obsid>/`.
 
 ## Interfaces / Usage
 
@@ -47,16 +48,39 @@ Two facts the live run pinned down (don't "fix" them back):
 from heasarc_utils.lib.heasarc_help import acquire
 
 acquire("01002901", "ixpe", "/data/fzhou/XSPEC/Cyg_X-1/IXPE")
-# -> downloads to <obs_db_path>/01002901/, records level2_evt at level 2,
-#    returns {"obsid", "mission", "level2_evt": <rel path>, "catalog_entry"}
+# -> downloads to <obs_db_path>/01002901/, records level2_evt at level 2, returns
+#    {"obsid", "mission", "level2_evt": <rel path>, "catalog_entry",
+#     "downloaded": True, "locked": False}
+
+# Large/slow IXPE transfers that would otherwise time out:
+acquire("03005801", "ixpe", "/data/fzhou/XSPEC/Cyg_X-1/IXPE", timeout_s=3600)
 ```
 
-- **Always (re)downloads** — the tool executes; the caller decides *when* to acquire. A
+Signature: `acquire(obsid, mission, obs_db_path, *, host=None, chatter=False, timeout_s=1800.0)`
+
+- **Re-downloads on every call** — the tool executes; the caller decides *when* to acquire. A
   deliberate re-acquire records at level 2, regressing `max_level` to 2 and thereby flagging
-  any stale level-3 products for re-reduction.
+  any stale level-3 products for re-reduction. The single exception is an encrypted
+  observation, below.
+- **Encrypted (proprietary) observations** — HEASARC serves an observation still inside its
+  proprietary period GPG-encrypted (`…fits.gz.gpg`). That download is complete and correct;
+  it just cannot be read without the key. So it is **recorded as present** (level 2 — the file
+  genuinely is the level-2 event, and the `.gpg` path is what tells readers it is unusable)
+  rather than raising, and the summary carries `locked: True`. Asking for the same ObsID again
+  is then answered from the archive's `public_date` (`heasarc.availability`, one metadata row,
+  no transfer): while it is still proprietary the download is **skipped** and the reply reports
+  when it unlocks (`downloaded: False`); once public, acquire downloads normally and the
+  readable copy replaces the encrypted record. Before this, the deriver rejected the `.gpg`
+  name and raised *before* recording, so a finished multi-GB download left no trace and every
+  later request re-downloaded it — a loop no number of runs could break.
 - **Fails loudly** — unknown mission, ObsID not in the master table, or a download that does
   not yield the expected level-2 file all raise `heasarc.HeasarcError`; nothing is recorded.
 - `host` (`heasarc`/`sciserver`/`aws`) is optional; omit to let astroquery choose.
+- `timeout_s` — HTTP transfer timeout in seconds. Defaults to 1800 s (30 min). The astroquery
+  factory default is **30 s**, which is far too short for large IXPE observations (> 1 GB).
+  This tool always overrides it. The three-layer threading path is:
+  `acquire(timeout_s)` → `acquire_obsid(timeout_s)` → `download(timeout_s)` →
+  `h.timeout = timeout_s` on the astroquery singleton before `download_data`.
 
 Shipped missions and the level-2 representative each records (these mirror
 `obsdb_catalog._domain` exactly — keep the two in sync):
@@ -94,10 +118,12 @@ registry entry**:
 ```bash
 python3 -m pytest heasarc_utils/tests/
 ```
-Offline: a fake `Heasarc` (injected via the `_heasarc` seam) creates the expected (gzipped)
-files, so the resolve/normalize/record/regression/extensibility paths run without network or
-astroquery. The download layout, the `query_tap` resolve path, and gzip handling were pinned
-by a live NICER `acquire` run on 2026-06-17 (see `logs/dev/live_acquire_nicer.md`).
+Offline: a fake `Heasarc` (injected via the `_heasarc` seam) creates the expected gzipped
+files, so the resolve/normalize/gunzip/record/regression/extensibility paths run without
+network or astroquery; `test_acquire_gunzips_download` asserts the `.gz` is decompressed and
+removed and the plain file is recorded. The download layout, the `query_tap` resolve path, and
+gzip handling were pinned by a live NICER `acquire` run on 2026-06-17 (see
+`logs/dev/live_acquire_nicer.md`).
 
 ## Changelog
 
@@ -107,3 +133,32 @@ by a live NICER `acquire` run on 2026-06-17 (see `logs/dev/live_acquire_nicer.md
 - 2026-06-17 — Live-verified against installed astroquery; two corrections: resolve via
   `query_tap` (not `query_region(column_filters=…)`, which drops the obsid filter), and
   gz-tolerant level-2 globs (fresh downloads are `.gz`). Layout confirmed obsid-rooted.
+- 2026-06-22 — `timeout_s` parameter added (default 1800 s). Threaded from
+  `heasarc_help.acquire` → `heasarc.acquire_obsid` → `heasarc.download`, where it is
+  applied as `h.timeout = timeout_s` on the astroquery singleton before `download_data`.
+  Fixes IXPE acquisition timeouts on large (> 1 GB) observations (03005801, 02001901,
+  01250401) that aborted under the astroquery factory default of 30 s. Surfaced in
+  `TOOL_MANIFEST` args_schema. Three new tests: differential wiring, error-contract
+  regression, default-in-all-layers guard.
+- 2026-06-25 — `acquire` now **gunzips the downloaded ObsID tree** before deriving the
+  level-2 product (`heasarc.gunzip_tree`, called in `acquire_obsid` after `normalize_layout`).
+  Fresh archive downloads are gzipped; decompressing at acquire time means reduction and the
+  level-2 derivers see plain `.fits`/`.evt` files and the recorded level-2 path is the
+  decompressed file. Decompression writes a `.part` sidecar then renames, so an interrupted
+  gunzip leaves the `.gz` intact. Tests: `test_acquire_gunzips_download` (3 missions); the
+  offline fakes now write valid gzip content and the level-2 path assertion expects the plain
+  file. The level-2 globs remain gz-tolerant.
+- 2026-08-03 — **An encrypted download is data, not an error.** HEASARC serves a still-
+  proprietary observation GPG-encrypted; `_ixpe_level2` matched the name through
+  `_IXPE_BASE_EVT`, which the `.gpg` suffix failed, so it **raised before `acquire` ever
+  reached `neutral.new`** — a completed multi-GB download recorded nothing, the catalog could
+  never learn the ObsID existed, and each later request re-downloaded it (observed live: SS 433
+  `04004001`, 46 encrypted files, re-fetched for ~25 min to no effect). Now the level-2
+  matchers run against the name with its wrapper split off (`neutral.split_lock`, the one
+  shared rule), `_pick` prefers a readable copy over an encrypted twin, and the encrypted
+  product is recorded at its honest level with `locked: True`. New `heasarc.availability(catalog,
+  obsid)` reads `public_date` from the mission master table (present in all three), so a repeat
+  request for a locked ObsID is answered from metadata instead of a re-transfer: skip while
+  proprietary, download once public. `acquire`'s summary gains `downloaded`/`locked` (+
+  `public_date_mjd`/`days_until_public`/`note` on a skip); `TOOL_MANIFEST` states the behavior.
+  Five offline tests (`test_acquire.py`), no network.
