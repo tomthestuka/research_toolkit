@@ -8,6 +8,9 @@ loads and runs in the orchestration environment as well as the sandbox.
 The caller supplies ``obs_db_path`` (the orchestration layer resolves the mission's
 directory from its own obs-db-location config); this module never reads that config.
 
+Each line names the observed source when its event file's header records one (the FITS
+``OBJECT`` keyword), so a source can be found by name as well as by ObsID.
+
 Beyond "is it catalogued", the listing flags an ObsID whose data is present but
 **GPG-encrypted** — how HEASARC serves an observation still inside its proprietary
 period. Such data is not directly usable: decrypt it, or acquire it again once the
@@ -62,13 +65,38 @@ def _usable_and_locked(obs_db_path: str, entry: dict) -> tuple[bool, bool]:
     return has_usable, has_locked
 
 
+#: Header bytes read to find a source name: the primary header and the first extension's.
+_HEADER_BYTES = 2880 * 60
+
+
+def _source_name(obs_db_path: str, entry: dict) -> str | None:
+    """The source an entry observed, as its first readable event file's header names it (the FITS
+    ``OBJECT`` keyword), or ``None`` when no event file records one."""
+    for product in entry.get("products") or []:
+        rel = (product or {}).get("path")
+        if (product or {}).get("kind") != "level2_evt" or not rel or neutral.is_locked(rel):
+            continue
+        try:
+            with open(os.path.join(obs_db_path, rel), "rb") as fh:
+                header = fh.read(_HEADER_BYTES).decode("ascii", "replace")
+        except OSError:
+            continue
+        for start in range(0, len(header) - 79, 80):
+            card = header[start:start + 80]
+            if card.startswith("OBJECT  =") and card.count("'") >= 2:
+                name = card.split("'")[1].strip()
+                if name:
+                    return name
+    return None
+
+
 def data_catalog(obs_db_path, min_level=None) -> str:
     """List locally-available ObsIDs for the mission stored at ``obs_db_path``.
 
     Reads ``<obs_db_path>/catalog.json`` through the trusted ``obsdb_catalog`` reader
     and returns a text listing: one line per catalogued ObsID with its highest
     processing level (HEASARC supplies up to level 2) and the product kinds derived
-    from it. An ObsID whose data is present but GPG-encrypted carries LOCKED, NOT
+    from it, and the observed source when its event file's header names one. An ObsID whose data is present but GPG-encrypted carries LOCKED, NOT
     USABLE on its own line: it is catalogued at the level its products genuinely are,
     and the mark is what says the bytes cannot be read yet. ``min_level`` (optional)
     restricts the listing to ObsIDs available at or above that processing level — a
@@ -90,7 +118,8 @@ def data_catalog(obs_db_path, min_level=None) -> str:
         kinds = sorted({(p or {}).get("kind", "?") for p in (entry.get("products") or [])})
         products = ", ".join(kinds) or "(none)"
         has_usable, has_locked = _usable_and_locked(obs_db_path, entry)
-        line = f"- {obsid}: max_level={max_level}, products=[{products}]"
+        name = _source_name(obs_db_path, entry)
+        line = f"- {obsid}{f' ({name})' if name else ''}: max_level={max_level}, products=[{products}]"
         if has_locked:
             # On the ObsID's own line, not only as a trailing note: the level is
             # honest about what the products are, so this is the part that says

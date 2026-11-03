@@ -127,3 +127,23 @@ def test_data_catalog_marks_partially_locked_entry(tmp_path):
 
     out = data_catalog(str(d))
     assert "LOCKED, NOT USABLE (some products)" in out
+
+
+def _fits_with_object(path, name):
+    """A minimal FITS primary header carrying OBJECT (80-character cards, 2880-byte block)."""
+    cards = ["SIMPLE  =                    T", f"OBJECT  = '{name}'", "END"]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes("".join(c.ljust(80) for c in cards).ljust(2880).encode("ascii"))
+
+
+def test_data_catalog_names_the_source_its_event_file_records(tmp_path):
+    d = tmp_path / "IXPE"
+    _fits_with_object(d / "04250201" / "event_l2" / "evt2.fits", "IGR J17091-3624")
+    _write_catalog(d, {
+        "04250201": {"max_level": 2, "products": [{"kind": "level2_evt", "path": "04250201/event_l2/evt2.fits"}]},
+        "01002901": {"max_level": 2, "products": [{"kind": "level2_evt", "path": "01002901/missing.fits"}]},
+    })
+    out = data_catalog(str(d))
+    assert "- 04250201 (IGR J17091-3624): max_level=2, products=[level2_evt]" in out
+    assert "- 01002901: max_level=2, products=[level2_evt]" in out  # no readable header, no name
+

@@ -18,8 +18,9 @@ TOOL_MANIFEST = {
         "module": "catalog_utils.lib.catalog_read",
         "fn": "data_catalog",
         "description": (
-            "List observation data already on disk — which ObsIDs are local, their "
-            "processing level, the products derived from them, and whether any are "
+            "List observation data already on disk — which ObsIDs are local, the source each "
+            "observed (as its event file names it), their processing level, the products "
+            "derived from them, and whether any are "
             "encrypted and unreadable. Read it BEFORE requesting data acquisition so you "
             "only acquire what is genuinely missing."
         ),
