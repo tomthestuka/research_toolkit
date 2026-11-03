@@ -20,7 +20,10 @@ encryption state is mutable (a human may decrypt out of band).
 
 from __future__ import annotations
 
+import gzip
 import os
+import re
+import stat
 
 from obsdb_catalog import neutral
 
@@ -65,29 +68,97 @@ def _usable_and_locked(obs_db_path: str, entry: dict) -> tuple[bool, bool]:
     return has_usable, has_locked
 
 
-#: Header bytes read to find a source name: the primary header and the first extension's.
-_HEADER_BYTES = 2880 * 60
+#: A source name as the listing shows it: printable, and free of the characters the listing itself
+#: uses (``:``, ``(``, ``)``, ``[``, ``]``), so header bytes can never forge a line or a mark.
+_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9 +\-.'*_/]{0,47}")
+#: Headers read per event file: the primary and the first extension (IXPE keeps OBJECT in EVENTS).
+_HEADERS_READ = 2
+#: A header longer than this many blocks is not a header this listing reads.
+_MAX_HEADER_BLOCKS = 36
+
+
+def _string_value(card: str) -> str | None:
+    """A card's quoted string value per FITS (``''`` is one quote), or ``None`` when unquoted."""
+    rest = card[10:].lstrip()
+    if not rest.startswith("'"):
+        return None
+    out, i = [], 1
+    while i < len(rest):
+        if rest[i] == "'":
+            if rest[i + 1:i + 2] == "'":
+                out.append("'")
+                i += 2
+                continue
+            return "".join(out).rstrip()
+        out.append(rest[i])
+        i += 1
+    return None
+
+
+def _header_cards(fh) -> dict[str, str]:
+    """The cards of the first ``_HEADERS_READ`` headers, by keyword (the first one wins), read block
+    by block up to each END and stepping over the primary's data, if any."""
+    cards: dict[str, str] = {}
+    for _ in range(_HEADERS_READ):
+        header: list[str] = []
+        for _block in range(_MAX_HEADER_BLOCKS):
+            block = fh.read(2880)
+            if len(block) < 2880:
+                return cards
+            text = block.decode("ascii", "replace")
+            header.extend(text[k:k + 80] for k in range(0, 2880, 80))
+            if any(card[:8] == "END     " for card in header[-36:]):
+                break
+        else:
+            return cards
+        for card in header:
+            cards.setdefault(card[:8].rstrip(), card)
+        here = {card[:8].rstrip(): card[10:30].strip() for card in header if card[8:10] == "= "}
+        try:
+            naxis = int(here.get("NAXIS", "0"))
+            size = abs(int(here.get("BITPIX", "8"))) // 8 if naxis else 0
+            for n in range(1, naxis + 1):
+                size *= int(here.get(f"NAXIS{n}", "0"))
+            size *= int(here.get("GCOUNT", "1") or 1) if "XTENSION" in here else 1
+        except ValueError:
+            return cards
+        fh.seek(-(-size // 2880) * 2880, 1)  # the HDU's data, padded to whole blocks
+    return cards
 
 
 def _source_name(obs_db_path: str, entry: dict) -> str | None:
-    """The source an entry observed, as its first readable event file's header names it (the FITS
-    ``OBJECT`` keyword), or ``None`` when no event file records one."""
+    """The source an entry observed, as its first readable event file's header names it (FITS
+    ``OBJECT``; without one, its ``RA_OBJ``/``DEC_OBJ``), or ``None``. Only a regular file inside
+    ``obs_db_path`` is read, and a name outside :data:`_NAME_RE` is not shown."""
+    root = os.path.realpath(obs_db_path)
     for product in entry.get("products") or []:
         rel = (product or {}).get("path")
         if (product or {}).get("kind") != "level2_evt" or not rel or neutral.is_locked(rel):
             continue
-        try:
-            with open(os.path.join(obs_db_path, rel), "rb") as fh:
-                header = fh.read(_HEADER_BYTES).decode("ascii", "replace")
-        except OSError:
+        path = os.path.realpath(os.path.join(root, rel))
+        if os.path.commonpath([root, path]) != root or not stat.S_ISREG(_mode(path)):
             continue
-        for start in range(0, len(header) - 79, 80):
-            card = header[start:start + 80]
-            if card.startswith("OBJECT  =") and card.count("'") >= 2:
-                name = card.split("'")[1].strip()
-                if name:
-                    return name
+        try:
+            with (gzip.open(path, "rb") if path.endswith(".gz") else open(path, "rb")) as fh:
+                cards = _header_cards(fh)
+        except (OSError, EOFError):
+            continue
+        name = _string_value(cards["OBJECT"]) if "OBJECT" in cards else None
+        if name and _NAME_RE.fullmatch(name.strip()):
+            return name.strip()
+        try:
+            ra, dec = (float(cards[k][10:30].split("/")[0]) for k in ("RA_OBJ", "DEC_OBJ"))
+        except (KeyError, ValueError):
+            continue
+        return f"unnamed in its header; RA {ra:.3f}, Dec {dec:.3f}"
     return None
+
+
+def _mode(path: str) -> int:
+    try:
+        return os.stat(path).st_mode
+    except OSError:
+        return 0
 
 
 def data_catalog(obs_db_path, min_level=None) -> str:
@@ -96,7 +167,8 @@ def data_catalog(obs_db_path, min_level=None) -> str:
     Reads ``<obs_db_path>/catalog.json`` through the trusted ``obsdb_catalog`` reader
     and returns a text listing: one line per catalogued ObsID with its highest
     processing level (HEASARC supplies up to level 2) and the product kinds derived
-    from it, and the observed source when its event file's header names one. An ObsID whose data is present but GPG-encrypted carries LOCKED, NOT
+    from it, and the observed source as its event file's header names it (or that header's
+    coordinates). An ObsID whose data is present but GPG-encrypted carries LOCKED, NOT
     USABLE on its own line: it is catalogued at the level its products genuinely are,
     and the mark is what says the bytes cannot be read yet. ``min_level`` (optional)
     restricts the listing to ObsIDs available at or above that processing level — a

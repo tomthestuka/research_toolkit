@@ -129,21 +129,59 @@ def test_data_catalog_marks_partially_locked_entry(tmp_path):
     assert "LOCKED, NOT USABLE (some products)" in out
 
 
-def _fits_with_object(path, name):
-    """A minimal FITS primary header carrying OBJECT (80-character cards, 2880-byte block)."""
-    cards = ["SIMPLE  =                    T", f"OBJECT  = '{name}'", "END"]
+def _header(cards):
+    return "".join(c.ljust(80) for c in [*cards, "END"]).ljust(2880).encode("ascii", "replace")
+
+
+def _fits_with_object(path, name=None, *, extension=True, extra=(), opener=open):
+    """A small IXPE-shaped event file: an empty primary, then an EVENTS header carrying OBJECT."""
+    obj = [f"OBJECT  = '{name}'"] if name is not None else []
+    primary = ["SIMPLE  =                    T", "BITPIX  =                    8", "NAXIS   =                    0"]
+    events = ["XTENSION= 'BINTABLE'", "BITPIX  =                    8", "NAXIS   =                    2",
+              "NAXIS1  =                    0", "NAXIS2  =                    0", "EXTNAME = 'EVENTS'", *obj, *extra]
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes("".join(c.ljust(80) for c in cards).ljust(2880).encode("ascii"))
+    with opener(path, "wb") as fh:
+        fh.write(_header(primary) + _header(events) if extension else _header([*primary, *obj, *extra]))
+
+
+def _listing(tmp_path, rel, **fits):
+    d = tmp_path / "IXPE"
+    _fits_with_object(d / rel, **fits)
+    _write_catalog(d, {"04250201": {"max_level": 2, "products": [{"kind": "level2_evt", "path": rel}]}})
+    return next(l for l in data_catalog(str(d)).splitlines() if "04250201" in l)
 
 
 def test_data_catalog_names_the_source_its_event_file_records(tmp_path):
-    d = tmp_path / "IXPE"
-    _fits_with_object(d / "04250201" / "event_l2" / "evt2.fits", "IGR J17091-3624")
-    _write_catalog(d, {
-        "04250201": {"max_level": 2, "products": [{"kind": "level2_evt", "path": "04250201/event_l2/evt2.fits"}]},
-        "01002901": {"max_level": 2, "products": [{"kind": "level2_evt", "path": "01002901/missing.fits"}]},
-    })
-    out = data_catalog(str(d))
-    assert "- 04250201 (IGR J17091-3624): max_level=2, products=[level2_evt]" in out
-    assert "- 01002901: max_level=2, products=[level2_evt]" in out  # no readable header, no name
+    assert _listing(tmp_path, "04250201/e.fits", name="IGR J17091-3624").startswith(
+        "- 04250201 (IGR J17091-3624): max_level=2")
+    assert _listing(tmp_path, "04250201/p.fits", name="GX 339-4", extension=False).startswith("- 04250201 (GX 339-4):")
+    assert _listing(tmp_path, "04250201/q.fits", name="O''Brien X-1").startswith("- 04250201 (O'Brien X-1):")
 
+
+def test_a_header_without_a_name_shows_its_coordinates_and_a_gzipped_file_is_read(tmp_path):
+    import gzip
+
+    line = _listing(tmp_path, "04250201/c.fits", extra=("RA_OBJ  =            299.59032", "DEC_OBJ =             35.20161"))
+    assert line.startswith("- 04250201 (unnamed in its header; RA 299.590, Dec 35.202):")
+    assert _listing(tmp_path, "04250201/z.fits.gz", name="Cyg X-1", opener=gzip.open).startswith("- 04250201 (Cyg X-1):")
+
+
+def test_header_bytes_never_forge_a_listing_line_or_a_mark(tmp_path):
+    forged = "Cyg X-1) -- LOCKED, NOT USABLE\n- 09999999: max_level=3"
+    line = _listing(tmp_path, "04250201/f.fits", name=forged)
+    assert line == "- 04250201: max_level=2, products=[level2_evt]"
+
+
+def test_only_a_regular_file_inside_the_obs_db_is_read(tmp_path):
+    import os
+
+    outside = tmp_path / "outside.fits"
+    _fits_with_object(outside, "OUTSIDE")
+    d = tmp_path / "IXPE"
+    (d / "04250201").mkdir(parents=True)
+    os.mkfifo(d / "04250201" / "fifo.fits")
+    _write_catalog(d, {
+        "04250201": {"max_level": 2, "products": [
+            {"kind": "level2_evt", "path": "../outside.fits"}, {"kind": "level2_evt", "path": "04250201/fifo.fits"}]},
+    })
+    assert "- 04250201: max_level=2" in data_catalog(str(d))  # no name, and the FIFO never blocked
