@@ -103,16 +103,47 @@ def test_rederive_ixpe_filter_and_special_case(tmp_path):
     touch(str(ixpe), "01002901/event_l2/ixpe01002901_det1_evt2_v01_rej_src_pha1.fits")
     # the 03002599 special case uses the _src_ infix
     touch(str(ixpe), "03002599/event_l2/ixpe03002599_det1_evt2_v01.fits")
-    touch(str(ixpe), "03002599/event_l2/ixpe03002599_det1_evt2_v01_src_pcube.fits")
+    touch(str(ixpe), "03002599/event_l2/ixpe03002599_det1_evt2_v01_src_pha1.fits")
 
     catalog = repair(str(ixpe))
     normal = {p["kind"]: p for p in catalog["entries"]["01002901"]["products"]}
-    assert normal["pcube"]["params"]["filter"] == "rej_src"
-    assert normal["pcube"]["params"]["calibration_version"] == "v01"
+    assert normal["pha"]["params"]["filter"] == "rej_src"
+    assert normal["pha"]["params"]["calibration_version"] == "v01"
     assert normal["pha"]["params"]["stokes"] == "I"
 
     special = {p["kind"]: p for p in catalog["entries"]["03002599"]["products"]}
-    assert special["pcube"]["params"]["filter"] == "src"
+    assert special["pha"]["params"]["filter"] == "src"
+
+
+def test_a_pcube_on_disk_is_not_catalogued(tmp_path):
+    # A PCUBE depends on chosen bins and regions: an artifact, never a catalog product.
+    ixpe = tmp_path / "IXPE"
+    ixpe.mkdir()
+    touch(str(ixpe), "01002901/event_l2/ixpe01002901_det1_evt2_v01.fits")
+    touch(str(ixpe), "01002901/event_l2/ixpe01002901_det1_evt2_v01_rej_src_pcube.fits")
+    touch(str(ixpe), "03002599/event_l2/ixpe03002599_det1_evt2_v01_src_pcube.fits")
+
+    catalog = repair(str(ixpe))
+    kinds = {p["kind"] for e in catalog["entries"].values() for p in e["products"]}
+    paths = {p["path"] for e in catalog["entries"].values() for p in e["products"]}
+    assert kinds == {"level2_evt"}
+    assert not any(path.endswith("_pcube.fits") for path in paths)
+    assert "03002599" not in catalog["entries"]  # nothing but a PCUBE on disk
+    assert healthcheck(str(ixpe)) is True
+
+
+def test_a_recorded_pcube_row_stays_and_a_rej_pcube_hides_no_src_spectrum(tmp_path):
+    ixpe = tmp_path / "IXPE"
+    ixpe.mkdir()
+    cube = touch(str(ixpe), "02250901/event_l2/ixpe02250901_det1_evt2_v01_rej_src_pcube.fits")
+    touch(str(ixpe), "02250901/event_l2/ixpe02250901_det1_evt2_v01_src_pha1.fits")
+    neutral.advance(str(ixpe), "ixpe", "02250901", level=3, products=[prod("pcube", cube)])
+
+    catalog = repair(str(ixpe))
+    by_kind = {p["kind"]: p for p in catalog["entries"]["02250901"]["products"]}
+    assert by_kind["pcube"]["path"].endswith("_rej_src_pcube.fits")  # its file exists: kept
+    assert by_kind["pha"]["path"].endswith("_src_pha1.fits")
+    assert by_kind["pha"]["params"]["filter"] == "src"
 
 
 def test_repair_additive_preserves_existing_params(tmp_path):

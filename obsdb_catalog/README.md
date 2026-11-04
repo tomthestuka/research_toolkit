@@ -87,7 +87,7 @@ greppable:
 
 ```
 [ixpe] - drop 02008201 qu_slices qu_slices_02008201a.csv (file missing)
-[ixpe] + add  02008301 pcube     pcube_02008301.csv (on disk, uncatalogued)
+[ixpe] + add  02008301 pha       02008301/event_l2/ixpe02008301_det1_evt2_v01_rej_src_pha1.fits (on disk, uncatalogued)
 [ixpe] ~ level 02008201: 3 -> 2
 [ixpe] = 47 entries, 519 -> 422 products (-97 +0)
 ```
@@ -145,3 +145,11 @@ python3 -m pytest obsdb_catalog/tests/
   Hypothetical rather than live — those archives withhold proprietary data entirely instead of
   serving it encrypted, so the encrypted-delivery case is IXPE's. `repair` and `healthcheck` needed no change — they read the scan. Tests:
   `tests/test_locked.py` (9).
+- 2026-11-04 — **PCUBEs are not derived into the catalog** (user ruling: a PCUBE depends on a
+  chosen energy binning and regions, so it is a science artifact, not a mission-team product).
+  `_domain._scan_ixpe` derives `level2_evt` and `pha` only; a `*_pcube.fits` on disk is neither
+  re-derived by `repair` nor reported uncatalogued by `healthcheck`. Catalog rows already recorded
+  for a PCUBE stay while their file exists (`repair` drops only rows whose file is gone). The
+  `rej_src`/`src` filter is now chosen from the `pha1` files only, so a `_rej_src_pcube` beside
+  `_src_pha1` spectra no longer hides them (6 live IXPE ObsIDs, whose rows the catalog already
+  holds). Test: `tests/test_repair.py::test_a_pcube_on_disk_is_not_catalogued`.

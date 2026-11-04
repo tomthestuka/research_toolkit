@@ -8,8 +8,10 @@ constant reduction params) lives here. This module is plain standard library
 The conventions mirror the live bootstrapped catalogs:
 
 * **IXPE** ``<obsid>/event_l2/`` — one representative ``det1`` entry per product
-  kind. ``level2_evt`` (``produced_by:"heasarc"``), ``pcube`` / ``pha``
-  (``produced_by:"filter_inst_bkg_IXPE.sh"``). ``filter`` is read from the
+  kind. ``level2_evt`` (``produced_by:"heasarc"``), ``pha``
+  (``produced_by:"filter_inst_bkg_IXPE.sh"``). A PCUBE depends on a chosen
+  energy binning and regions, so it is a science artifact, not a mission-team
+  product: a ``*_pcube.fits`` on disk is never derived into the catalog. ``filter`` is read from the
   filename infix (``_rej_src_`` -> ``"rej_src"``; ``_src_`` -> ``"src"``, the
   ``03002599`` special case); ``calibration_version`` from the ``v0N`` token.
 * **NICER** ``<obsid>/xti/event_cl/`` — ``pha`` / ``pha_bkg`` / ``arf`` / ``rmf``
@@ -176,9 +178,10 @@ def _scan_nustar(obs_db_path: str) -> dict[str, list[dict]]:
 
 # IXPE level-2 event file for the det1 representative: ixpe<obsid>_det1_evt2_v<NN>.fits
 _IXPE_EVT = re.compile(r"_det1_evt2_(?P<ver>v\d+)\.fits(?:\.gz)?$")
-# pcube/pha derived names carry the filter infix and calibration version.
+# pha derived names carry the filter infix and calibration version. PCUBEs are artifacts (user
+# ruling 2026-11-04) and stay out of the catalog.
 _IXPE_DERIVED = re.compile(
-    r"_det1_evt2_(?P<ver>v\d+)_(?P<filter>rej_src|src)_(?P<prod>pcube|pha1)\.fits$"
+    r"_det1_evt2_(?P<ver>v\d+)_(?P<filter>rej_src|src)_pha1\.fits$"
 )
 _IXPE_NOTE = "det1 listed; det2/det3 follow same naming pattern"
 
@@ -225,32 +228,18 @@ def _scan_ixpe(obs_db_path: str) -> dict[str, list[dict]]:
         for name, m in derived:
             if m.group("filter") != chosen:
                 continue
-            ver, prod = m.group("ver"), m.group("prod")
-            rel = _rel(obs_db_path, os.path.join(evt_l2, name))
-            if prod == "pcube":
-                products.append({
-                    "kind": "pcube",
-                    "path": rel,
-                    "produced_by": "filter_inst_bkg_IXPE.sh",
-                    "params": {
-                        "filter": chosen,
-                        "detectors": [1, 2, 3],
-                        "calibration_version": ver,
-                        "note": _IXPE_NOTE,
-                    },
-                })
-            else:  # pha1
-                products.append({
-                    "kind": "pha",
-                    "path": rel,
-                    "produced_by": "filter_inst_bkg_IXPE.sh",
-                    "params": {
-                        "filter": chosen,
-                        "stokes": "I",
-                        "detectors": [1, 2, 3],
-                        "calibration_version": ver,
-                    },
-                })
+            ver = m.group("ver")
+            products.append({
+                "kind": "pha",
+                "path": _rel(obs_db_path, os.path.join(evt_l2, name)),
+                "produced_by": "filter_inst_bkg_IXPE.sh",
+                "params": {
+                    "filter": chosen,
+                    "stokes": "I",
+                    "detectors": [1, 2, 3],
+                    "calibration_version": ver,
+                },
+            })
         if products:
             out[obsid] = products
     return out
