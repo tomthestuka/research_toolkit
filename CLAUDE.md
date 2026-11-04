@@ -30,16 +30,18 @@ Two kinds of top-level package live here, and the distinction matters:
 
 | Kind | Examples | Discoverable as an LLM tool? | Built by |
 |---|---|---|---|
-| **`<domain>_utils/` toolkits** | `xspec_utils`, `heasarc_utils` (exist); `lib_utils` (planned) | **Yes** — via `skills/TOOL_MANIFEST` | human + (Phase-2) runtime tool-author, on a branch |
+| **`<domain>_utils/` toolkits** | `xspec_utils`, `heasarc_utils`, `catalog_utils` (exist); `lib_utils` (planned) | **Yes** — via `skills/TOOL_MANIFEST` | human + (Phase-2) runtime tool-author, on a branch |
 | **Plain support packages** | `obsdb_catalog` | **No** — deliberately invisible | human / build-time agent, by hand |
 
 - **`*_utils` toolkits** are the AI-facing surface. Their name and `TOOL_MANIFEST` are how
   the orchestration repo finds tools. Follow the uniform layout in
   [§5](#5-the-_utils-toolkit-layout).
 - **`obsdb_catalog`** is a reliability-bearing support package — the *single trusted writer*
-  of the data catalog. It is intentionally **not** `*_utils`-named and exposes **no
-  `skills/` / `TOOL_MANIFEST` / CLI**, so tool discovery never surfaces it; catalog writes
-  are a side effect of data-producing tools, never a model action. See its `README.md`.
+  of the data catalog and the resolver of where an observation is (`locate`). It is
+  intentionally **not** `*_utils`-named and exposes **no `skills/` / `TOOL_MANIFEST`**, so tool
+  discovery never surfaces it; its `python -m obsdb_catalog` CLI is for deliberate human use.
+  Catalog writes are a side effect of data-producing tools, never a model action. See its
+  `README.md`.
 
 ---
 
@@ -138,17 +140,32 @@ Invariants (they are *why* the split exists):
 
 ## 6. The data catalog
 
-Each mission keeps its observations under an `obs_db_path` with a single
-`<obs_db_path>/catalog.json` — the inventory of what data is local and how it was produced
-(provenance). `auto_research` reads it **read-only** to decide what is already local.
+The observation database clones HEASARC's archive. An obs-db root holds one folder per
+mission, named as HEASARC names it (`<root>/ixpe/`, `nicer/`, `nustar/`), and below it each
+ObsID sits where HEASARC's archive keeps it (`ixpe/data/obs/01/01002901/`; the tree rules are
+`obsdb_catalog._domain.TREES`). Each mission folder holds a single `catalog.json` — the
+inventory of what data is local and how it was produced (provenance) — whose product paths are
+relative to the mission folder. `auto_research` reads it **read-only** to decide what is
+already local.
 
+- **One resolver finds an observation:** `obsdb_catalog.locate(obs_db_root, mission, obsid)`
+  returns the ObsID's folder (the catalog's record first, then the mission's tree rule). Every
+  Python reader goes through it; the batch shell scripts still read a flat `<obsid>/` layout.
 - **The only write path is `obsdb_catalog`** (`neutral` for producers, `repair` for deliberate
   recovery). No producer, script, or runtime-authored tool ever opens `catalog.json` for
   writing — see `obsdb_catalog/README.md`.
-- Producers (download/reduction tools) record by **calling `obsdb_catalog.neutral`**.
-  `heasarc_utils` (acquire/download) is the first wired producer; wiring the existing
-  reduction scripts (`*_red.sh`, `filter_inst_bkg_IXPE.sh`) is still pending work specified
-  in `HANDOFF_CATALOG.md`.
+- Producers record by **calling `obsdb_catalog.neutral`**: `heasarc_utils.acquire(obsid,
+  mission, obs_db_root)` (`neutral.new`, level 2, after downloading into HEASARC's tree) and
+  `xspec_utils.red_ixpe.pha` (`neutral.advance`, level 3, with its reduction's settings).
+  Wiring the reduction shell scripts (`*_red.sh`, `filter_inst_bkg_IXPE.sh`) is still pending.
+- **What a tool writes is one of three classes:**
+  - a **science artifact** — anything that depends on a `parameter` or a setting outside the
+    mission team's defaults — goes under an argument of kind `output` (its `shape` folder, file
+    or prefix) and is returned under `products` (`{"path", "caption"}`) or, for a PNG,
+    `figures`, so the runtime receipts it;
+  - an **obs-db item** — raw archive data and the mission team's standard reductions — goes into
+    the obs-db and is recorded through `obsdb_catalog.neutral`, the catalog being its record;
+  - **scratch** — a program's own bookkeeping — goes in a temporary folder, unrecorded.
 
 ---
 
@@ -194,8 +211,10 @@ envs/<id>/
   default, `-m "not slow"` gives the quick suite) and `live` (network or an external service;
   skipped unless `--live` or `TOOLKIT_LIVE=1`). The authoring gate runs with no network, so a test
   that needs it is `live`.
-- **Mission data paths** are real on-disk `obs_db_path`s (e.g.
-  `/data/fzhou/XSPEC/Cyg_X-1/{IXPE,NICER,NuSTAR}`); never write outside them from a tool.
+- **Mission data paths** are the mission folders of the obs-db root (e.g.
+  `/xray02/fzhou_obsdb/{ixpe,nicer,nustar}`, laid out as HEASARC's archive, §6); a tool writes
+  only what its class allows (§6): artifacts under its output argument, obs-db items into the
+  obs-db through `obsdb_catalog`, scratch in a temporary folder.
 
 ---
 
@@ -234,3 +253,9 @@ envs/<id>/
   PyXspec build, `ixpeobssim` 33.0.0 as a hash-pinned wheel, HEASoft/CALDB activation and the
   XSPEC session boot moved in from `auto_research`'s `analyst_env.sh` / `repl_init.py`. Root
   `conftest.py`: `slow` and `live` markers, `live` opt-in (§7).
+- 2026-11-04 — **Obs-db as a clone of HEASARC's archive; the three output classes.** §2 lists
+  `catalog_utils` and `obsdb_catalog`'s resolver and human CLI. §6: an obs-db root of
+  HEASARC-named mission folders laid out as HEASARC's tree (`_domain.TREES`), `locate`, product
+  paths relative to the mission folder, producers `heasarc_utils.acquire(obs_db_root)` and
+  `xspec_utils.red_ixpe.pha`, and what a tool writes (artifacts, obs-db items, scratch). §7: the
+  mission data paths and what a tool writes there.
