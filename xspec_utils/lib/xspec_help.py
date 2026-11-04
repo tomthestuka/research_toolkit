@@ -6,6 +6,54 @@ import matplotlib.pyplot as plt
 from astropy.io import fits
 from xspec import AllData, AllModels, Fit, Model, Plot, Xset
 
+_IXPEOBSSIM_CALDB = '/ixpeobssim/caldb/'
+
+
+def resolve_response(name: str) -> str:
+    """The response file a spectrum header names, as this environment reads it.
+
+    A name that exists, is empty or is ``none`` is returned as written. An
+    absolute name that does not exist and lies under an ``ixpeobssim/caldb/``
+    tree (ixpeobssim writes its own CALDB path into the PHA files it bins) is
+    read inside the installed ixpeobssim's CALDB
+    (``ixpeobssim.IXPEOBSSIM_CALDB``) at the same relative path; when that file
+    is absent too, :class:`FileNotFoundError` names both paths. Any other
+    missing name is returned as written, for the reader to fail on.
+    """
+    name = str(name).strip()
+    if (not name or name.lower() == 'none' or os.path.isfile(name) or not os.path.isabs(name)
+            or _IXPEOBSSIM_CALDB not in name):
+        return name
+    import ixpeobssim
+
+    installed = os.path.join(ixpeobssim.IXPEOBSSIM_CALDB, name.rsplit(_IXPEOBSSIM_CALDB, 1)[1])
+    if not os.path.isfile(installed):
+        raise FileNotFoundError(
+            f'{name} does not exist, and neither does {installed} in the installed ixpeobssim')
+    return installed
+
+
+def assign_responses(spec_index: int, pha: str) -> list[str]:
+    """Give XSPEC spectrum *spec_index*, loaded from *pha*, the RESPFILE and
+    ANCRFILE its header names as :func:`resolve_response` reads them.
+
+    XSPEC loads a spectrum whose header names a missing response with none, so
+    a resolved name is assigned here (the ARF again after a new RMF). Returns
+    one ``Response:`` line per name read elsewhere than its header says, for
+    the caller to print; empty when the header's names are used as written.
+    """
+    header = fits.getheader(pha, 'SPECTRUM')
+    named = {k: str(header.get(k, '')).strip() for k in ('RESPFILE', 'ANCRFILE')}
+    found = {k: resolve_response(v) for k, v in named.items()}
+    if found == named:
+        return []
+    if found['RESPFILE'] != named['RESPFILE']:
+        AllData(spec_index).response = found['RESPFILE']
+    if found['ANCRFILE'] and found['ANCRFILE'].lower() != 'none':
+        AllData(spec_index).response.arf = found['ANCRFILE']
+    return [f'Response: {os.path.basename(pha)} {k}: {found[k]}' for k in named if found[k] != named[k]]
+
+
 def load_data(
     epoch: dict,
     ixpe_path: str,
@@ -124,6 +172,7 @@ def load_data(
         AllModels.clear()
 
     result = {}
+    resolved = []   # responses read from the installed ixpeobssim, printed at the end
     spec_index = 1  # running 1-based XSPEC spectrum counter
     grp = 1         # running data-group counter; incremented after each instrument block
 
@@ -232,6 +281,7 @@ def load_data(
 
                     AllData(f'{grp}:{spec_index} {f_src_sto}')
                     AllData(spec_index).background = f_bkg_sto
+                    resolved += assign_responses(spec_index, f_src_sto)
                     AllData(spec_index).ignore(
                         f'**-{ixpe_erange[0]} {ixpe_erange[1]}-**')
 
@@ -253,6 +303,9 @@ def load_data(
 
             result['IXPE'] = {obs: ixpe_obs_result}
 
+    if resolved:
+        print('Headers name responses under an ixpeobssim install that is gone; read from '
+              'the installed ixpeobssim:\n' + '\n'.join(resolved))
     return result
 
 
@@ -489,7 +542,9 @@ def group_pha(infile, outfile, e_edges):
     RESPFILE, ANCRFILE or BACKFILE name that resolves next to infile (the
     rule this function reads the RMF by) is written as that absolute path,
     because XSPEC reads a relative name against its working directory, so
-    the copy loads from any working folder.
+    the copy loads from any working folder.  A response under a removed
+    ixpeobssim install is read, and written into the copy, as
+    :func:`resolve_response` finds it; stdout names each such file.
 
     Parameters
     ----------
@@ -516,7 +571,7 @@ def group_pha(infile, outfile, e_edges):
     """
     in_dir = os.path.dirname(os.path.abspath(infile))
     with fits.open(infile) as hdul:
-        rmf = hdul['SPECTRUM'].header['RESPFILE']
+        rmf = resolve_response(hdul['SPECTRUM'].header['RESPFILE'])
         if not os.path.isabs(rmf):
             rmf = os.path.join(in_dir, rmf)
         with fits.open(rmf) as rmf_hdul:
@@ -538,10 +593,14 @@ def group_pha(infile, outfile, e_edges):
                 spec.columns + fits.ColDefs([new_col]), header=spec.header)
             hdul['SPECTRUM'] = new_hdu
         header = hdul['SPECTRUM'].header
+        notes = []
         for key in ('RESPFILE', 'ANCRFILE', 'BACKFILE'):
             name = str(header.get(key, '')).strip()
             if name and not os.path.isabs(name) and os.path.isfile(os.path.join(in_dir, name)):
                 header[key] = os.path.join(in_dir, name)
+            elif key != 'BACKFILE' and (found := resolve_response(name)) != name:
+                header[key] = found
+                notes.append(f' {key}: {name} is absent; used {found}.')
         hdul.writeto(outfile, overwrite=True)
     edges = [float(e) for e in e_edges]
     return {
@@ -549,7 +608,7 @@ def group_pha(infile, outfile, e_edges):
             'path': str(outfile),
             'caption': f'{os.path.basename(infile)} grouped at bin edges {edges} keV',
         }],
-        'stdout': f'Wrote {outfile}: {infile} grouped with bin edges {edges} keV.',
+        'stdout': f'Wrote {outfile}: {infile} grouped with bin edges {edges} keV.' + ''.join(notes),
         'exit_code': 0,
     }
 

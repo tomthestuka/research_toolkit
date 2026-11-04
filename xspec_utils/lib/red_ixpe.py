@@ -115,7 +115,7 @@ def pcube(obs: str,
 
     irf_date: str
         Date string for the IRF version to use, in the format 'YYYYMMDD'. Required if changes=True.
-        Avaliable IRF versions at: /grad/fzhou/.local/lib/python3.13/site-packages/ixpeobssim/caldb/ixpe/gpd/cpf/rmf/
+        Avaliable IRF versions at: <installed ixpeobssim>/caldb/ixpe/gpd/cpf/rmf/ (ixpeobssim.IXPEOBSSIM_CALDB)
 
     Returns
     -------
@@ -215,7 +215,7 @@ def pha(obs: str,
 
     irf_date: str
         Date string for the IRF version to use, in the format 'YYYYMMDD'. Required if changes=True.
-        Avaliable IRF versions at: /grad/fzhou/.local/lib/python3.13/site-packages/ixpeobssim/caldb/ixpe/gpd
+        Avaliable IRF versions at: <installed ixpeobssim>/caldb/ixpe/gpd (ixpeobssim.IXPEOBSSIM_CALDB)
 
     Returns
     -------
@@ -343,13 +343,19 @@ def _sum_counts(obs, src_pha_file_list, bkg_pha_file_list, e_bin: tuple[float, f
     warnings.warn("XSPEC has been reset. All previous data and models have been cleared.")
 
     # XSPEC loads
+    import xspec_help  # resolve_response / assign_responses
     spec_cnt = 0
+    resolved = []
     with open(os.devnull, 'w') as fnull:
             with redirect_stdout(fnull):
                 for src_pha, bkg_pha in zip(src_pha_file_list, bkg_pha_file_list):
                     spec_cnt += 1
                     AllData(f"{spec_cnt}:{spec_cnt} {src_pha}")
                     AllData(spec_cnt).background = bkg_pha
+                    resolved += xspec_help.assign_responses(spec_cnt, src_pha)
+    if resolved:
+        print('Headers name responses under an ixpeobssim install that is gone; read from '
+              'the installed ixpeobssim:\n' + '\n'.join(resolved))
 
     # obtain overall rate and error
     AllData.ignore(f"**-{e_bin[0]}  {e_bin[1]}-**")

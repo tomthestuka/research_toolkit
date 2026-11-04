@@ -80,6 +80,38 @@ def test_group_pha_groups_and_resolves_only_names_found_next_to_the_input(tmp_pa
     assert header["BACKFILE"] == "missing_bk.pha"  # names no file next to the input: left as written
 
 
+# A response path ixpeobssim wrote into obs-db PHA files from a pip --user install since removed.
+GONE_RMF = ("/grad/fzhou/.local/lib/python3.13/site-packages/ixpeobssim/caldb/ixpe/gpd/cpf/rmf/"
+            "ixpe_d1_obssim_alpha075_v012.rmf")
+
+
+def test_a_response_under_a_removed_ixpeobssim_is_read_from_the_installed_one(tmp_path, out):
+    import ixpeobssim
+
+    assert not Path(GONE_RMF).exists()
+    installed = Path(ixpeobssim.IXPEOBSSIM_CALDB) / "ixpe/gpd/cpf/rmf/ixpe_d1_obssim_alpha075_v012.rmf"
+    assert xspec_help.resolve_response(GONE_RMF) == str(installed)
+    missing = GONE_RMF.replace("v012", "v999")
+    with pytest.raises(FileNotFoundError) as excinfo:
+        xspec_help.resolve_response(missing)
+    assert missing in str(excinfo.value) and str(installed).replace("v012", "v999") in str(excinfo.value)
+
+    with fits.open(installed) as rmf:
+        n = len(rmf["EBOUNDS"].data)
+    spectrum = fits.BinTableHDU.from_columns([
+        fits.Column(name="CHANNEL", format="J", array=np.arange(n)),
+        fits.Column(name="COUNTS", format="J", array=np.ones(n, dtype=int)),
+    ], name="SPECTRUM")
+    spectrum.header["RESPFILE"] = GONE_RMF
+    infile = tmp_path / "src.pha"
+    fits.HDUList([fits.PrimaryHDU(), spectrum]).writeto(infile)
+
+    result = xspec_help.group_pha(str(infile), str(out / "grouped.pha"), [2.0, 4.0, 8.0])
+    assert fits.getheader(out / "grouped.pha", "SPECTRUM")["RESPFILE"] == str(installed)
+    assert GONE_RMF in result["stdout"] and str(installed) in result["stdout"]
+    assert fits.getheader(infile, "SPECTRUM")["RESPFILE"] == GONE_RMF
+
+
 @pytest.fixture(scope="module")
 def xspec_session():
     """XSPEC as the environment's REPL boot file sets it up (session options, local models)."""
@@ -178,3 +210,64 @@ def test_plot_iqu_returns_one_figure_per_du(xspec_session, out):
     assert [f["path"] for f in result["figures"]] == [str(p) for p in paths]
     assert [f["sha256"] for f in result["figures"]] == [_sha(p) for p in paths]
     assert sorted(p.name for p in out.iterdir()) == [p.name for p in paths]
+
+
+@pytest.mark.slow
+def test_load_data_reads_ixpe_responses_from_the_installed_ixpeobssim(xspec_session, capsys):
+    import ixpeobssim
+    from xspec import AllData
+
+    obs = "02008201"  # its PHA headers name responses under the removed install
+    pha = IXPE_ROOT / obs / "event_l2" / f"ixpe{obs}_det1_evt2_v01_rej_src_pha1.fits"
+    assert fits.getheader(pha, "SPECTRUM")["RESPFILE"].startswith("/grad/fzhou/.local/")
+    indices = xspec_help.load_data({"IXPE": [obs], "STATE": "test"}, str(IXPE_ROOT))
+    printed = capsys.readouterr().out
+
+    assert AllData.nSpectra == 9
+    caldb = ixpeobssim.IXPEOBSSIM_CALDB
+    for du in ("DU1", "DU2", "DU3"):
+        for index in indices["IXPE"][obs][du]:
+            response = AllData(index).response
+            assert response.rmf.startswith(caldb) and Path(response.rmf).is_file()
+            assert response.arf.startswith(caldb) and Path(response.arf).is_file()
+    assert printed.count("Response: ") == 18  # RESPFILE and ANCRFILE of 9 spectra
+    assert f"{pha.name} RESPFILE: {AllData(1).response.rmf}" in printed
+
+
+@pytest.mark.slow
+def test_sum_counts_reads_ixpe_responses_from_the_installed_ixpeobssim(xspec_session, capsys):
+    import ixpeobssim
+    from xspec import AllData
+
+    from xspec_utils.lib import red_ixpe
+
+    obs = "02008201"
+    folder = IXPE_ROOT / obs / "event_l2"
+    src = [str(p) for p in sorted(folder.glob(f"ixpe{obs}_det*_evt2_v01_rej_src_pha1.fits"))]
+    bkg = [str(p) for p in sorted(folder.glob(f"ixpe{obs}_det*_evt2_v01_rej_bkg_pha1.fits"))]
+    red_ixpe._sum_counts(obs, src, bkg, (2.0, 8.0))
+    printed = capsys.readouterr().out
+    assert AllData.nSpectra == 3
+    for index in (1, 2, 3):
+        assert AllData(index).response.rmf.startswith(ixpeobssim.IXPEOBSSIM_CALDB)
+    assert printed.count("Response: ") == 6
+
+
+@pytest.mark.slow
+def test_a_spectrum_missing_only_its_arf_keeps_its_rmf(xspec_session, tmp_path):
+    import ixpeobssim
+    from xspec import AllData
+
+    pha = IXPE_ROOT / "02008201" / "event_l2" / "ixpe02008201_det1_evt2_v01_rej_src_pha1.fits"
+    rmf = str(Path(ixpeobssim.IXPEOBSSIM_CALDB) / "ixpe/gpd/cpf/rmf/ixpe_d1_obssim_alpha075_v012.rmf")
+    copy = tmp_path / pha.name
+    with fits.open(pha) as hdul:
+        hdul["SPECTRUM"].header["RESPFILE"] = rmf  # a response that exists; ANCRFILE stays gone
+        hdul.writeto(copy)
+    AllData.clear()
+    AllData(f"1:1 {copy}")
+    lines = xspec_help.assign_responses(1, str(copy))
+    assert len(lines) == 1 and f"{copy.name} ANCRFILE: " in lines[0]
+    assert AllData(1).response.rmf == rmf
+    assert AllData(1).response.arf.startswith(ixpeobssim.IXPEOBSSIM_CALDB)
+    AllData.clear()

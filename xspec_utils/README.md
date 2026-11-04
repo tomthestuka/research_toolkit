@@ -179,7 +179,7 @@ def load_data(
 | `ixpe_src_rad` | `float` | `1.0` | IXPE source-region radius in arcminutes. |
 | `ixpe_bkg_inner_rad` | `float` | `3.0` | IXPE background annulus inner radius in arcminutes. |
 | `ixpe_bkg_outer_rad` | `float` | `5.0` | IXPE background annulus outer radius in arcminutes. |
-| `ixpe_irf_date` | `str` | `'20230702'` | IRF date string (`'YYYYMMDD'`) used to select the IXPE response matrix. Available IRFs live under `/grad/fzhou/.local/lib/python3.13/site-packages/ixpeobssim/caldb/ixpe/gpd/cpf/rmf/`. |
+| `ixpe_irf_date` | `str` | `'20230702'` | IRF date string (`'YYYYMMDD'`) used to select the IXPE response matrix. Available IRFs live under the installed ixpeobssim's `caldb/ixpe/gpd/cpf/rmf/` (`ixpeobssim.IXPEOBSSIM_CALDB`). |
 | `ixpe_erange` | `tuple[float, float]` | `(2.0, 8.0)` | Energy range in keV to *notice* for IXPE spectra. |
 | `nicer_erange` | `tuple[float, float]` | `(1.0, 10.0)` | Energy range in keV to *notice* for NICER spectra. |
 | `nustar_erange` | `tuple[float, float]` | `(4.0, 50.0)` | Energy range in keV to *notice* for NuSTAR spectra. |
@@ -232,6 +232,8 @@ Per-detector lists are always ordered by spectrum index; IXPE DU lists are order
 | `detector`   | `IXPE`   | `'DU1'`, `'DU2'`, `'DU3'` |
 
 The NICER `'mpu7'` key is not a physical detector — it is the conventional label for the co-added, MPU-averaged spectrum produced by the standard NICER pipeline (`nicerl3-spect`) after good-detector screening. It is the **only** allowed detector key under NICER, so `indices['NICER'][obs]['mpu7']` is always a single-element list of one XSPEC spectrum index. The key is kept to preserve the uniform `instrument → obsid → detector → [spec_idx, ...]` shape across all instruments.
+
+**IXPE responses from the installed ixpeobssim.** ixpeobssim writes its own CALDB path into the `RESPFILE`/`ANCRFILE` of the PHA files it bins, so a PHA made under an ixpeobssim install that is gone names files that no longer exist (XSPEC then loads the spectrum with no response). For each IXPE source spectrum (XSPEC uses the source's response for its background), `load_data` and `red_ixpe.HR` read both names through `xspec_help.assign_responses`: a missing absolute name under an `ixpeobssim/caldb/` tree is read at the same relative path inside the installed ixpeobssim's CALDB (`ixpeobssim.IXPEOBSSIM_CALDB`, `xspec_help.resolve_response`), assigned to the spectrum, and named in a printed `Response: <file> <key>: <file used>` line. A name that resolves to nothing raises `FileNotFoundError` naming both paths. The PHA files are left as they are.
 
 ---
 
@@ -647,8 +649,10 @@ under `figures`. `plot_fit` appends `.png` to a name without it; `plot_iqu` drop
 `load_data` tags NICER and NuSTAR spectra in place (`XFLT0001 = 'Stokes:0'`) so XSPEC tells them
 from IXPE Stokes spectra; the catalog's record of those files stays as it is.
 
-`group_pha` reads the RMF its input's `RESPFILE` names, so it raises on a spectrum whose
-`RESPFILE` is `none` (the NICER spectra here) or names a response that is not installed.
+`group_pha` reads its input's `RESPFILE` and `ANCRFILE` through `resolve_response`, writes the
+files it finds into the copy's header, and names each one read from the installed ixpeobssim in
+stdout. It raises on a spectrum whose `RESPFILE` is `none` (the NICER spectra here) or names a
+response found nowhere.
 
 Tests (`tests/test_outputs.py`) write under a folder of their own (`tmp_path / "out"`) and read the
 observation database only.
@@ -673,3 +677,8 @@ Instrumental background rejection follows the method described in [Di Marco et a
   absolute paths; `run_fit`'s stdout carries the returned values as returned; `plot_fit` appends
   `.png` to a name without it and `plot_iqu` drops a trailing `.png` from its prefix. New
   `tests/test_outputs.py`.
+- 2026-11-04 — `xspec_help.resolve_response`: a response a PHA header names under a removed
+  ixpeobssim install is read inside the installed ixpeobssim's CALDB at the same relative path;
+  `xspec_help.assign_responses` gives it to a loaded spectrum (`load_data`'s IXPE path,
+  `red_ixpe._sum_counts`/`HR`) and returns a `Response:` line each caller prints; `group_pha`
+  reads it and writes it into the copy. Obs-db files are left as they are. Tests in `tests/test_outputs.py`.
