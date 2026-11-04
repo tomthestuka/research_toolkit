@@ -130,9 +130,9 @@ fig, ax, figs = xspec_help.inspect_epoch(
 ### 3. Source detection (CLI)
 
 ```bash
-python3 lib/find_src.py event_file.evt \
+python3 lib/find_src.py event_file.evt --outdir regions/ \
     --src_rad 1.0 --bkg_inner_rad 2.0 --bkg_outer_rad 3.0
-# Outputs: src.reg, bkg.reg, verify.png in the event file directory
+# Outputs: src.reg, bkg.reg, verify.png in regions/
 ```
 
 ## API reference
@@ -455,10 +455,13 @@ def pcube(
     changes: bool = True,
     overwrite: bool = True,
     chatter: bool = False,
+    *,
+    outdir: str,
+    products: list | None = None,
 ) -> tuple[xBinnedPolarizationCube, xBinnedPolarizationCube]
 ```
 
-When `changes=False` only `obs` and `file_list` are required; existing `_src_pcube` / `_bkg_pcube` FITS files on disk are read directly. When `changes=True` all spatial and IRF parameters are required and the full `ixpeobssim` pipeline (`xpselect` → `xpbin PCUBE`) is re-run. Background scaling is applied as `bkg_pcube *= src_pcube.backscal() / bkg_pcube.backscal()` before subtraction.
+A PCUBE depends on the chosen binning and regions, so it is a science artifact: `pcube` links the observation's level-2 files into `outdir` and runs the pipeline on the links (ixpeobssim writes each product beside the file it reads), so every file it writes lands in `outdir` and the observation database is only read. A `products` list, when given, is extended with one `{"path", "caption"}` per PCUBE file the call wrote (`changes=True`, with the selected event lists) or read (`changes=False`). When `changes=False` only `obs`, `file_list` and `outdir` are required; the `_src_pcube` / `_bkg_pcube` files an earlier call wrote in `outdir` are read, and their absence raises `FileNotFoundError` naming them. When `changes=True` all spatial and IRF parameters are required and the full `ixpeobssim` pipeline (`xpselect` → `xpbin PCUBE`) is re-run. Background scaling is applied as `bkg_pcube *= src_pcube.backscal() / bkg_pcube.backscal()` before subtraction.
 
 **Returns** `(src_pcube, bkg_pcube)` as `xBinnedPolarizationCube` objects.
 
@@ -484,7 +487,7 @@ def pha(
 ) -> tuple[list[str], list[str]]
 ```
 
-Same `changes` toggle as `pcube`. When `changes=True`, runs `xpselect` + `xpbin PHA1` with IRF name `ixpe:obssim{irf_date}_alpha075:v13`. One source and one background PHA1 file is produced per detector unit (DU1, DU2, DU3). The Q and U files are derived from the I paths by `red_ixpe.get_pha_q` / `red_ixpe.get_pha_u`.
+Same `changes` toggle as `pcube`. When `changes=True`, runs `xpselect` + `xpbin PHA1` with IRF name `ixpe:obssim{irf_date}_alpha075:v13`. The spectra are a standard reduction, so they are observation-database items: they are written beside the level-2 inputs (`<obs_db_path>/<obsid>/event_l2/`) and every Stokes I source and background spectrum is recorded through `obsdb_catalog.neutral.advance` (kind `pha`, level 3; `params`: `du`, `stokes`, `filter`, `calibration_version`, the radii, position and response set; Q/U follow each I file's name). The database root is read from that layout, checked before anything is written: an input outside it (a working copy such as `<obsid>_picorr/`) raises `ValueError`, and so does `overwrite=False`, under which ixpeobssim keeps an existing spectrum the record would then misdescribe. One source and one background PHA1 file is produced per detector unit (DU1, DU2, DU3). The Q and U files are derived from the I paths by `red_ixpe.get_pha_q` / `red_ixpe.get_pha_u`.
 
 **Returns** `(src_pha_list, bkg_pha_list)` — each a list of three paths ordered DU1, DU2, DU3.
 
@@ -556,7 +559,7 @@ Locates ARF files for FPMA and FPMB (sorted alphabetically).
 
 ---
 
-#### `find_src.run_extraction(evt_path, src_reg_out, bkg_reg_out, png_out, src_rad, bkg_inner_rad, bkg_outer_rad)`
+#### `find_src.run_extraction(evt_path, outdir, src_rad, bkg_inner_rad, bkg_outer_rad)`
 
 Centroiding pipeline for a single FITS event file. Constructs a 1000×1000 pixel histogram of the X/Y event coordinates, identifies the brightest pixel, and refines the centroid within a 20-pixel window using `scipy.ndimage.center_of_mass`. Converts the pixel centroid to sky coordinates using either table-column WCS (NuSTAR) or standard image WCS (IXPE).
 
@@ -565,26 +568,28 @@ Centroiding pipeline for a single FITS event file. Constructs a 1000×1000 pixel
 ```python
 def run_extraction(
     evt_path: str,
-    src_reg_out: str,
-    bkg_reg_out: str,
-    png_out: str,
+    outdir: str,
     src_rad: float,           # arcminutes
     bkg_inner_rad: float,     # arcminutes
     bkg_outer_rad: float,     # arcminutes
-) -> None
+) -> dict
 ```
 
-Writes:
-- `src_reg_out` — DS9 `fk5; circle(RA, Dec, radius")` region
-- `bkg_reg_out` — DS9 `fk5; annulus(RA, Dec, r_in", r_out")` region
-- `png_out` — log-scale event image with source and background overlays
+The regions depend on the chosen radii, so they are science artifacts. Writes into `outdir`:
+- `src.reg` — DS9 `fk5; circle(RA, Dec, radius")` region
+- `bkg.reg` — DS9 `fk5; annulus(RA, Dec, r_in", r_out")` region
+- `verify.png` — log-scale event image with source and background overlays
+
+Returns `{"ra", "dec", "products": [src.reg, bkg.reg], "figures": [verify.png], "stdout", "exit_code"}`; a failure returns `exit_code` 1 with the error under `stderr`, and the CLI exits with that code.
 
 **CLI usage:**
 ```bash
-python3 lib/find_src.py event_file.evt \
+python3 lib/find_src.py event_file.evt --outdir regions/ \
     --src_rad 1.0 --bkg_inner_rad 2.0 --bkg_outer_rad 3.0
-# outputs: src.reg, bkg.reg, verify.png in the event file's directory
+# outputs: src.reg, bkg.reg, verify.png in regions/
 ```
+
+`NuSTAR/nustar_red.sh` calls the upstream copy of `find_src.py` (`/data/fzhou/XSPEC/Cyg_X-1/lib/`), which still writes into `event_cl/`.
 
 ---
 
@@ -703,3 +708,10 @@ Instrumental background rejection follows the method described in [Di Marco et a
   `fit_tbfeo_hss` is a manifest tool, so fit logs and results receipted in earlier runs carry the
   old labels: there read `net=` as the total rate, `±` as the model rate, `total=` as the net rate
   and `bkg=` as the net rate's standard deviation.
+- 2026-11-04 — The human reduction functions follow the output classes. `red_ixpe.pcube` takes a
+  keyword `outdir`, links the level-2 inputs there and writes every product there (artifacts),
+  listing them in an optional `products`; `red_ixpe.pha` records every Stokes I spectrum it writes
+  beside its inputs through `obsdb_catalog.neutral.advance` with the radii, position and response
+  set (obs-db items), and refuses an input outside the obs-db layout or `overwrite=False` before
+  writing; `find_src.run_extraction(evt_path, outdir, ...)` and its CLI (`--outdir`, required)
+  write `src.reg`, `bkg.reg` and `verify.png` into a folder of their own and return them.

@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 import argparse
+import hashlib
 import os
 import sys
+import time
 import numpy as np
 import matplotlib.pyplot as plt
 from astropy.io import fits
@@ -47,20 +49,18 @@ def get_table_wcs(header, colnames):
         'dec_refpix': dec_refpix, 'dec_refval': dec_refval, 'dec_delta': dec_delta
     }
 
-def run_extraction(evt_path: str, src_reg_out: str, bkg_reg_out: str, png_out: str, src_rad: float, bkg_inner_rad: float, bkg_outer_rad: float) -> None:
+def run_extraction(evt_path: str, outdir: str, src_rad: float, bkg_inner_rad: float, bkg_outer_rad: float) -> dict:
     """Extract source and background regions.
-    
+
+    The regions depend on the chosen radii and the PNG shows them, so they are
+    science artifacts: ``src.reg``, ``bkg.reg`` and ``verify.png`` go into
+    *outdir*, never beside the event file.
+
     evt_path: [str]
         path to the FITS event file.
 
-    src_reg_out: [str]
-        output path for the source region file (DS9 format).
-    
-    bkg_reg_out: [str]
-        output path for the background region file (DS9 format).
-
-    png_out: [str]
-        output path for the verification PNG image.
+    outdir: [str]
+        folder the region files (DS9 format) and the verification PNG are written to.
 
     src_rad: [float]
         source radius in arcminutes.
@@ -70,7 +70,14 @@ def run_extraction(evt_path: str, src_reg_out: str, bkg_reg_out: str, png_out: s
 
     bkg_outer_rad: [float]
         outer radius of the background annulus in arcminutes.
+
+    Returns ``{'ra', 'dec', 'products': [src.reg, bkg.reg], 'figures': [verify.png], 'stdout',
+    'exit_code'}``, each product ``{'path', 'caption'}`` and the figure a FigureRef dict.
     """
+    os.makedirs(outdir, exist_ok=True)
+    src_reg_out = os.path.join(outdir, "src.reg")
+    bkg_reg_out = os.path.join(outdir, "bkg.reg")
+    png_out = os.path.join(outdir, "verify.png")
     try:
         with fits.open(evt_path) as hdul:
             idx = get_event_extension(hdul)
@@ -149,32 +156,46 @@ def run_extraction(evt_path: str, src_reg_out: str, bkg_reg_out: str, png_out: s
             ax.legend(loc='upper right')
             ax.set_title(f"{mission} | RA: {ra:.4f} Dec: {dec:.4f}")
             plt.savefig(png_out)
-            
-        print(f"[{mission}] RA: {ra:.6f}, Dec: {dec:.6f} -> {src_reg_out}, {bkg_reg_out}")
+            plt.close(fig)
+
+        stdout = f"[{mission}] RA: {ra}, Dec: {dec} -> {src_reg_out}, {bkg_reg_out}, {png_out}"
+        print(stdout)
+        return {
+            "ra": float(ra),
+            "dec": float(dec),
+            "products": [
+                {"path": src_reg_out, "caption": f"DS9 source region, {src_rad} arcmin circle"},
+                {"path": bkg_reg_out, "caption": f"DS9 background annulus, {bkg_inner_rad}-{bkg_outer_rad} arcmin"},
+            ],
+            "figures": [{
+                "path": png_out,
+                "caption": f"{mission} event image with the source and background regions",
+                "mime_type": "image/png",
+                "produced_by": "xspec_utils.lib.find_src.run_extraction",
+                "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "sha256": _sha256(png_out),
+            }],
+            "stdout": stdout,
+            "exit_code": 0,
+        }
 
     except Exception as e:
-        print(f"Error processing {evt_path}: {e}")
-        sys.exit(1)
+        message = f"Error processing {evt_path}: {e}"
+        print(message)
+        return {"stdout": "", "stderr": message, "exit_code": 1}
+
+
+def _sha256(path: str) -> str:
+    with open(path, "rb") as fh:
+        return hashlib.sha256(fh.read()).hexdigest()
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("evt", help="FITS event file")
-    parser.add_argument("--src_reg", default=None)
-    parser.add_argument("--bkg_reg", default=None)
-    parser.add_argument("--png", default=None)
+    parser.add_argument("--outdir", required=True,
+                        help="folder for src.reg, bkg.reg and verify.png (apart from the observation database)")
     parser.add_argument("--src_rad", type=float, default=1.0, help="Source radius in arcminutes")
     parser.add_argument("--bkg_inner_rad", type=float, default=2.0, help="Background inner radius in arcminutes")
     parser.add_argument("--bkg_outer_rad", type=float, default=3.0, help="Background outer radius in arcminutes")
     args = parser.parse_args()
-    
-    # Determine output directory from event file path
-    evt_dir = os.path.dirname(os.path.abspath(args.evt))
-    
-    # Set default output paths if not specified
-    src_reg = args.src_reg if args.src_reg else os.path.join(evt_dir, "src.reg")
-    bkg_reg = args.bkg_reg if args.bkg_reg else os.path.join(evt_dir, "bkg.reg")
-    png_out = args.png if args.png else os.path.join(evt_dir, "verify.png")
-    
-    # Run the extraction
-    run_extraction(args.evt, src_reg, bkg_reg, png_out, 
-                   args.src_rad, args.bkg_inner_rad, args.bkg_outer_rad)
+    sys.exit(run_extraction(args.evt, args.outdir, args.src_rad, args.bkg_inner_rad, args.bkg_outer_rad)["exit_code"])

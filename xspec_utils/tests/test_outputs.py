@@ -331,3 +331,125 @@ def test_audit_paths_labels_each_rate(xspec_session, capsys):
     assert f"Rate: net={net:.4g} ± {sigma:.4g} cts/s  (total={total:.4g}, current model={model:.4g})" in printed
     AllData.clear()
     AllModels.clear()
+
+
+def _mtimes(folder: Path) -> dict[str, int]:
+    return {p.name: p.lstat().st_mtime_ns for p in folder.iterdir()}
+
+
+def _linked(sources: list[str], folder: Path) -> list[str]:
+    """The inputs linked into a folder of the test's own, so a write beside an input lands there."""
+    folder.mkdir(parents=True, exist_ok=True)
+    for source in sources:
+        (folder / Path(source).name).symlink_to(Path(source).resolve())
+    return [str(folder / Path(s).name) for s in sources]
+
+
+@pytest.mark.slow
+def test_run_extraction_writes_regions_and_png_to_its_folder(tmp_path, out):
+    from xspec_utils.lib import find_src
+
+    source = "/data/fzhou/XSPEC/Cyg_X-1/NuSTAR/30702017002/event_cl/nu30702017002A01_cl.evt"
+    evt = Path(_linked([source], tmp_path / "event_cl")[0])
+    before = _mtimes(evt.parent)
+    result = find_src.run_extraction(str(evt), str(out), 1.0, 2.0, 3.0)
+
+    assert result["exit_code"] == 0
+    assert [p["path"] for p in result["products"]] == [str(out / "src.reg"), str(out / "bkg.reg")]
+    assert [f["path"] for f in result["figures"]] == [str(out / "verify.png")]
+    assert result["figures"][0]["sha256"] == _sha(out / "verify.png")
+    assert sorted(p.name for p in out.iterdir()) == ["bkg.reg", "src.reg", "verify.png"]
+    assert f"circle({result['ra']:.6f}, {result['dec']:.6f}, 60.00\")" in (out / "src.reg").read_text()
+    assert _mtimes(evt.parent) == before
+
+
+IXPE_PCUBE_OBS = "02008201"
+
+
+def _rej_events(root: Path, obs: str) -> list[str]:
+    return [str(p) for p in sorted((root / obs / "event_l2").glob(f"ixpe{obs}_det*_evt2_v01_rej.fits"))]
+
+
+@pytest.mark.slow
+def test_pcube_writes_every_file_under_its_folder(tmp_path, out):
+    from xspec_utils.lib import red_ixpe, src_pos
+
+    obs = IXPE_PCUBE_OBS
+    events = _linked(_rej_events(IXPE_ROOT, obs), tmp_path / obs / "event_l2")
+    before = _mtimes(tmp_path / obs / "event_l2")
+    ra, dec = src_pos.SRC_COORD[obs]
+    products: list = []
+    src, _bkg = red_ixpe.pcube(obs, events, ebinning=[2.0, 4.0, 8.0], src_rad=1.0, bkg_inner_rad=2.5,
+                               bkg_outer_rad=5.0, ra=float(ra), dec=float(dec), irf_date="20230101",
+                               outdir=str(out), products=products)
+
+    assert _mtimes(tmp_path / obs / "event_l2") == before
+    assert len(products) == 12 and all(set(p) == {"path", "caption"} and p["caption"] for p in products)
+    assert {Path(p["path"]).parent for p in products} == {out}
+    assert all(Path(p["path"]).is_file() and not Path(p["path"]).is_symlink() for p in products)
+    links = [out / Path(e).name for e in events]
+    assert all(link.is_symlink() and link.resolve() == Path(e).resolve() for link, e in zip(links, events))
+    # Every file in the folder is a link to an input or one the call declares.
+    assert {p for p in out.iterdir() if not p.is_symlink()} == {Path(q["path"]) for q in products}
+
+    reread: list = []
+    again, _ = red_ixpe.pcube(obs, events, changes=False, outdir=str(out), products=reread)
+    assert {q["path"] for q in reread} <= {q["path"] for q in products} and len(reread) == 6
+    assert np.allclose(again.PD, src.PD)
+
+    empty = tmp_path / "empty"
+    with pytest.raises(FileNotFoundError, match="earlier call"):
+        red_ixpe.pcube(obs, events, changes=False, outdir=str(empty))
+    assert not empty.exists()
+
+
+@pytest.mark.slow
+def test_pha_writes_into_the_obs_db_and_records_its_spectra(tmp_path):
+    from obsdb_catalog import neutral
+    from obsdb_catalog.healthcheck import healthcheck
+
+    from xspec_utils.lib import red_ixpe, src_pos
+
+    obs = IXPE_PCUBE_OBS
+    db = tmp_path / "IXPE"  # a fixture obs-db named after its mission
+    event_l2 = db / obs / "event_l2"
+    event_l2.mkdir(parents=True)
+    for source in _rej_events(IXPE_ROOT, obs):
+        (event_l2 / Path(source).name).symlink_to(Path(source).resolve())
+    det1 = f"{obs}/event_l2/ixpe{obs}_det1_evt2_v01_rej.fits"
+    neutral.new(str(db), "ixpe", obs, products=[{"kind": "level2_evt", "path": det1, "produced_by": "heasarc"}])
+    assert healthcheck(str(db)) is True
+    real = _mtimes(IXPE_ROOT / obs / "event_l2")
+
+    ra, dec = src_pos.SRC_COORD[obs]
+    src, bkg = red_ixpe.pha(obs, _rej_events(db, obs), src_rad=1.0, bkg_inner_rad=2.5, bkg_outer_rad=5.0,
+                            ra=float(ra), dec=float(dec), irf_date="20230101")
+
+    assert all(Path(p).parent == event_l2 and Path(p).is_file() for p in src + bkg)
+    assert healthcheck(str(db)) is True
+    entry = neutral.read(str(db))["entries"][obs]
+    assert entry["max_level"] == 3
+    pha = {p["path"]: p["params"] for p in entry["products"] if p["kind"] == "pha"}
+    assert sorted(pha) == sorted(str(Path(f).relative_to(db)) for f in src + bkg)  # every Stokes I spectrum
+    assert len(pha) == 6
+    for params in pha.values():
+        assert (params["src_rad_arcmin"], params["bkg_inner_arcmin"], params["bkg_outer_arcmin"]) == (1.0, 2.5, 5.0)
+        assert params["irfname"] == "ixpe:obssim20230101_alpha075:v13"
+    det1 = pha[f"{obs}/event_l2/ixpe{obs}_det1_evt2_v01_rej_src_pha1.fits"]
+    assert (det1["du"], det1["filter"]) == ("DU1", "rej_src")
+    assert _mtimes(IXPE_ROOT / obs / "event_l2") == real
+
+
+def test_pha_refuses_before_writing_what_it_could_not_record(tmp_path):
+    from xspec_utils.lib import red_ixpe
+
+    obs = IXPE_PCUBE_OBS
+    copy = tmp_path / f"{obs}_picorr" / "event_l2"  # a working copy outside the obs-db layout
+    events = _linked(_rej_events(IXPE_ROOT, obs), copy)
+    args = dict(src_rad=1.0, bkg_inner_rad=2.5, bkg_outer_rad=5.0, ra=299.59, dec=35.2, irf_date="20230101")
+    before = _mtimes(copy)
+    with pytest.raises(ValueError, match="event_l2"):
+        red_ixpe.pha(obs, events, **args)
+    with pytest.raises(ValueError, match="overwrite=True"):
+        red_ixpe.pha(obs, events, overwrite=False, **args)
+    assert _mtimes(copy) == before

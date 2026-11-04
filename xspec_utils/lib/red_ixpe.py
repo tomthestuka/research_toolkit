@@ -1,6 +1,7 @@
 
 import os
 import glob
+import re
 import warnings
 from pathlib import Path
 from astropy.io import fits
@@ -8,6 +9,7 @@ import ixpeobssim.core.pipeline as pipeline
 from ixpeobssim.binning.polarization import xBinnedPolarizationCube
 from contextlib import redirect_stdout, redirect_stderr
 from xspec import AllData, Spectrum, AllModels
+from obsdb_catalog import neutral
 
 def get_all_file_list(ixpe_path: str, chatter=False) -> list[str]:
     """
@@ -66,6 +68,28 @@ def _get_obs_file_list(obs: str, file_list: list[str], chatter=False) -> list[st
             print(f)
     return obs_file_list
 
+def _stage(file_list: list[str], outdir: str) -> list[str]:
+    """Symlink each level-2 file into *outdir* and return the links.
+
+    ixpeobssim writes each product beside the file it reads (the input path
+    with a suffix, ``ixpeobssim.utils.os_.check_output_file``), so products made
+    from the links land in *outdir* and the observation database is only read.
+    """
+    os.makedirs(outdir, exist_ok=True)
+    links = []
+    for f in file_list:
+        source = Path(f).resolve()
+        link = Path(outdir) / Path(f).name
+        if link.is_symlink() and link.resolve() == source:
+            pass
+        elif link.exists() or link.is_symlink():
+            raise FileExistsError(f'{link} exists and is not a link to {source}')
+        else:
+            os.symlink(source, link)
+        links.append(str(link))
+    return links
+
+
 def pcube(obs: str,
           file_list: list[str],
           ebinning: list[float] | None=None,
@@ -77,12 +101,20 @@ def pcube(obs: str,
           irf_date: str | None=None,
           changes: bool=True,
           overwrite: bool=True,
-          chatter: bool=False
+          chatter: bool=False,
+          *,
+          outdir: str,
+          products: list | None=None,
           ) -> tuple[xBinnedPolarizationCube, xBinnedPolarizationCube]:
     """
     Reduce to IXPE PCUBE data for a given observation and args. returns cleaned src PCUBE, and corresponding bkg PCUBE.
-    
-    When changes=False: only obs and file_list are required.
+
+    A PCUBE depends on the chosen energy binning and regions, so it is a
+    science artifact: every file this writes (links to the level-2 inputs, the
+    selected event lists, the PCUBEs) goes under *outdir*, never beside the
+    inputs in the observation database.
+
+    When changes=False: only obs, file_list and outdir are required; the PCUBEs an earlier call wrote in outdir are read.
     When changes=True: ebinning, src_rad, bkg_inner_rad, bkg_outer_rad, ra, dec are required.
 
     Parameters
@@ -117,6 +149,14 @@ def pcube(obs: str,
         Date string for the IRF version to use, in the format 'YYYYMMDD'. Required if changes=True.
         Avaliable IRF versions at: <installed ixpeobssim>/caldb/ixpe/gpd/cpf/rmf/ (ixpeobssim.IXPEOBSSIM_CALDB)
 
+    outdir: str
+        Folder the call writes into (keyword only).
+
+    products: list or None
+        When given, extended with one ``{'path', 'caption'}`` per PCUBE file the
+        call wrote (changes=True, with the selected event lists) or read
+        (changes=False), for a caller that returns its products.
+
     Returns
     -------
     tuple[xBinnedPolarizationCube, xBinnedPolarizationCube]
@@ -131,6 +171,14 @@ def pcube(obs: str,
         print(f'Found {len(obs_file_list)} files for observation {obs}:')
         for f in obs_file_list:
             print(f)
+    if not changes:
+        expected = [Path(outdir) / f"{Path(f).with_suffix('').name}_{role}_pcube{Path(f).suffix}"
+                    for f in obs_file_list for role in ('src', 'bkg')]
+        absent = [str(p) for p in expected if not p.is_file()]
+        if absent:
+            raise FileNotFoundError(f'changes=False reads PCUBEs an earlier call wrote in {outdir}; '
+                                    f'absent: {", ".join(absent)}')
+    obs_file_list = _stage(obs_file_list, outdir)
 
     if changes:
         # Validate that all required parameters are provided when changes=True
@@ -142,17 +190,18 @@ def pcube(obs: str,
         # Select source and background regions
         with open(os.devnull, 'w') as fnull:
             with redirect_stdout(fnull):
-                src_pcube_file_list = pipeline.xpselect(*obs_file_list , rad= src_rad , suffix='src', ra = ra, dec = dec, overwrite=overwrite)
-                bkg_pcube_file_list = pipeline.xpselect(*obs_file_list, ra = ra, dec = dec , innerrad=bkg_inner_rad , rad=bkg_outer_rad , suffix='bkg', overwrite=overwrite)
+                selected = {'source': pipeline.xpselect(*obs_file_list , rad= src_rad , suffix='src', ra = ra, dec = dec, overwrite=overwrite),
+                            'background': pipeline.xpselect(*obs_file_list, ra = ra, dec = dec , innerrad=bkg_inner_rad , rad=bkg_outer_rad , suffix='bkg', overwrite=overwrite)}
                 kwargs = dict(algorithm='PCUBE', ebinalg='LIST',ebinning=ebinning , overwrite=overwrite, irfname=f'ixpe:obssim{irf_date}_alpha075:v13', weights=True)
 
                 # PCUBE results
-                src_pcube_file_list = pipeline.xpbin(*src_pcube_file_list, **kwargs)
-                bkg_pcube_file_list = pipeline.xpbin(*bkg_pcube_file_list, **kwargs)
+                src_pcube_file_list = pipeline.xpbin(*selected['source'], **kwargs)
+                bkg_pcube_file_list = pipeline.xpbin(*selected['background'], **kwargs)
     else:
         '''
         Use existing reduction results
         '''
+        selected = {}
         src_pcube_file_list = []
         bkg_pcube_file_list = []
         for i in range(len(obs_file_list)):
@@ -161,6 +210,12 @@ def pcube(obs: str,
 
     if chatter:
             print(f'Selected {len(src_pcube_file_list)} source files and {len(bkg_pcube_file_list)} background files for observation {obs}.')
+    if products is not None:
+        products.extend({'path': str(f), 'caption': f'IXPE {obs} {role} polarization cube {Path(f).name}'}
+                        for role, files in (('source', src_pcube_file_list), ('background', bkg_pcube_file_list))
+                        for f in files)
+        products.extend({'path': str(f), 'caption': f'IXPE {obs} selected {role} events {Path(f).name}'}
+                        for role, files in selected.items() for f in files)
 
     src_pcube = xBinnedPolarizationCube.from_file_list(src_pcube_file_list)
     bkg_pcube = xBinnedPolarizationCube.from_file_list(bkg_pcube_file_list)
@@ -184,7 +239,14 @@ def pha(obs: str,
     ) -> tuple[list[str], list[str]]:
     """
     Reduce to IXPE PHA data for a given observation and args. returns a list of PHA file paths.
-    
+
+    The Stokes I/Q/U spectra are a standard reduction, so they are
+    observation-database items: with changes=True they are written beside the
+    level-2 inputs (``<obs_db_path>/<obsid>/event_l2/``, checked before anything
+    is written) and every Stokes I source and background spectrum is recorded
+    through ``obsdb_catalog.neutral.advance`` (kind ``pha``) with the radii,
+    position and response set in ``params``. changes=True needs overwrite=True.
+
     When changes=False: only obs and file_list are required.
     When changes=True: src_rad, bkg_inner_rad, bkg_outer_rad, ra, dec, irf_date are required.
 
@@ -232,6 +294,12 @@ def pha(obs: str,
         # Validate that all required parameters are provided when changes=True
         if any(param is None for param in [src_rad, bkg_inner_rad, bkg_outer_rad, ra, dec, irf_date]):
             raise ValueError('When changes=True, all parameters (src_rad, bkg_inner_rad, bkg_outer_rad, ra, dec, irf_date) must be provided.')
+        if not overwrite:
+            # ixpeobssim keeps an existing output under overwrite=False and still returns its path,
+            # so the catalog would record settings the file was not made with.
+            raise ValueError('changes=True records the spectra with these settings; pass overwrite=True '
+                             'so every spectrum is made with them')
+        root = _obs_db_of(obs, obs_file_list)
         '''
         If changes were made to input params, redo reduction
         '''
@@ -252,6 +320,11 @@ def pha(obs: str,
                 pipeline.xpbin(*bkg_sel, algorithm='PHA1Q', **bin_kwargs)
                 pipeline.xpbin(*src_sel, algorithm='PHA1U', **bin_kwargs)
                 pipeline.xpbin(*bkg_sel, algorithm='PHA1U', **bin_kwargs)
+        _record_pha(root, obs, src_pha_file_list + bkg_pha_file_list, {
+            'src_rad_arcmin': float(src_rad), 'bkg_inner_arcmin': float(bkg_inner_rad),
+            'bkg_outer_arcmin': float(bkg_outer_rad), 'ra': float(ra), 'dec': float(dec),
+            'irfname': bin_kwargs['irfname'], 'weights': True,
+        })
     else:
         '''
         Use existing reduction results
@@ -272,6 +345,46 @@ def pha(obs: str,
                 print(f'Background PHA file: {f}')
 
     return src_pha_file_list, bkg_pha_file_list
+
+_PHA1 = re.compile(r'_det(?P<du>[123])_evt2_(?P<ver>v\d+)_(?P<filter>(?:rej_)?(?:src|bkg))_pha1\.fits$')
+_EVT2 = re.compile(r'_det[123]_evt2_v\d+(?:_rej)?\.fits$')
+
+
+def _obs_db_of(obs: str, obs_file_list: list[str]) -> Path:
+    """The observation database the level-2 inputs lie in, read from the IXPE layout
+    ``<obs_db_path>/<obs>/event_l2/ixpe<obs>_det<n>_evt2_v<NN>[_rej].fits``; raises
+    ``ValueError`` for an input outside it (a working copy such as ``<obs>_picorr/``), before
+    anything is written."""
+    for f in obs_file_list:
+        path = Path(f)
+        if path.parent.name != 'event_l2' or path.parent.parent.name != obs or not _EVT2.search(path.name):
+            raise ValueError(f'{f} is not <obs_db_path>/{obs}/event_l2/ixpe{obs}_det<n>_evt2_v<NN>[_rej].fits; '
+                             'pha writes its spectra into an observation database and records them in '
+                             'its catalog, so it reduces only files in that layout')
+    return Path(obs_file_list[0]).parent.parent.parent
+
+
+def _record_pha(root: Path, obs: str, pha_file_list: list[str], params: dict) -> None:
+    """Record every Stokes I spectrum :func:`pha` wrote (source and background per detector
+    unit, kind ``pha``) in the catalog of the observation database *root*, each with the
+    reduction's *params*; the Q/U spectra follow each I file's name (``_pha1q``/``_pha1u``)."""
+    products = []
+    for f in pha_file_list:
+        match = _PHA1.search(Path(f).name)
+        if match is None:
+            raise ValueError(f'{f} is not an ixpeobssim PHA1 name; the spectra cannot be recorded')
+        products.append({
+            'kind': 'pha',
+            'path': str(Path(f).relative_to(root)),
+            'produced_by': 'xspec_utils.lib.red_ixpe.pha',
+            'params': {
+                'du': f"DU{match.group('du')}", 'stokes': 'I', 'filter': match.group('filter'),
+                'calibration_version': match.group('ver'), **params,
+                'note': 'the Stokes Q/U spectra follow the same name with _pha1q/_pha1u',
+            },
+        })
+    neutral.advance(str(root), 'ixpe', obs, level=3, products=products)
+
 
 def get_pha_q(pha_path: str) -> str:
     """
