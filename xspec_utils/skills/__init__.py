@@ -40,9 +40,9 @@ TOOL_MANIFEST: dict = {
             "On first load XSPEC prints harmless warnings about unresolved response-file "
             "paths (arf/rmf are loaded explicitly) — ignore them. For bright sources like "
             "Cyg X-1, NuSTAR/NICER background is None by design — not an error or missing data. "
-            "When an IXPE spectrum's header names a response under a removed ixpeobssim install, "
-            "load_data reads the same file from the installed ixpeobssim and prints a 'Response:' "
-            "line naming the file used."
+            "IXPE responses are read from the installed ixpeobssim's CALDB, at the path the "
+            "spectrum's header names inside its ixpeobssim CALDB; each file read in place of the "
+            "header's is named in a 'Response:' line."
         ),
         "args_schema": {
             "type": "object",
@@ -282,9 +282,8 @@ TOOL_MANIFEST: dict = {
             "Load outfile into XSPEC instead of infile when coarser binning is needed. "
             "Returns the grouped file as a product; a relative RESPFILE, ANCRFILE or "
             "BACKFILE name that resolves next to infile is written as that absolute path, so "
-            "the copy loads from any working folder. A response named under an ixpeobssim "
-            "install that is gone is read from the installed ixpeobssim, written into the copy "
-            "and named in stdout."
+            "the copy loads from any working folder. A response under an ixpeobssim CALDB is "
+            "read from the installed ixpeobssim's CALDB, written into the copy and named in stdout."
         ),
         "args_schema": {
             "type": "object",

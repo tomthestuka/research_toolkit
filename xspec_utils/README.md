@@ -233,7 +233,7 @@ Per-detector lists are always ordered by spectrum index; IXPE DU lists are order
 
 The NICER `'mpu7'` key is not a physical detector — it is the conventional label for the co-added, MPU-averaged spectrum produced by the standard NICER pipeline (`nicerl3-spect`) after good-detector screening. It is the **only** allowed detector key under NICER, so `indices['NICER'][obs]['mpu7']` is always a single-element list of one XSPEC spectrum index. The key is kept to preserve the uniform `instrument → obsid → detector → [spec_idx, ...]` shape across all instruments.
 
-**IXPE responses from the installed ixpeobssim.** ixpeobssim writes its own CALDB path into the `RESPFILE`/`ANCRFILE` of the PHA files it bins, so a PHA made under an ixpeobssim install that is gone names files that no longer exist (XSPEC then loads the spectrum with no response). For each IXPE source spectrum (XSPEC uses the source's response for its background), `load_data` and `red_ixpe.HR` read both names through `xspec_help.assign_responses`: a missing absolute name under an `ixpeobssim/caldb/` tree is read at the same relative path inside the installed ixpeobssim's CALDB (`ixpeobssim.IXPEOBSSIM_CALDB`, `xspec_help.resolve_response`), assigned to the spectrum, and named in a printed `Response: <file> <key>: <file used>` line. A name that resolves to nothing raises `FileNotFoundError` naming both paths. The PHA files are left as they are.
+**IXPE responses from the installed ixpeobssim.** ixpeobssim writes its own CALDB path into the `RESPFILE`/`ANCRFILE` of the PHA files it bins, so a PHA names the CALDB of whichever ixpeobssim binned it (here a human environment's, or a pip --user install since removed, in which case XSPEC loads the spectrum with no response). A toolkit call runs in its package's environment, so its responses are that environment's: for each IXPE source spectrum (XSPEC uses the source's response for its background), `load_data` and `red_ixpe.HR` read both names through `xspec_help.assign_responses`, and an absolute name under an `ixpeobssim/caldb/` tree is read at the same relative path inside the installed ixpeobssim's CALDB (`ixpeobssim.IXPEOBSSIM_CALDB`, `xspec_help.resolve_response`), whether or not the named file exists. Each file read in place of the header's is assigned to the spectrum and named in a printed `Response: <file> <key>: <path inside the CALDB>` line, under one line naming the installed CALDB root. The installed file named under another spelling of its path (a symlinked mount) is kept as named. A file the installed CALDB lacks raises `FileNotFoundError` naming both paths. The PHA files are left as they are.
 
 ---
 
@@ -650,7 +650,7 @@ under `figures`. `plot_fit` appends `.png` to a name without it; `plot_iqu` drop
 from IXPE Stokes spectra; the catalog's record of those files stays as it is.
 
 `group_pha` reads its input's `RESPFILE` and `ANCRFILE` through `resolve_response`, writes the
-files it finds into the copy's header, and names each one read from the installed ixpeobssim in
+files it reads into the copy's header, and names each one read in place of the header's in
 stdout. It raises on a spectrum whose `RESPFILE` is `none` (the NICER spectra here) or names a
 response found nowhere.
 
@@ -682,3 +682,13 @@ Instrumental background rejection follows the method described in [Di Marco et a
   `xspec_help.assign_responses` gives it to a loaded spectrum (`load_data`'s IXPE path,
   `red_ixpe._sum_counts`/`HR`) and returns a `Response:` line each caller prints; `group_pha`
   reads it and writes it into the copy. Obs-db files are left as they are. Tests in `tests/test_outputs.py`.
+- 2026-11-04 — Every response under an `ixpeobssim/caldb/` tree is read from the installed
+  ixpeobssim's CALDB, not only a missing one (a call's responses belong to its environment's
+  fingerprint); `Response:` lines name only files read in place of the header's.
+  `red_ixpe._sum_counts` summed spectra `1 .. n-1` and left out the last one loaded, so
+  `red_ixpe.HR`'s soft and hard rates (and the hardness ratio and its error) left out the last
+  spectrum of its file list (DU3's for a DU1-DU3 list); it now sums all `n`. It also summed
+  `Spectrum.rate[1]`, the net rate's standard deviation (PyXspec's docstring calls it a variance;
+  it equals the `STAT_ERR` sum in quadrature), as a variance, so `HR`'s rate errors (and the
+  hardness-ratio error) were too large (on 02008201, 2-8 keV: about 4 times); they now add in
+  quadrature. `HR` is not a manifest tool, so no runtime receipt carries the old values.

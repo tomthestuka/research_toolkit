@@ -354,17 +354,18 @@ def _sum_counts(obs, src_pha_file_list, bkg_pha_file_list, e_bin: tuple[float, f
                     AllData(spec_cnt).background = bkg_pha
                     resolved += xspec_help.assign_responses(spec_cnt, src_pha)
     if resolved:
-        print('Headers name responses under an ixpeobssim install that is gone; read from '
-              'the installed ixpeobssim:\n' + '\n'.join(resolved))
+        print(xspec_help.responses_used(resolved))
 
     # obtain overall rate and error
     AllData.ignore(f"**-{e_bin[0]}  {e_bin[1]}-**")
     rate, var = 0.0, 0.0
-    for i in range(1, spec_cnt):
+    for i in range(1, spec_cnt + 1):
         spec = AllData(i)
-        this_rate, this_var, *_ = spec.rate
+        # Spectrum.rate[1] is the net rate's standard deviation (it equals the STAT_ERR sum in
+        # quadrature; PyXspec's docstring calls it a variance), so it adds in quadrature.
+        this_rate, this_err, *_ = spec.rate
         rate += this_rate
-        var += this_var
+        var += this_err ** 2
 
     err = var**0.5
 

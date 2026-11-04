@@ -8,6 +8,7 @@ observation database, which stays read-only) and returns every file a report may
 from __future__ import annotations
 
 import hashlib
+import os
 import runpy
 from pathlib import Path
 
@@ -20,7 +21,7 @@ from xspec_utils.skills import session
 
 BOOT = Path(__file__).resolve().parents[2] / "envs" / "xspec" / "boot.py"
 IXPE_ROOT = Path("/data/fzhou/XSPEC/Cyg_X-1/IXPE")
-IXPE_OBS = "01002901"  # its PHA headers name responses of an installed ixpeobssim
+IXPE_OBS = "01002901"  # its PHA headers name responses of the human astropy environment's ixpeobssim
 NUSTAR = Path("/data/fzhou/XSPEC/Cyg_X-1/NuSTAR/30702017002/products")
 SPECTRUM = NUSTAR / "nu30702017002A01_sr_grp.pha"  # RESPFILE absolute; ANCRFILE, BACKFILE relative
 EDGES = [4.0, 10.0, 20.0, 50.0]
@@ -91,6 +92,17 @@ def test_a_response_under_a_removed_ixpeobssim_is_read_from_the_installed_one(tm
     assert not Path(GONE_RMF).exists()
     installed = Path(ixpeobssim.IXPEOBSSIM_CALDB) / "ixpe/gpd/cpf/rmf/ixpe_d1_obssim_alpha075_v012.rmf"
     assert xspec_help.resolve_response(GONE_RMF) == str(installed)
+    # A name under another ixpeobssim CALDB is read from the installed one even when it exists.
+    other = tmp_path / "env" / "ixpeobssim" / "caldb" / "ixpe/gpd/cpf/rmf/ixpe_d1_obssim_alpha075_v012.rmf"
+    other.parent.mkdir(parents=True)
+    other.write_bytes(b"")
+    assert xspec_help.resolve_response(str(other)) == str(installed)
+    assert xspec_help.resolve_response(str(installed)) == str(installed)
+    alias = os.path.realpath(installed)  # the installed file under another spelling: kept as named
+    assert xspec_help.resolve_response(alias) == alias
+    assert xspec_help.resolve_response(GONE_RMF.replace("caldb/", "caldb//")) == str(installed)
+    for kept in ("none", "", "resp.rmf", str(NUSTAR / "nu30702017002A01_sr.rmf")):
+        assert xspec_help.resolve_response(kept) == kept
     missing = GONE_RMF.replace("v012", "v999")
     with pytest.raises(FileNotFoundError) as excinfo:
         xspec_help.resolve_response(missing)
@@ -108,7 +120,8 @@ def test_a_response_under_a_removed_ixpeobssim_is_read_from_the_installed_one(tm
 
     result = xspec_help.group_pha(str(infile), str(out / "grouped.pha"), [2.0, 4.0, 8.0])
     assert fits.getheader(out / "grouped.pha", "SPECTRUM")["RESPFILE"] == str(installed)
-    assert GONE_RMF in result["stdout"] and str(installed) in result["stdout"]
+    assert "src.pha RESPFILE: ixpe/gpd/cpf/rmf/ixpe_d1_obssim_alpha075_v012.rmf" in result["stdout"]
+    assert ixpeobssim.IXPEOBSSIM_CALDB in result["stdout"]
     assert fits.getheader(infile, "SPECTRUM")["RESPFILE"] == GONE_RMF
 
 
@@ -189,19 +202,19 @@ def test_fit_tbfeo_hss_returns_its_log(nustar_session, out):
     assert sorted(p.name for p in out.iterdir()) == ["fit_tbfeo_hss.log"]
 
 
-def _ixpe_responses_readable() -> bool:
-    pha = sorted((IXPE_ROOT / IXPE_OBS / "event_l2").glob("*_src_pha1*.fits"))
-    names = [fits.getheader(p, "SPECTRUM").get(k) for p in pha for k in ("RESPFILE", "ANCRFILE")]
-    return bool(names) and all(Path(n).is_file() for n in names)
-
-
 @pytest.mark.slow
-def test_plot_iqu_returns_one_figure_per_du(xspec_session, out):
-    if not _ixpe_responses_readable():
-        pytest.skip(f"the responses {IXPE_OBS}'s PHA headers name are not readable here")
-    from xspec import Model
+def test_plot_iqu_returns_one_figure_per_du(xspec_session, out, capsys):
+    import ixpeobssim
+    from xspec import AllData, Model
 
     indices = xspec_help.load_data({"IXPE": [IXPE_OBS], "STATE": "test"}, str(IXPE_ROOT))
+    # Responses that exist where the headers name them are read from the installed CALDB too.
+    pha = IXPE_ROOT / IXPE_OBS / "event_l2"
+    named = fits.getheader(next(pha.glob("*_det1_*_src_pha1.fits")), "SPECTRUM")["RESPFILE"]
+    assert Path(named).is_file(), f"fixture precondition: {named}, which {IXPE_OBS}'s header names, is gone"
+    assert not named.startswith(ixpeobssim.IXPEOBSSIM_CALDB)
+    assert AllData(1).response.rmf.startswith(ixpeobssim.IXPEOBSSIM_CALDB)
+    assert capsys.readouterr().out.count("Response: ") == 18
     Model("polconst*powerlaw")
     session.run_fit(n_iterations=10)
     result = session.plot_iqu(indices, save_path_prefix=str(out / "iqu.png"))
@@ -231,7 +244,7 @@ def test_load_data_reads_ixpe_responses_from_the_installed_ixpeobssim(xspec_sess
             assert response.rmf.startswith(caldb) and Path(response.rmf).is_file()
             assert response.arf.startswith(caldb) and Path(response.arf).is_file()
     assert printed.count("Response: ") == 18  # RESPFILE and ANCRFILE of 9 spectra
-    assert f"{pha.name} RESPFILE: {AllData(1).response.rmf}" in printed
+    assert f"{pha.name} RESPFILE: {Path(AllData(1).response.rmf).relative_to(caldb)}" in printed
 
 
 @pytest.mark.slow
@@ -245,12 +258,24 @@ def test_sum_counts_reads_ixpe_responses_from_the_installed_ixpeobssim(xspec_ses
     folder = IXPE_ROOT / obs / "event_l2"
     src = [str(p) for p in sorted(folder.glob(f"ixpe{obs}_det*_evt2_v01_rej_src_pha1.fits"))]
     bkg = [str(p) for p in sorted(folder.glob(f"ixpe{obs}_det*_evt2_v01_rej_bkg_pha1.fits"))]
-    red_ixpe._sum_counts(obs, src, bkg, (2.0, 8.0))
+    rate, err = red_ixpe._sum_counts(obs, src, bkg, (2.0, 8.0))
     printed = capsys.readouterr().out
     assert AllData.nSpectra == 3
     for index in (1, 2, 3):
         assert AllData(index).response.rmf.startswith(ixpeobssim.IXPEOBSSIM_CALDB)
     assert printed.count("Response: ") == 6
+    # Every loaded spectrum counts, the last one too.
+    assert rate == pytest.approx(sum(AllData(index).rate[0] for index in (1, 2, 3)), rel=1e-12)
+    # The error from the files themselves: each noticed channel's STAT_ERR, source plus background
+    # scaled by BACKSCAL, added in quadrature over the three spectra.
+    variance = 0.0
+    for index, (s, b) in enumerate(zip(src, bkg), start=1):
+        rows = np.asarray(AllData(index).noticed) - 1  # 1-based channel numbers
+        with fits.open(s) as hs, fits.open(b) as hb:
+            scale = hs["SPECTRUM"].header["BACKSCAL"] / hb["SPECTRUM"].header["BACKSCAL"]
+            variance += (hs["SPECTRUM"].data["STAT_ERR"][rows] ** 2).sum()
+            variance += scale ** 2 * (hb["SPECTRUM"].data["STAT_ERR"][rows] ** 2).sum()
+    assert err == pytest.approx(variance ** 0.5, rel=1e-6)
 
 
 @pytest.mark.slow

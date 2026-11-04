@@ -12,35 +12,50 @@ _IXPEOBSSIM_CALDB = '/ixpeobssim/caldb/'
 def resolve_response(name: str) -> str:
     """The response file a spectrum header names, as this environment reads it.
 
-    A name that exists, is empty or is ``none`` is returned as written. An
-    absolute name that does not exist and lies under an ``ixpeobssim/caldb/``
-    tree (ixpeobssim writes its own CALDB path into the PHA files it bins) is
-    read inside the installed ixpeobssim's CALDB
-    (``ixpeobssim.IXPEOBSSIM_CALDB``) at the same relative path; when that file
-    is absent too, :class:`FileNotFoundError` names both paths. Any other
-    missing name is returned as written, for the reader to fail on.
+    An absolute name under an ``ixpeobssim/caldb/`` tree (ixpeobssim writes its
+    own CALDB path into the PHA files it bins) is read inside the installed
+    ixpeobssim's CALDB (``ixpeobssim.IXPEOBSSIM_CALDB``) at the same relative
+    path, whether or not the named file exists: a toolkit call runs in its
+    package's environment, so its responses are that environment's. When the
+    installed CALDB lacks the file, :class:`FileNotFoundError` names both
+    paths. Any other name (empty, ``none``, relative, or outside such a tree)
+    is returned as written.
     """
     name = str(name).strip()
-    if (not name or name.lower() == 'none' or os.path.isfile(name) or not os.path.isabs(name)
-            or _IXPEOBSSIM_CALDB not in name):
+    if not os.path.isabs(name) or _IXPEOBSSIM_CALDB not in os.path.normpath(name) + '/':
         return name
     import ixpeobssim
 
-    installed = os.path.join(ixpeobssim.IXPEOBSSIM_CALDB, name.rsplit(_IXPEOBSSIM_CALDB, 1)[1])
+    relative = (os.path.normpath(name) + '/').rsplit(_IXPEOBSSIM_CALDB, 1)[1].rstrip('/')
+    installed = os.path.join(ixpeobssim.IXPEOBSSIM_CALDB, relative)
     if not os.path.isfile(installed):
         raise FileNotFoundError(
-            f'{name} does not exist, and neither does {installed} in the installed ixpeobssim')
+            f'{installed} does not exist: the installed ixpeobssim has no copy of {name}')
+    if os.path.realpath(installed) == os.path.realpath(name):
+        return name  # the installed file, under another spelling of its path
     return installed
+
+
+def responses_used(lines: list[str]) -> str:
+    """The text naming the responses :func:`assign_responses` read from the installed CALDB in
+    place of the headers' (its root once, then one line per file); empty when there are none."""
+    if not lines:
+        return ''
+    import ixpeobssim
+
+    return (f'Responses read from the installed ixpeobssim CALDB {ixpeobssim.IXPEOBSSIM_CALDB} '
+            'in place of the files the headers name:\n' + '\n'.join(lines))
 
 
 def assign_responses(spec_index: int, pha: str) -> list[str]:
     """Give XSPEC spectrum *spec_index*, loaded from *pha*, the RESPFILE and
     ANCRFILE its header names as :func:`resolve_response` reads them.
 
-    XSPEC loads a spectrum whose header names a missing response with none, so
-    a resolved name is assigned here (the ARF again after a new RMF). Returns
-    one ``Response:`` line per name read elsewhere than its header says, for
-    the caller to print; empty when the header's names are used as written.
+    A resolved name that differs from the header's is assigned here (the ARF
+    again after a new RMF; XSPEC loads a spectrum whose header names a missing
+    response with none). Returns one ``Response:`` line per name read
+    elsewhere than its header says, for the caller to print; empty when the
+    header's names are used as written.
     """
     header = fits.getheader(pha, 'SPECTRUM')
     named = {k: str(header.get(k, '')).strip() for k in ('RESPFILE', 'ANCRFILE')}
@@ -51,7 +66,10 @@ def assign_responses(spec_index: int, pha: str) -> list[str]:
         AllData(spec_index).response = found['RESPFILE']
     if found['ANCRFILE'] and found['ANCRFILE'].lower() != 'none':
         AllData(spec_index).response.arf = found['ANCRFILE']
-    return [f'Response: {os.path.basename(pha)} {k}: {found[k]}' for k in named if found[k] != named[k]]
+    import ixpeobssim
+
+    return [f'Response: {os.path.basename(pha)} {k}: {os.path.relpath(found[k], ixpeobssim.IXPEOBSSIM_CALDB)}'
+            for k in named if found[k] != named[k]]
 
 
 def load_data(
@@ -304,8 +322,7 @@ def load_data(
             result['IXPE'] = {obs: ixpe_obs_result}
 
     if resolved:
-        print('Headers name responses under an ixpeobssim install that is gone; read from '
-              'the installed ixpeobssim:\n' + '\n'.join(resolved))
+        print(responses_used(resolved))
     return result
 
 
@@ -542,8 +559,8 @@ def group_pha(infile, outfile, e_edges):
     RESPFILE, ANCRFILE or BACKFILE name that resolves next to infile (the
     rule this function reads the RMF by) is written as that absolute path,
     because XSPEC reads a relative name against its working directory, so
-    the copy loads from any working folder.  A response under a removed
-    ixpeobssim install is read, and written into the copy, as
+    the copy loads from any working folder.  A response under an
+    ixpeobssim CALDB is read, and written into the copy, as
     :func:`resolve_response` finds it; stdout names each such file.
 
     Parameters
@@ -599,8 +616,11 @@ def group_pha(infile, outfile, e_edges):
             if name and not os.path.isabs(name) and os.path.isfile(os.path.join(in_dir, name)):
                 header[key] = os.path.join(in_dir, name)
             elif key != 'BACKFILE' and (found := resolve_response(name)) != name:
+                import ixpeobssim
+
                 header[key] = found
-                notes.append(f' {key}: {name} is absent; used {found}.')
+                notes.append(f'Response: {os.path.basename(infile)} {key}: '
+                             f'{os.path.relpath(found, ixpeobssim.IXPEOBSSIM_CALDB)}')
         hdul.writeto(outfile, overwrite=True)
     edges = [float(e) for e in e_edges]
     return {
@@ -608,7 +628,8 @@ def group_pha(infile, outfile, e_edges):
             'path': str(outfile),
             'caption': f'{os.path.basename(infile)} grouped at bin edges {edges} keV',
         }],
-        'stdout': f'Wrote {outfile}: {infile} grouped with bin edges {edges} keV.' + ''.join(notes),
+        'stdout': '\n'.join(filter(None, [
+            f'Wrote {outfile}: {infile} grouped with bin edges {edges} keV.', responses_used(notes)])),
         'exit_code': 0,
     }
 
