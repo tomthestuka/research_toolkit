@@ -485,7 +485,11 @@ def group_pha(infile, outfile, e_edges):
 
     Reads the RMF path from the PHA RESPFILE header, maps e_edges to
     channel indices via the RMF EBOUNDS extension, and writes the result
-    to outfile.  Load outfile into XSPEC instead of infile.
+    to outfile.  Load outfile into XSPEC instead of infile.  A relative
+    RESPFILE, ANCRFILE or BACKFILE name that resolves next to infile (the
+    rule this function reads the RMF by) is written as that absolute path,
+    because XSPEC reads a relative name against its working directory, so
+    the copy loads from any working folder.
 
     Parameters
     ----------
@@ -503,11 +507,18 @@ def group_pha(infile, outfile, e_edges):
     >>> q_grp = q_src.replace('.fits', '_grp.fits')
     >>> xspec_help.group_pha(q_src, q_grp, e_bins)
     >>> AllData(f'{grp}:{idx} {q_grp}')
+
+    Returns
+    -------
+    dict
+        ``{'products': [{'path', 'caption'}], 'stdout', 'exit_code'}``: the
+        grouped file, for a caller that receipts what a tool writes.
     """
+    in_dir = os.path.dirname(os.path.abspath(infile))
     with fits.open(infile) as hdul:
         rmf = hdul['SPECTRUM'].header['RESPFILE']
         if not os.path.isabs(rmf):
-            rmf = os.path.join(os.path.dirname(os.path.abspath(infile)), rmf)
+            rmf = os.path.join(in_dir, rmf)
         with fits.open(rmf) as rmf_hdul:
             e_lo = rmf_hdul['EBOUNDS'].data['E_MIN'].astype(float)
             e_hi = rmf_hdul['EBOUNDS'].data['E_MAX'].astype(float)
@@ -526,7 +537,21 @@ def group_pha(infile, outfile, e_edges):
             new_hdu = fits.BinTableHDU.from_columns(
                 spec.columns + fits.ColDefs([new_col]), header=spec.header)
             hdul['SPECTRUM'] = new_hdu
+        header = hdul['SPECTRUM'].header
+        for key in ('RESPFILE', 'ANCRFILE', 'BACKFILE'):
+            name = str(header.get(key, '')).strip()
+            if name and not os.path.isabs(name) and os.path.isfile(os.path.join(in_dir, name)):
+                header[key] = os.path.join(in_dir, name)
         hdul.writeto(outfile, overwrite=True)
+    edges = [float(e) for e in e_edges]
+    return {
+        'products': [{
+            'path': str(outfile),
+            'caption': f'{os.path.basename(infile)} grouped at bin edges {edges} keV',
+        }],
+        'stdout': f'Wrote {outfile}: {infile} grouped with bin edges {edges} keV.',
+        'exit_code': 0,
+    }
 
 
 def rebin_plot(spec_idx, e_edges, plot_type='ufspec'):
@@ -830,7 +855,7 @@ def fit_tbfeo_plabs_polconst_diskbb_polconst_relxillCp(
     audit_data: bool = True,
     log_path: str | None = None,
     chatter_level: int = 10,
-) -> None:
+) -> dict:
     """Define and fit the model ``constant * tbfeo * plabs * (polconst*diskbb + polconst*relxillCp)``.
 
     Sets up the model, assigns initial parameter values, performs the fit, and
@@ -861,6 +886,13 @@ def fit_tbfeo_plabs_polconst_diskbb_polconst_relxillCp(
     chatter_level : int
         XSPEC chatter level used for the logged model/fit summary
         (default 10).  Restored to 5 afterwards.
+
+    Returns
+    -------
+    dict
+        ``{'fit_stat', 'dof', 'stdout', 'exit_code'}``, plus
+        ``'products': [{'path', 'caption'}]`` naming the log when *log_path*
+        is given, for a caller that receipts what a tool writes.
     """
     if audit_data:
         if log_path is not None:
@@ -931,7 +963,8 @@ def fit_tbfeo_plabs_polconst_diskbb_polconst_relxillCp(
 
     AllModels.show()
     Fit.perform()
-    print(f"Fit statistic: {Fit.statistic}, dof: {Fit.dof}")
+    stat, dof = Fit.statistic, Fit.dof
+    print(f"Fit statistic: {stat}, dof: {dof}")
 
     Xset.chatter = chatter_level
     try:
@@ -950,6 +983,21 @@ def fit_tbfeo_plabs_polconst_diskbb_polconst_relxillCp(
         with open(log_path, 'w') as f:
             f.write(_audit_buf.getvalue())
             f.write(xspec_content)
+
+    result = {
+        'stdout': f'Fit statistic: {stat}, dof: {dof}',
+        'fit_stat': stat,
+        'dof': dof,
+        'exit_code': 0,
+    }
+    if log_path is not None:
+        result['stdout'] += f'; model and fit summary in {log_path}'
+        result['products'] = [{
+            'path': str(log_path),
+            'caption': ('Fit log of constant*tbfeo*plabs*(polconst*diskbb + '
+                        'polconst*relxillCp): model and fit summary'),
+        }]
+    return result
 
 
 def inspect_epoch(

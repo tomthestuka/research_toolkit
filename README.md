@@ -24,9 +24,26 @@ validator enforces before a call runs:
   an optional one declares its `default`, which the runtime passes and records;
 - `path`: a file or folder path;
 - `setting`: text, a flag, an option, an identifier or an operational number (a timeout, an
-  iteration count).
+  iteration count);
+- `output`: where the tool writes what it produces. It names a `shape` (`folder`, `file` or
+  `prefix`) and, for a file or prefix, may name a `default` file name; the runtime places it in
+  the call's own folder.
 
 A manifest with a property lacking a kind is refused at launch and at the authoring gate.
+
+## What a tool writes
+
+Every file a tool writes is one of three kinds:
+
+- **a science artifact** (anything that depends on a `parameter` or on a setting outside the
+  mission team's defaults): written under an `output` argument and returned under `products`
+  (`{"path", "caption"}`) or, for a PNG, `figures`; the runtime receipts exactly what is returned;
+- **an obs-db item** (raw archive data and the mission team's standard reductions with their
+  recommended settings): written into the observation database and recorded through
+  `obsdb_catalog.neutral`, never returned under `products`;
+- **scratch** (a program's own bookkeeping): anywhere else, recorded and checked by nothing.
+
+The authoring gate checks artifacts and obs-db items on what the tests call.
 
 ## Software environments
 
@@ -39,3 +56,8 @@ definition lives at `envs/<id>/` (`env.yaml`, `env.lock`, optional `env.pip`, `a
 `conftest.py` defines the test classes: unmarked tests are fast and deterministic; `slow` ones run
 on real data (`pytest -m "not slow"` skips them); `live` ones reach the network and run only with
 `--live` or `TOOLKIT_LIVE=1`.
+
+## Changelog
+
+- 2026-11-04 — Argument kind `output` (with `shape` and `default`) and the three kinds of file a
+  tool writes; `xspec_utils` migrated (its README).

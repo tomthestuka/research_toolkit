@@ -392,11 +392,13 @@ Extracts XSPEC plot data for one spectrum and rebins to coarser energy edges usi
 
 #### `xspec_help.group_pha(infile, outfile, e_edges)`
 
-Writes a grouped copy of a PHA file with custom energy bin edges derived from the file's own RMF EBOUNDS. Load `outfile` into XSPEC instead of `infile` when coarser binning is needed.
+Writes a grouped copy of a PHA file with custom energy bin edges derived from the file's own RMF EBOUNDS. Load `outfile` into XSPEC instead of `infile` when coarser binning is needed. A relative `RESPFILE`, `ANCRFILE` or `BACKFILE` name that resolves next to `infile` is written as that absolute path: XSPEC reads a relative name against its working directory, so the copy then loads from any folder.
 
 ```python
-group_pha(infile: str, outfile: str, e_edges: sequence[float]) -> None
+group_pha(infile: str, outfile: str, e_edges: sequence[float]) -> dict
 ```
+
+Returns `{'products': [{'path': outfile, 'caption': ...}], 'stdout', 'exit_code'}`.
 
 Example:
 ```python
@@ -624,6 +626,33 @@ Any subset of the instrument keys may be present; the loader silently skips abse
 
 In principle this catalogue is superseded by the on-the-fly centroiding in `find_src.py`, but `find_src` has not been tested on IXPE event files and `src_pos` remains the operational source for IXPE reductions.
 
+## AI tool interface: what each tool writes
+
+`skills/__init__.py` (`TOOL_MANIFEST`) is what `auto_research` reads. A file a tool writes is a
+science artifact, an obs-db item or scratch. The files the xspec_utils tools below write are
+artifacts: each goes under an argument of kind `output`, which names its `shape` (`file` or
+`prefix` here) and a `default` file name, and the runtime places it in the call's own folder. The
+tool returns each file a report may cite under `products` (`{"path", "caption"}`) or, for a PNG,
+under `figures`. `plot_fit` appends `.png` to a name without it; `plot_iqu` drops a trailing
+`.png` from its prefix.
+
+| Tool | Output argument | Default name | Returned |
+|---|---|---|---|
+| `group_pha` | `outfile` (file) | `grouped.pha` | `products`: the grouped PHA |
+| `fit_tbfeo_hss` | `log_path` (file) | `fit_tbfeo_hss.log` | `products`: the fit log; `fit_stat`, `dof` |
+| `run_fit` | `log_path` (file) | `run_fit.log` | `products`: the fit log; `fit_stat`, `dof`, `stat_per_dof` |
+| `plot_fit` | `save_path` (file) | `fit.png` | `figures`: one PNG |
+| `plot_iqu` | `save_path_prefix` (prefix) | `iqu` | `figures`: `<prefix>_DU<n>.png` per DU |
+
+`load_data` tags NICER and NuSTAR spectra in place (`XFLT0001 = 'Stokes:0'`) so XSPEC tells them
+from IXPE Stokes spectra; the catalog's record of those files stays as it is.
+
+`group_pha` reads the RMF its input's `RESPFILE` names, so it raises on a spectrum whose
+`RESPFILE` is `none` (the NICER spectra here) or names a response that is not installed.
+
+Tests (`tests/test_outputs.py`) write under a folder of their own (`tmp_path / "out"`) and read the
+observation database only.
+
 ## IXPE background filtering
 
 Instrumental background rejection follows the method described in [Di Marco et al. (IXPE background)](https://github.com/aledimarco/IXPE-background). The script `filter_inst_bkg_IXPE.sh` applies `filter_background.py` from that repository to all observations.
@@ -634,3 +663,13 @@ Instrumental background rejection follows the method described in [Di Marco et a
 - `src_pos.py` stores manually determined IXPE source coordinates. In principle this should be depreciated and be replaced by `find_src.py`, but I haven't tested it on IXPE event files. For NuSTAR, centroids are computed on-the-fly by `find_src.py`.
 - IXPE Stokes Q and U PHA files are derived from the I file path by replacing `pha1` with `pha1q`/`pha1u`.
 - NuSTAR background loading is disabled by default (`nustar_use_bkg=False`) because clean background regions are often unavailable for bright sources like Cyg X-1.
+
+## Changelog
+
+- 2026-11-04 — Output arguments (auto_research plan B5). `group_pha.outfile`, `run_fit.log_path`,
+  `fit_tbfeo_hss.log_path`, `plot_fit.save_path` and `plot_iqu.save_path_prefix` declare kind
+  `output` with a `shape` and a default file name. `group_pha` and the fit log writers return their
+  files under `products`; `group_pha` writes relative response, ARF and background names as
+  absolute paths; `run_fit`'s stdout carries the returned values as returned; `plot_fit` appends
+  `.png` to a name without it and `plot_iqu` drops a trailing `.png` from its prefix. New
+  `tests/test_outputs.py`.

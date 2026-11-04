@@ -106,7 +106,8 @@ TOOL_MANIFEST: dict = {
         "description": (
             "Define and fit constant*tbfeo*plabs*(polconst*diskbb + polconst*relxillCp) "
             "for Cyg X-1 HSS with polarized absorption. "
-            "Pass indices from load_data."
+            "Pass indices from load_data. Returns fit_stat and dof, and the fit log "
+            "(the full model and fit summary) as a product."
         ),
         "args_schema": {
             "type": "object",
@@ -117,7 +118,16 @@ TOOL_MANIFEST: dict = {
                     "additionalProperties": True,
                     "description": "The indices dict load_data returned, passed by reference to that result.",
                 },
-                "log_path": {"kind": "path", "type": "string"},
+                "log_path": {
+                    "kind": "output",
+                    "shape": "file",
+                    "default": "fit_tbfeo_hss.log",
+                    "type": "string",
+                    "description": (
+                        "The fit log: the loaded files and count rates (with audit_data), then "
+                        "the XSPEC model and fit summary (AllModels.show, Fit.show)."
+                    ),
+                },
                 "audit_data": {"kind": "setting", "type": "boolean", "description": "Audit loaded data before fitting. Default true."},
             },
             "required": ["indices"],
@@ -131,7 +141,7 @@ TOOL_MANIFEST: dict = {
         "description": (
             "Run XSPEC Fit.perform() to refine convergence after fit_tbfeo_hss. "
             "Call multiple times until stat/dof stabilises. "
-            "Returns dict with fit_stat, dof, stat_per_dof."
+            "Returns dict with fit_stat, dof, stat_per_dof, and the fit log as a product."
         ),
         "args_schema": {
             "type": "object",
@@ -142,9 +152,11 @@ TOOL_MANIFEST: dict = {
                     "description": "XSPEC Fit.nIterations. Default 100.",
                 },
                 "log_path": {
-                    "kind": "path",
+                    "kind": "output",
+                    "shape": "file",
+                    "default": "run_fit.log",
                     "type": "string",
-                    "description": "Write verbose XSPEC fit output to this file path.",
+                    "description": "The fit log: XSPEC's verbose output of Fit.perform().",
                 },
             },
             "required": [],
@@ -182,9 +194,11 @@ TOOL_MANIFEST: dict = {
                     "description": "The indices dict load_data returned, passed by reference to that result.",
                 },
                 "save_path": {
-                    "kind": "path",
+                    "kind": "output",
+                    "shape": "file",
+                    "default": "fit.png",
                     "type": "string",
-                    "description": "Full output PNG path. Auto-generated if omitted.",
+                    "description": "The PNG the panel is written to; '.png' is appended when the name lacks it.",
                 },
                 "title": {"kind": "setting", "type": "string"},
                 "plot_type": {
@@ -239,9 +253,11 @@ TOOL_MANIFEST: dict = {
                     "default": [2.0, 3.0, 4.0, 5.0, 6.0, 8.0],
                 },
                 "save_path_prefix": {
-                    "kind": "path",
+                    "kind": "output",
+                    "shape": "prefix",
+                    "default": "iqu",
                     "type": "string",
-                    "description": "Base path; '_DU1.png', '_DU2.png', etc. appended per DU.",
+                    "description": "The PNGs' name prefix; '_DU1.png', '_DU2.png', etc. are appended per DU.",
                 },
                 "title_prefix": {
                     "kind": "setting",
@@ -260,13 +276,22 @@ TOOL_MANIFEST: dict = {
         "description": (
             "Write a grouped copy of a PHA file with custom energy bin edges "
             "derived from the file's own RMF EBOUNDS. No XSPEC required. "
-            "Load outfile into XSPEC instead of infile when coarser binning is needed."
+            "Load outfile into XSPEC instead of infile when coarser binning is needed. "
+            "Returns the grouped file as a product; a relative RESPFILE, ANCRFILE or "
+            "BACKFILE name that resolves next to infile is written as that absolute path, so "
+            "the copy loads from any working folder."
         ),
         "args_schema": {
             "type": "object",
             "properties": {
                 "infile": {"kind": "path", "type": "string", "description": "Input PHA file path."},
-                "outfile": {"kind": "path", "type": "string", "description": "Output grouped PHA file path."},
+                "outfile": {
+                    "kind": "output",
+                    "shape": "file",
+                    "default": "grouped.pha",
+                    "type": "string",
+                    "description": "The grouped PHA file.",
+                },
                 "e_edges": {
                     "kind": "parameter",
                     "type": "array",
@@ -274,7 +299,7 @@ TOOL_MANIFEST: dict = {
                     "description": "Bin edges in keV, e.g. [2.0,3.0,4.0,5.0,6.0,8.0]. This argument is named 'e_edges' — not 'bin_edges' or 'edges'.",
                 },
             },
-            "required": ["infile", "outfile", "e_edges"],
+            "required": ["infile", "e_edges"],
         },
     },
 }

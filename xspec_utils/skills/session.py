@@ -40,7 +40,8 @@ def run_fit(n_iterations: int = 100, log_path: str | None = None) -> dict:
 
     Returns
     -------
-    dict with fit_stat, dof, stat_per_dof, stdout, exit_code.
+    dict with fit_stat, dof, stat_per_dof, stdout, exit_code, and products
+    naming the log when log_path is given.
     """
     if log_path:
         Xset.openLog(log_path)
@@ -53,13 +54,18 @@ def run_fit(n_iterations: int = 100, log_path: str | None = None) -> dict:
 
     dof = Fit.dof
     stat = Fit.statistic
-    return {
-        "stdout": f"Fit complete: stat={stat:.4f} dof={dof} stat/dof={stat/dof:.4f}",
+    per_dof = stat / dof if dof > 0 else None
+    result = {
+        "stdout": f"Fit complete: stat={stat} dof={dof} stat/dof={per_dof}",
         "fit_stat": stat,
         "dof": dof,
-        "stat_per_dof": stat / dof if dof > 0 else None,
+        "stat_per_dof": per_dof,
         "exit_code": 0,
     }
+    if log_path:
+        result["stdout"] += f"; fit log in {log_path}"
+        result["products"] = [{"path": str(log_path), "caption": "XSPEC Fit.perform() log"}]
+    return result
 
 
 def xspec_status() -> dict:
@@ -134,7 +140,8 @@ def plot_fit(
     indices : dict
         Return value of load_data.
     save_path : str or None
-        Full output PNG path. Auto-generated timestamped file if None.
+        Full output PNG path ('.png' appended when missing). Auto-generated
+        timestamped file if None.
     title : str or None
         Figure suptitle.
     plot_type : str
@@ -174,6 +181,8 @@ def plot_fit(
     if save_path is None:
         ts = _time.strftime("%Y%m%dT%H%M%S")
         save_path = os.path.join(os.getcwd(), f"fit_{ts}.png")
+    if not save_path.lower().endswith(".png"):
+        save_path += ".png"  # matplotlib picks the format from the extension
     os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
 
     fig, _axes = xspec_help.inspect_fit(
@@ -249,6 +258,8 @@ def plot_iqu(
     if save_path_prefix is None:
         ts = _time.strftime("%Y%m%dT%H%M%S")
         save_path_prefix = os.path.join(os.getcwd(), f"iqu_{ts}")
+    if save_path_prefix.lower().endswith(".png"):
+        save_path_prefix = save_path_prefix[:-4]
     os.makedirs(os.path.dirname(os.path.abspath(save_path_prefix)), exist_ok=True)
 
     du_figs = xspec_help.plot_iqu_decomp(iqu_groups, _e_bins, title_prefix=_title_prefix)
