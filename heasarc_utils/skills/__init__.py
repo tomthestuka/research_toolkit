@@ -68,7 +68,9 @@ TOOL_MANIFEST = {
                     "type": "string",
                     "description": (
                         "The obs-db root: one folder per mission, named as HEASARC names it "
-                        "(ixpe, nicer, nustar)."
+                        "(ixpe, nicer, nustar), each laid out as HEASARC's archive tree. A new, "
+                        "empty folder becomes one on the first acquire; a mission folder laid out "
+                        "flat (<mission>/<obsid>/) is refused."
                     ),
                 },
                 "host": {

@@ -49,7 +49,9 @@ Two facts the live run pinned down (don't "fix" them back):
   `nustar/data/obs/07/3/30702017002/`). Every astroquery host unpacks an observation as
   `<location>/<obsid>/` (the archive's tar is ObsID-rooted; the SciServer and S3 copies take the
   link's last folder), so `acquire_obsid` downloads with `location = <obs_db_root>/<mission>/<tree>`
-  and nothing is moved. A link naming an archive folder other than the mission is refused.
+  and nothing is moved. A link naming an archive folder other than the mission is refused, and so
+  is a mission folder laid out flat (`<mission>/<obsid>/`, the human's copy): one with a top-level
+  folder named by digits, or a catalog record whose path starts with its ObsID.
 
 ## Interfaces / Usage
 
@@ -195,3 +197,5 @@ gzip handling were pinned by a live NICER `acquire` run on 2026-06-17 (see
   Manifest: `obs_db_root` (kind `path`) replaces `obs_db_path`. Tests: an acquire into an empty
   root creates HEASARC's tree and a healthy catalog, per mission; a link naming another archive
   folder is refused.
+- 2026-11-04 — A flat mission folder (`<mission>/<obsid>/`) is refused as an acquire target, the
+  refusal naming both layouts (ruling: the obs-db is HEASARC's tree only).

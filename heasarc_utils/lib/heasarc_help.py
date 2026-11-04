@@ -45,6 +45,28 @@ def _locked_copy_on_disk(obs_db_path: str, obsid: str) -> str | None:
     return None
 
 
+def _flat_layout(obs_db_path: str) -> str | None:
+    """A sign that a mission folder is laid out flat (``<mission>/<obsid>/``, the human's copy
+    before obs-dbs cloned HEASARC's tree), as a path relative to it: a top-level folder named by
+    digits alone (the ObsIDs here are; a HEASARC tree's top level holds ``data/``), or a catalog
+    record whose path starts with its own ObsID. ``None`` for a HEASARC-tree or new folder."""
+    if os.path.isdir(obs_db_path):
+        digits = sorted(d for d in os.listdir(obs_db_path)
+                        if d.isdigit() and os.path.isdir(os.path.join(obs_db_path, d)))
+        if digits:
+            return digits[0] + "/"
+    try:
+        entries = neutral.read(obs_db_path).get("entries") or {}
+    except neutral.CatalogError:
+        return None
+    for key, entry in entries.items():
+        for product in (entry or {}).get("products") or []:
+            path = str((product or {}).get("path") or "")
+            if path.split("/", 1)[0] == str(key):
+                return path
+    return None
+
+
 def acquire(obsid: str, mission: str, obs_db_root: str,
             *, host: str | None = None, chatter: bool = False,
             timeout_s: float = 1800.0) -> dict:
@@ -99,8 +121,11 @@ def acquire(obsid: str, mission: str, obs_db_root: str,
     Raises
     ------
     heasarc.HeasarcError
-        Unknown mission, ObsID not found, or the download did not yield the
-        expected level-2 file. Nothing is recorded on failure.
+        Unknown mission, ObsID not found, the download did not yield the
+        expected level-2 file, ``obs_db_root`` is itself a mission folder, or
+        the mission folder is laid out flat (``<mission>/<obsid>/``, the
+        human's copy; the obs-db is HEASARC's tree only). Nothing is recorded
+        on failure.
     """
     from obsdb_catalog.locate import locate, mission_dir
 
@@ -112,6 +137,15 @@ def acquire(obsid: str, mission: str, obs_db_root: str,
             f"{obs_db_root} is a mission folder; pass the obs-db root that holds the mission "
             f"folders (its parent), so the data lands in <root>/{mission}/")
     obs_db_path = str(mission_dir(obs_db_root, mission))
+    flat = _flat_layout(obs_db_path)
+    if flat is not None:
+        from obsdb_catalog import _domain
+
+        tree = _domain.TREES.get(mission, ("<tree>/{obsid}",))[0].format(obsid="<obsid>")
+        raise heasarc.HeasarcError(
+            f"{obs_db_path} is laid out flat (<obsid>/ at its top, e.g. {flat}); acquire writes "
+            f"HEASARC's archive tree only ({mission}/{tree}/). Pass an obs-db root laid out as "
+            f"HEASARC's archive; a new, empty folder becomes one on the first acquire")
 
     locked_rel = _locked_copy_on_disk(obs_db_path, obsid)
     if locked_rel is not None:

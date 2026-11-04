@@ -510,3 +510,37 @@ def test_the_archives_own_message_names_an_obsid_without_data(tmp_path):
     two = {"access_url": [_url("ixpe", "01002901"), _url("ixpe", "01002901", tree="data/obs/02")]}
     with pytest.raises(heasarc.HeasarcError, match="2 places"):
         heasarc.archive_path(two, "01002901")
+
+
+def test_a_flat_root_is_refused_naming_both_layouts(tmp_path, monkeypatch):
+    """The obs-db is HEASARC's tree only; a flat <mission>/<obsid>/ folder is the human's copy."""
+    obsid = OBSID["ixpe"]
+    flat = f"{obsid}/event_l2/ixpe{obsid}_det1_evt2_v01.fits"
+    _write(os.path.join(tmp_path, "ixpe", flat))
+    neutral.new(tmp_path / "ixpe", "ixpe", obsid, products=[
+        {"kind": "level2_evt", "path": flat, "produced_by": "heasarc", "params": {}}])
+    downloads = []
+    monkeypatch.setattr(heasarc, "_heasarc", lambda: _fake("ixpe", obsid))
+    monkeypatch.setattr(heasarc, "download", lambda *a, **k: downloads.append(a))
+    for target in (obsid, "02008201"):  # this ObsID's flat folder, or another's
+        with pytest.raises(heasarc.HeasarcError, match="laid out flat") as excinfo:
+            acquire(target, "ixpe", str(tmp_path))
+        assert "<obsid>/ at its top" in str(excinfo.value) and "ixpe/data/obs/*/<obsid>/" in str(excinfo.value)
+
+    # flat with no catalog: the ObsID folders alone say so
+    bare = tmp_path / "bare"
+    _write(os.path.join(bare, "nustar", "80902318002", "event_cl", "a.evt"))
+    with pytest.raises(heasarc.HeasarcError, match="laid out flat"):
+        acquire(OBSID["nustar"], "nustar", str(bare))
+    assert downloads == []
+
+
+def test_a_heasarc_tree_with_root_level_records_is_accepted(tmp_path, monkeypatch):
+    obsid = OBSID["ixpe"]
+    folder = tmp_path / "ixpe"
+    _write(os.path.join(folder, "survey.csv"))
+    neutral.advance(folder, "ixpe", "02008201", level=3, products=[
+        {"kind": "hardness_ratio", "path": "survey.csv", "produced_by": "x", "params": {}}])
+    monkeypatch.setattr(heasarc, "_heasarc", lambda: _fake("ixpe", obsid))
+    summary = acquire(obsid, "ixpe", str(tmp_path))
+    assert summary["obsid_dir"] == str(folder / TREE["ixpe"] / obsid)
