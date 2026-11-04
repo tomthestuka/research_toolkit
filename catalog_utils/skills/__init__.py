@@ -44,6 +44,7 @@ TOOL_MANIFEST = {
             ),
             "properties": {
                 "obs_db_path": {
+                    "kind": "path",
                     "type": "string",
                     "description": (
                         "Directory holding one observatory's data, e.g. "
@@ -52,6 +53,7 @@ TOOL_MANIFEST = {
                     ),
                 },
                 "min_level": {
+                    "kind": "setting",
                     "type": "integer",
                     "description": (
                         "Only list ObsIDs at or above this processing level. A locked "

@@ -14,6 +14,20 @@ Orientation and conventions for coding agents: see [CLAUDE.md](CLAUDE.md). Each 
 - [`obsdb_catalog/`](obsdb_catalog/README.md) — the single trusted writer for per-mission
   `catalog.json` (provenance/inventory). *(support package; not an LLM tool)*
 
+## Argument kinds
+
+Every `args_schema` property in a `TOOL_MANIFEST` declares a `kind`, which `auto_research`'s input
+validator enforces before a call runs:
+
+- `data`: a scientific artifact another tool returned, passed by reference to that result;
+- `parameter`: a number that changes the science, passed by reference or typed with its reason;
+  an optional one declares its `default`, which the runtime passes and records;
+- `path`: a file or folder path;
+- `setting`: text, a flag, an option, an identifier or an operational number (a timeout, an
+  iteration count).
+
+A manifest with a property lacking a kind is refused at launch and at the authoring gate.
+
 ## Software environments
 
 A package names the environment its tools run in, in its `tool_config.yaml` (`env: <id>`); the

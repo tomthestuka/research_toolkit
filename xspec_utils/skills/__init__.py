@@ -45,6 +45,7 @@ TOOL_MANIFEST: dict = {
             "type": "object",
             "properties": {
                 "epoch": {
+                    "kind": "setting",
                     "type": "object",
                     "additionalProperties": True,
                     "description": (
@@ -58,6 +59,7 @@ TOOL_MANIFEST: dict = {
                     ),
                 },
                 "ixpe_path": {
+                    "kind": "path",
                     "type": "string",
                     "description": (
                         "Directory containing IXPE observation sub-directories, "
@@ -65,6 +67,7 @@ TOOL_MANIFEST: dict = {
                     ),
                 },
                 "nicer_path": {
+                    "kind": "path",
                     "type": "string",
                     "description": (
                         "NICER data directory, e.g. '/data/fzhou/XSPEC/Cyg_X-1/NICER'. "
@@ -72,6 +75,7 @@ TOOL_MANIFEST: dict = {
                     ),
                 },
                 "nustar_path": {
+                    "kind": "path",
                     "type": "string",
                     "description": (
                         "NuSTAR data directory, e.g. '/data/fzhou/XSPEC/Cyg_X-1/NuSTAR'. "
@@ -79,12 +83,14 @@ TOOL_MANIFEST: dict = {
                     ),
                 },
                 "clear_existing": {
+                    "kind": "setting",
                     "type": "boolean",
                     "description": (
                         "Call AllData.clear() + AllModels.clear() before loading. Default true."
                     ),
                 },
                 "chatter": {
+                    "kind": "setting",
                     "type": "boolean",
                     "description": "Print file paths and loading summaries. Default false.",
                 },
@@ -106,12 +112,13 @@ TOOL_MANIFEST: dict = {
             "type": "object",
             "properties": {
                 "indices": {
+                    "kind": "data",
                     "type": "object",
                     "additionalProperties": True,
-                    "description": "Return value of load_data — pass the object directly, do NOT JSON-encode it.",
+                    "description": "The indices dict load_data returned, passed by reference to that result.",
                 },
-                "log_path": {"type": "string"},
-                "audit_data": {"type": "boolean", "description": "Audit loaded data before fitting. Default true."},
+                "log_path": {"kind": "path", "type": "string"},
+                "audit_data": {"kind": "setting", "type": "boolean", "description": "Audit loaded data before fitting. Default true."},
             },
             "required": ["indices"],
         },
@@ -130,10 +137,12 @@ TOOL_MANIFEST: dict = {
             "type": "object",
             "properties": {
                 "n_iterations": {
+                    "kind": "setting",
                     "type": "integer",
                     "description": "XSPEC Fit.nIterations. Default 100.",
                 },
                 "log_path": {
+                    "kind": "path",
                     "type": "string",
                     "description": "Write verbose XSPEC fit output to this file path.",
                 },
@@ -167,28 +176,33 @@ TOOL_MANIFEST: dict = {
             "type": "object",
             "properties": {
                 "indices": {
+                    "kind": "data",
                     "type": "object",
                     "additionalProperties": True,
-                    "description": "Return value of load_data — pass the object directly, do NOT JSON-encode it.",
+                    "description": "The indices dict load_data returned, passed by reference to that result.",
                 },
                 "save_path": {
+                    "kind": "path",
                     "type": "string",
                     "description": "Full output PNG path. Auto-generated if omitted.",
                 },
-                "title": {"type": "string"},
+                "title": {"kind": "setting", "type": "string"},
                 "plot_type": {
+                    "kind": "setting",
                     "type": "string",
                     "description": "'ufspec' or 'data'. Default 'ufspec'.",
                 },
                 "residuals": {
+                    "kind": "setting",
                     "type": "array",
                     "items": {"type": "string"},
                     "description": "Residual types, e.g. [\"delchi\"]. Default ['delchi'].",
                 },
                 "xlim": {
+                    "kind": "setting",
                     "type": "array",
                     "items": {"type": "number"},
-                    "description": "[xmin, xmax] in keV, e.g. [1, 79].",
+                    "description": "[xmin, xmax] in keV, e.g. [1, 79]. Default: the full range of the data.",
                 },
             },
             "required": ["indices"],
@@ -209,23 +223,28 @@ TOOL_MANIFEST: dict = {
             "type": "object",
             "properties": {
                 "indices": {
+                    "kind": "data",
                     "type": "object",
                     "additionalProperties": True,
                     "description": (
-                        "Return value of load_data (must contain 'IXPE') — pass the object "
-                        "directly, do NOT JSON-encode it."
+                        "The indices dict load_data returned (it contains 'IXPE'), passed by "
+                        "reference to that result."
                     ),
                 },
                 "e_bins": {
+                    "kind": "parameter",
                     "type": "array",
                     "items": {"type": "number"},
                     "description": "Energy bin edges in keV. Default [2,3,4,5,6,8].",
+                    "default": [2.0, 3.0, 4.0, 5.0, 6.0, 8.0],
                 },
                 "save_path_prefix": {
+                    "kind": "path",
                     "type": "string",
                     "description": "Base path; '_DU1.png', '_DU2.png', etc. appended per DU.",
                 },
                 "title_prefix": {
+                    "kind": "setting",
                     "type": "string",
                     "description": "Prepended to each figure suptitle.",
                 },
@@ -246,9 +265,10 @@ TOOL_MANIFEST: dict = {
         "args_schema": {
             "type": "object",
             "properties": {
-                "infile": {"type": "string", "description": "Input PHA file path."},
-                "outfile": {"type": "string", "description": "Output grouped PHA file path."},
+                "infile": {"kind": "path", "type": "string", "description": "Input PHA file path."},
+                "outfile": {"kind": "path", "type": "string", "description": "Output grouped PHA file path."},
                 "e_edges": {
+                    "kind": "parameter",
                     "type": "array",
                     "items": {"type": "number"},
                     "description": "Bin edges in keV, e.g. [2.0,3.0,4.0,5.0,6.0,8.0]. This argument is named 'e_edges' — not 'bin_edges' or 'edges'.",

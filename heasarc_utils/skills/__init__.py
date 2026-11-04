@@ -45,6 +45,7 @@ TOOL_MANIFEST = {
             ),
             "properties": {
                 "obsid": {
+                    "kind": "setting",
                     "type": "string",
                     "description": (
                         "Observation ID in the mission's native format, e.g. "
@@ -53,11 +54,13 @@ TOOL_MANIFEST = {
                     ),
                 },
                 "mission": {
+                    "kind": "setting",
                     "type": "string",
                     "enum": ["ixpe", "nicer", "nustar"],
                     "description": "Mission name (lowercase).",
                 },
                 "obs_db_path": {
+                    "kind": "path",
                     "type": "string",
                     "description": (
                         "The mission's obs-db directory, e.g. "
@@ -67,6 +70,7 @@ TOOL_MANIFEST = {
                     ),
                 },
                 "host": {
+                    "kind": "setting",
                     "type": "string",
                     "enum": ["heasarc", "sciserver", "aws"],
                     "description": (
@@ -75,6 +79,7 @@ TOOL_MANIFEST = {
                     ),
                 },
                 "timeout_s": {
+                    "kind": "setting",
                     "type": "number",
                     "description": (
                         "HTTP transfer timeout in seconds for the archive download. "
