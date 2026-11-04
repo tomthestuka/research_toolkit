@@ -487,7 +487,7 @@ def pha(
 ) -> tuple[list[str], list[str]]
 ```
 
-Same `changes` toggle as `pcube`. When `changes=True`, runs `xpselect` + `xpbin PHA1` with IRF name `ixpe:obssim{irf_date}_alpha075:v13`. The spectra are a standard reduction, so they are observation-database items: they are written beside the level-2 inputs (`<obs_db_path>/<obsid>/event_l2/`) and every Stokes I source and background spectrum is recorded through `obsdb_catalog.neutral.advance` (kind `pha`, level 3; `params`: `du`, `stokes`, `filter`, `calibration_version`, the radii, position and response set; Q/U follow each I file's name). The database root is read from that layout, checked before anything is written: an input outside it (a working copy such as `<obsid>_picorr/`) raises `ValueError`, and so does `overwrite=False`, under which ixpeobssim keeps an existing spectrum the record would then misdescribe. One source and one background PHA1 file is produced per detector unit (DU1, DU2, DU3). The Q and U files are derived from the I paths by `red_ixpe.get_pha_q` / `red_ixpe.get_pha_u`.
+Same `changes` toggle as `pcube`. When `changes=True`, runs `xpselect` + `xpbin PHA1` with IRF name `ixpe:obssim{irf_date}_alpha075:v13`. The spectra are a standard reduction, so they are observation-database items: they are written beside the level-2 inputs (`<obsid folder>/event_l2/`, the folder `obsdb_catalog.locate` finds) and every Stokes I source and background spectrum is recorded through `obsdb_catalog.neutral.advance` (kind `pha`, level 3; `params`: `du`, `stokes`, `filter`, `calibration_version`, the radii, position and response set; Q/U follow each I file's name). The database root is read from that layout, checked before anything is written: an input outside it (a working copy such as `<obsid>_picorr/`) raises `ValueError`, and so does `overwrite=False`, under which ixpeobssim keeps an existing spectrum the record would then misdescribe. One source and one background PHA1 file is produced per detector unit (DU1, DU2, DU3). The Q and U files are derived from the I paths by `red_ixpe.get_pha_q` / `red_ixpe.get_pha_u`.
 
 **Returns** `(src_pha_list, bkg_pha_list)` — each a list of three paths ordered DU1, DU2, DU3.
 
@@ -715,3 +715,14 @@ Instrumental background rejection follows the method described in [Di Marco et a
   set (obs-db items), and refuses an input outside the obs-db layout or `overwrite=False` before
   writing; `find_src.run_extraction(evt_path, outdir, ...)` and its CLI (`--outdir`, required)
   write `src.reg`, `bkg.reg` and `verify.png` into a folder of their own and return them.
+- 2026-11-04 — Readers find an observation through `obsdb_catalog.locate`, so an obs-db laid out
+  as HEASARC's archive (`<root>/<mission>/data/obs/.../<obsid>/`) or flat both work: `NICER.pha/
+  rmf/arf` and `NuSTAR.pha/rmf/arf` (via `_obs_dir`), `red_ixpe.get_all_file_list` (via
+  `obsdb_catalog._domain.obsid_dirs`), and `red_ixpe.pha`'s catalog record (the ObsID folder must
+  be the one `locate` finds below the nearest `ixpe` folder; paths relative to that mission
+  folder). `load_data` reads through these. Tests: `tests/test_obsdb_layout.py`; the `pha` test's
+  fixture is laid out as HEASARC's archive.
+- 2026-11-04 — The batch shell scripts (`IXPE/filter_inst_bkg_IXPE.sh`, `NICER/nicer_red.sh`,
+  `NuSTAR/nustar_red.sh`, `NuSTAR/nustar_grp.sh`) still loop over flat `<obsid>/` folders in the
+  current directory (the NuSTAR ones under `/data/fzhou/XSPEC/Cyg_X-1/NuSTAR`): they work on a
+  flat obs-db only, and in a HEASARC-tree mission folder they find no ObsID and do nothing.

@@ -7,6 +7,8 @@ constant reduction params) lives here. This module is plain standard library
 
 The conventions mirror the live bootstrapped catalogs:
 
+Each ObsID's folder is found by :data:`TREES` (HEASARC's archive tree, or flat ``<obsid>/``):
+
 * **IXPE** ``<obsid>/event_l2/`` — one representative ``det1`` entry per product
   kind. ``level2_evt`` (``produced_by:"heasarc"``), ``pha``
   (``produced_by:"filter_inst_bkg_IXPE.sh"``). A PCUBE depends on a chosen
@@ -34,6 +36,31 @@ import os
 import re
 
 from .neutral import is_locked, split_lock
+
+#: Where an ObsID's folder sits below a mission folder (``<obs_db_root>/<mission>/``), as glob
+#: patterns on ``{obsid}``: HEASARC's archive tree as served — the path after ``/FTP/<mission>/`` in
+#: the ``access_url`` its master table's ``locate_data`` returns (checked 2026-11-04:
+#: ``ixpe/data/obs/01/01002901/``, ``nicer/data/obs/2022_02/4690010101/``,
+#: ``nustar/data/obs/07/3/30702017002/``, ``chandra/data/byobsid/4/3814/``) — then the flat
+#: ``<obsid>/`` of obs-dbs built before. A mission absent here is read flat. The mission folder
+#: is HEASARC's own name for the mission, matched case-insensitively (``mission_from_path``).
+TREES: dict[str, tuple[str, ...]] = {
+    "ixpe": ("data/obs/*/{obsid}", "{obsid}"),
+    "nicer": ("data/obs/*/{obsid}", "{obsid}"),
+    "nustar": ("data/obs/*/*/{obsid}", "{obsid}"),
+    "chandra": ("data/byobsid/*/{obsid}",),
+}
+
+
+def obsid_dirs(mission: str, obs_db_path: str) -> list[str]:
+    """Every folder under a mission folder that sits where an ObsID's folder would (:data:`TREES`);
+    a scanner keeps those holding its mission's subfolders. The folder name is the ObsID."""
+    found: set[str] = set()
+    for pattern in TREES.get(mission.lower(), ("{obsid}",)):
+        found.update(d for d in glob.glob(os.path.join(obs_db_path, pattern.format(obsid="*")))
+                     if os.path.isdir(d))
+    return sorted(found)
+
 
 #: Marker stamped into a param whose value cannot be re-derived during repair.
 UNRECOVERABLE = "repaired session, unrecoverable"
@@ -97,8 +124,11 @@ def scan(mission: str, obs_db_path: str) -> dict[str, list[dict]]:
 
 def _scan_nicer(obs_db_path: str) -> dict[str, list[dict]]:
     out: dict[str, list[dict]] = {}
-    for evt_cl in sorted(glob.glob(os.path.join(obs_db_path, "*", "xti", "event_cl"))):
-        obsid = evt_cl.split(os.sep)[-3]
+    for obs_dir in obsid_dirs("nicer", obs_db_path):
+        evt_cl = os.path.join(obs_dir, "xti", "event_cl")
+        if not os.path.isdir(evt_cl):
+            continue
+        obsid = os.path.basename(obs_dir)
         products = []
         # level-2 cleaned event (archive; gzipped on download, gunzipped by reduction).
         l2 = _prefer(glob.glob(os.path.join(evt_cl, "*mpu7_cl.evt*")))
@@ -132,11 +162,8 @@ def _scan_nicer(obs_db_path: str) -> dict[str, list[dict]]:
 def _scan_nustar(obs_db_path: str) -> dict[str, list[dict]]:
     out: dict[str, list[dict]] = {}
     # A downloaded ObsID has event_cl (level-2); a reduced one also has products/ (level-3).
-    obsids: set[str] = set()
-    for d in glob.glob(os.path.join(obs_db_path, "*", "event_cl")):
-        obsids.add(d.split(os.sep)[-2])
-    for d in glob.glob(os.path.join(obs_db_path, "*", "products")):
-        obsids.add(d.split(os.sep)[-2])
+    folders = {os.path.basename(d): d for d in obsid_dirs("nustar", obs_db_path)
+               if os.path.isdir(os.path.join(d, "event_cl")) or os.path.isdir(os.path.join(d, "products"))}
 
     # kind suffix, glob, produced_by, extra params (besides fpm) for level-3 products
     specs = [
@@ -145,11 +172,11 @@ def _scan_nustar(obs_db_path: str) -> dict[str, list[dict]]:
         ("arf", "*{fpm}01_sr.arf", "nustar_red.sh", {}),
         ("rmf", "*{fpm}01_sr.rmf", "nustar_red.sh", {}),
     ]
-    for obsid in sorted(obsids):
+    for obsid in sorted(folders):
         products = []
         # level-2 cleaned events: representative FPMA, from the archive download.
         l2 = _prefer(glob.glob(
-            os.path.join(obs_db_path, obsid, "event_cl", f"nu{obsid}A01_cl.evt*")
+            os.path.join(folders[obsid], "event_cl", f"nu{obsid}A01_cl.evt*")
         ))
         if l2:
             products.append({
@@ -159,7 +186,7 @@ def _scan_nustar(obs_db_path: str) -> dict[str, list[dict]]:
                 "params": {"fpm": "A", "note": _NUSTAR_NOTE},
             })
         # level-3 reduction products, per FPM.
-        prod_dir = os.path.join(obs_db_path, obsid, "products")
+        prod_dir = os.path.join(folders[obsid], "products")
         for fpm in ("A", "B"):
             for kind, pat, produced_by, extra in specs:
                 for full in sorted(glob.glob(os.path.join(prod_dir, pat.format(fpm=fpm)))):
@@ -188,8 +215,11 @@ _IXPE_NOTE = "det1 listed; det2/det3 follow same naming pattern"
 
 def _scan_ixpe(obs_db_path: str) -> dict[str, list[dict]]:
     out: dict[str, list[dict]] = {}
-    for evt_l2 in sorted(glob.glob(os.path.join(obs_db_path, "*", "event_l2"))):
-        obsid = evt_l2.split(os.sep)[-2]
+    for obs_dir in obsid_dirs("ixpe", obs_db_path):
+        evt_l2 = os.path.join(obs_dir, "event_l2")
+        if not os.path.isdir(evt_l2):
+            continue
+        obsid = os.path.basename(obs_dir)
         # Anchored on this directory's ObsID, mirroring heasarc._ixpe_level2: the
         # directory name *is* the ObsID, so a file carrying a different one is a
         # human working copy (``<obsid>_bad_gpg``, ``<obsid>_picorr``) rather than

@@ -13,6 +13,8 @@ Layers:
 * :mod:`obsdb_catalog.repair` — deliberate recovery (restore + reconcile). May
   use mission layout knowledge; persists through ``neutral``'s primitive.
 * :mod:`obsdb_catalog.healthcheck` — detect-only drift report; never writes.
+* :mod:`obsdb_catalog.locate` — where an ObsID's folder is (``locate(obs_db_root, mission,
+  obsid)``), the resolver every obs-db reader goes through; read-only.
 
 This package is intentionally *not* an LLM tool: no ``skills/``, no
 ``TOOL_MANIFEST``, no CLI, and not ``*_utils``-named (so it is invisible to the
@@ -21,6 +23,7 @@ data-producing libraries, never a model action.
 """
 
 from . import neutral
+from .locate import locate, mission_dir
 from .neutral import CatalogError, advance, new, read
 
-__all__ = ["neutral", "read", "new", "advance", "CatalogError"]
+__all__ = ["neutral", "read", "new", "advance", "CatalogError", "locate", "mission_dir"]

@@ -45,10 +45,15 @@ def _locked_copy_on_disk(obs_db_path: str, obsid: str) -> str | None:
     return None
 
 
-def acquire(obsid: str, mission: str, obs_db_path: str,
+def acquire(obsid: str, mission: str, obs_db_root: str,
             *, host: str | None = None, chatter: bool = False,
             timeout_s: float = 1800.0) -> dict:
-    """Acquire archive data for ``obsid`` into ``obs_db_path`` and record it.
+    """Acquire archive data for ``obsid`` under ``obs_db_root`` and record it.
+
+    The local copy clones HEASARC's archive: the data lands at
+    ``<obs_db_root>/<mission>/<HEASARC's tree>/<obsid>/`` (e.g.
+    ``ixpe/data/obs/01/01002901/``) and is recorded in ``<obs_db_root>/<mission>/catalog.json``;
+    the first acquire of a mission creates both.
 
     Resolves the ObsID authoritatively via the mission's HEASARC master table,
     downloads it (astroquery only — no fallback), confirms the representative
@@ -71,8 +76,8 @@ def acquire(obsid: str, mission: str, obs_db_path: str,
         Observation ID (mission-native format, e.g. ``"01002901"`` for IXPE).
     mission : str
         ``"ixpe"`` | ``"nicer"`` | ``"nustar"`` (or any registered mission).
-    obs_db_path : str
-        The mission's obs-db directory; data lands at ``<obs_db_path>/<obsid>/``.
+    obs_db_root : str
+        The obs-db root holding one folder per mission, named as HEASARC names it.
     host : str, optional
         astroquery download host (``"heasarc"`` | ``"sciserver"`` | ``"aws"``).
         Default lets astroquery choose based on the environment.
@@ -85,8 +90,8 @@ def acquire(obsid: str, mission: str, obs_db_path: str,
     Returns
     -------
     dict
-        ``{"obsid", "mission", "level2_evt": <relative path>, "catalog_entry",
-        "downloaded": bool, "locked": bool}``. ``locked`` is true when the
+        ``{"obsid", "mission", "mission_dir", "obsid_dir", "level2_evt": <path relative to
+        mission_dir>, "catalog_entry", "downloaded": bool, "locked": bool}``. ``locked`` is true when the
         level-2 product on disk is GPG-encrypted and therefore not directly
         usable; a skipped re-download additionally carries ``"public_date_mjd"``,
         ``"days_until_public"`` and a human-readable ``"note"``.
@@ -97,7 +102,16 @@ def acquire(obsid: str, mission: str, obs_db_path: str,
         Unknown mission, ObsID not found, or the download did not yield the
         expected level-2 file. Nothing is recorded on failure.
     """
+    from obsdb_catalog.locate import locate, mission_dir
+
     mission = mission.lower()
+    root = os.path.abspath(obs_db_root)
+    if os.path.isfile(os.path.join(root, neutral.CATALOG_NAME)) or \
+            os.path.basename(root).lower() in heasarc.MISSIONS:
+        raise heasarc.HeasarcError(
+            f"{obs_db_root} is a mission folder; pass the obs-db root that holds the mission "
+            f"folders (its parent), so the data lands in <root>/{mission}/")
+    obs_db_path = str(mission_dir(obs_db_root, mission))
 
     locked_rel = _locked_copy_on_disk(obs_db_path, obsid)
     if locked_rel is not None:
@@ -117,6 +131,8 @@ def acquire(obsid: str, mission: str, obs_db_path: str,
             return {
                 "obsid": obsid,
                 "mission": mission,
+                "mission_dir": obs_db_path,
+                "obsid_dir": str(locate(obs_db_root, mission, obsid)),
                 "level2_evt": locked_rel,
                 "catalog_entry": neutral.read(obs_db_path)["entries"].get(str(obsid)),
                 "downloaded": False,
@@ -126,8 +142,8 @@ def acquire(obsid: str, mission: str, obs_db_path: str,
                 "note": note,
             }
 
-    product = heasarc.acquire_obsid(mission, obsid, obs_db_path,
-                                    host=host, timeout_s=timeout_s)
+    obs_db_path, obs_dir, product = heasarc.acquire_obsid(mission, obsid, obs_db_root,
+                                                          host=host, timeout_s=timeout_s)
     locked = neutral.is_locked(product["path"])
     if chatter:
         print(f"[heasarc_utils] {mission} {obsid}: recording {product['path']}"
@@ -136,6 +152,8 @@ def acquire(obsid: str, mission: str, obs_db_path: str,
     summary = {
         "obsid": obsid,
         "mission": mission,
+        "mission_dir": obs_db_path,
+        "obsid_dir": obs_dir,
         "level2_evt": product["path"],
         "catalog_entry": entry,
         "downloaded": True,

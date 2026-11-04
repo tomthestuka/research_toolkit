@@ -7,6 +7,7 @@ convenience for a person (or a maintenance script) to run the catalog operations
     python -m obsdb_catalog healthcheck <obs_db_path>   # detect-only; exits 1 on drift
     python -m obsdb_catalog repair      <obs_db_path>    # recover+reconcile ONE mission (writes)
     python -m obsdb_catalog repair_all  <root>           # repair EVERY mission under a root (writes)
+    python -m obsdb_catalog locate      <root> <mission> <obsid>   # print the ObsID's folder
 
 ``obs_db_path`` is one mission's directory (``<root>/<MISSION>``); ``root`` is the parent
 that holds the mission subdirectories. ``repair``/``repair_all`` write the catalog and are the
@@ -25,6 +26,7 @@ import json
 import sys
 
 from .healthcheck import healthcheck
+from .locate import locate
 from .repair import repair, repair_all
 
 
@@ -44,7 +46,20 @@ def main(argv: list[str] | None = None) -> int:
     p_all = sub.add_parser("repair_all", help="repair EVERY mission catalog under a root (writes)")
     p_all.add_argument("root", help="parent directory holding the mission subdirectories")
 
+    p_loc = sub.add_parser("locate", help="print the folder holding one ObsID's data (no writes)")
+    p_loc.add_argument("root", help="parent directory holding the mission subdirectories")
+    p_loc.add_argument("mission", help="the mission, as HEASARC names it (ixpe, nicer, nustar)")
+    p_loc.add_argument("obsid")
+
     args = parser.parse_args(argv)
+
+    if args.command == "locate":
+        try:
+            print(locate(args.root, args.mission, args.obsid))
+        except (FileNotFoundError, LookupError) as exc:
+            print(exc, file=sys.stderr)
+            return 1
+        return 0
 
     if args.command == "healthcheck":
         result = healthcheck(args.obs_db_path)

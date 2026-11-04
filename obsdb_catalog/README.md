@@ -59,6 +59,25 @@ the next re-reduction), and the dropped `max_level` is what flags them stale to
 readers. `levels_present = [1..max_level]`. A product is recorded only after its
 file is confirmed on disk; product `path` is relative to `obs_db_path`.
 
+## Where an observation is
+
+An obs-db root holds one folder per mission, named as HEASARC names the mission (`ixpe`,
+`nicer`, `nustar`; matched case-insensitively), and below it each ObsID's folder where HEASARC's
+archive keeps it (`ixpe/data/obs/01/01002901/`). `_domain.TREES` holds each mission's tree rule
+(HEASARC's tree, then the flat `<obsid>/` of earlier obs-dbs); the scanners enumerate ObsID
+folders through it (`_domain.obsid_dirs`). Every reader finds an ObsID with
+
+```python
+from obsdb_catalog import locate
+locate(obs_db_root, mission, obsid)   # -> Path of the ObsID's folder
+```
+
+which takes the catalog's record first (the folder a recorded product lies in, up to the path
+part that is the ObsID) and the tree rule otherwise (`*` stands for what the ObsID does not give,
+e.g. NICER's month folder); it raises `FileNotFoundError` naming where it looked, and
+`LookupError` for an ObsID found twice. `mission_dir(obs_db_root, mission)` gives the mission
+folder. Product paths stay relative to the mission folder.
+
 ## Maintenance
 
 ```python
@@ -100,6 +119,7 @@ Or from the command line (the same three operations, for a human/operator):
 ```bash
 python -m obsdb_catalog healthcheck <obs_db_path>   # detect-only; exits 1 on drift
 python -m obsdb_catalog repair      <obs_db_path>   # recover+reconcile ONE mission (writes)
+python -m obsdb_catalog locate      <root> <mission> <obsid>   # print the ObsID's folder
 python -m obsdb_catalog repair_all  <root>          # repair EVERY mission under a root (writes)
 ```
 
@@ -153,3 +173,7 @@ python3 -m pytest obsdb_catalog/tests/
   `rej_src`/`src` filter is now chosen from the `pha1` files only, so a `_rej_src_pcube` beside
   `_src_pha1` spectra no longer hides them (6 live IXPE ObsIDs, whose rows the catalog already
   holds). Test: `tests/test_repair.py::test_a_pcube_on_disk_is_not_catalogued`.
+- 2026-11-04 — **HEASARC's archive tree.** `_domain.TREES` (HEASARC's tree per mission, checked
+  against the archive's `access_url`s, then the flat layout) and `_domain.obsid_dirs`, which the
+  scanners now enumerate through; new `obsdb_catalog.locate` (`locate`, `mission_dir`), exported
+  from the package, and a `locate` CLI command. Tests: `tests/test_locate.py`.

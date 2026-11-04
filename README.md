@@ -45,6 +45,15 @@ Every file a tool writes is one of three kinds:
 
 The authoring gate checks artifacts and obs-db items on what the tests call.
 
+## Observation databases
+
+An obs-db root holds one folder per mission, named as HEASARC names it (`ixpe`, `nicer`,
+`nustar`), each with its `catalog.json`; below it every ObsID sits where HEASARC's archive keeps it
+(`ixpe/data/obs/01/01002901/`). `heasarc_utils.acquire(obsid, mission, obs_db_root)` writes that
+tree; the Python readers find an ObsID with `obsdb_catalog.locate(obs_db_root, mission, obsid)`
+(listing ObsIDs through `obsdb_catalog._domain.obsid_dirs`). The `xspec_utils` batch shell scripts
+still read a flat `<obsid>/` layout.
+
 ## Software environments
 
 A package names the environment its tools run in, in its `tool_config.yaml` (`env: <id>`); the
@@ -61,3 +70,5 @@ on real data (`pytest -m "not slow"` skips them); `live` ones reach the network 
 
 - 2026-11-04 — Argument kind `output` (with `shape` and `default`) and the three kinds of file a
   tool writes; `xspec_utils` migrated (its README).
+- 2026-11-04 — Observation databases clone HEASARC's archive layout (`acquire(obs_db_root)`,
+  `obsdb_catalog.locate`).

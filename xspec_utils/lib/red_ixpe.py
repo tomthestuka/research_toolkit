@@ -9,7 +9,8 @@ import ixpeobssim.core.pipeline as pipeline
 from ixpeobssim.binning.polarization import xBinnedPolarizationCube
 from contextlib import redirect_stdout, redirect_stderr
 from xspec import AllData, Spectrum, AllModels
-from obsdb_catalog import neutral
+from obsdb_catalog import _domain, neutral
+from obsdb_catalog.locate import locate
 
 def get_all_file_list(ixpe_path: str, chatter=False) -> list[str]:
     """
@@ -22,12 +23,11 @@ def get_all_file_list(ixpe_path: str, chatter=False) -> list[str]:
         Path to the directory containing IXPE observation files.
     """
     file_list = []
-    obs_list = [d.name for d in Path(ixpe_path).iterdir() if d.is_dir() and d.name[0].isdigit()]
-    for obs in obs_list:
-        obs_dir = Path(ixpe_path) / obs
-        if not obs_dir.is_dir():
-            warnings.warn(f'Observation directory not found for obs: {obs} at path: {obs_dir}. Skipping this observation.')
-            continue
+    # Every ObsID folder, where the obs-db keeps it (HEASARC's archive tree, or flat).
+    obs_dirs = [Path(d) for d in _domain.obsid_dirs('ixpe', ixpe_path) if Path(d).name[0].isdigit()]
+    obs_list = [d.name for d in obs_dirs]
+    for obs_dir in obs_dirs:
+        obs = obs_dir.name
         for fits_file in sorted(glob.glob(f"{obs_dir}/event_l2/*evt2_v[0-9][0-9]_rej.fits", recursive=True)):
             file_list.append(fits_file)
         
@@ -242,7 +242,7 @@ def pha(obs: str,
 
     The Stokes I/Q/U spectra are a standard reduction, so they are
     observation-database items: with changes=True they are written beside the
-    level-2 inputs (``<obs_db_path>/<obsid>/event_l2/``, checked before anything
+    level-2 inputs (``<obsid folder>/event_l2/``, the folder ``obsdb_catalog.locate`` finds, checked before anything
     is written) and every Stokes I source and background spectrum is recorded
     through ``obsdb_catalog.neutral.advance`` (kind ``pha``) with the radii,
     position and response set in ``params``. changes=True needs overwrite=True.
@@ -351,17 +351,29 @@ _EVT2 = re.compile(r'_det[123]_evt2_v\d+(?:_rej)?\.fits$')
 
 
 def _obs_db_of(obs: str, obs_file_list: list[str]) -> Path:
-    """The observation database the level-2 inputs lie in, read from the IXPE layout
-    ``<obs_db_path>/<obs>/event_l2/ixpe<obs>_det<n>_evt2_v<NN>[_rej].fits``; raises
-    ``ValueError`` for an input outside it (a working copy such as ``<obs>_picorr/``), before
+    """The IXPE mission folder of the observation database the level-2 inputs lie in: every input
+    is ``<obs folder>/event_l2/ixpe<obs>_det<n>_evt2_v<NN>[_rej].fits``, its ObsID folder is the
+    one ``obsdb_catalog.locate`` finds below the nearest folder named ``ixpe`` (any case). Raises
+    ``ValueError`` for an input outside that (a working copy such as ``<obs>_picorr/``), before
     anything is written."""
+    obs_dirs = set()
     for f in obs_file_list:
         path = Path(f)
         if path.parent.name != 'event_l2' or path.parent.parent.name != obs or not _EVT2.search(path.name):
-            raise ValueError(f'{f} is not <obs_db_path>/{obs}/event_l2/ixpe{obs}_det<n>_evt2_v<NN>[_rej].fits; '
+            raise ValueError(f'{f} is not <obs folder>/event_l2/ixpe{obs}_det<n>_evt2_v<NN>[_rej].fits; '
                              'pha writes its spectra into an observation database and records them in '
                              'its catalog, so it reduces only files in that layout')
-    return Path(obs_file_list[0]).parent.parent.parent
+        obs_dirs.add(path.parent.parent)
+    (obs_dir,) = obs_dirs if len(obs_dirs) == 1 else (None,)
+    mission = next((d for d in obs_dir.parents if d.name.lower() == 'ixpe'), None) if obs_dir else None
+    try:
+        found = locate(mission.parent, mission.name, obs) if mission else None
+    except (FileNotFoundError, LookupError):
+        found = None
+    if found is None or Path(found).resolve() != obs_dir.resolve():
+        raise ValueError(f'{sorted(map(str, obs_dirs))} is not the folder obsdb_catalog.locate finds for '
+                         f'{obs} in an IXPE observation database; the spectra cannot be recorded there')
+    return mission
 
 
 def _record_pha(root: Path, obs: str, pha_file_list: list[str], params: dict) -> None:

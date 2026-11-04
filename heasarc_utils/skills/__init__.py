@@ -14,16 +14,20 @@ TOOL_MANIFEST = {
         "fn": "acquire",
         "description": (
             "Acquire (download) HEASARC archive data for one IXPE, NICER or NuSTAR "
-            "observation into a mission's obs-db directory and record it in the data "
-            "catalog. Call this when an ObsID is genuinely missing locally."
+            "observation into the obs-db root, laid out as HEASARC's archive is, and record "
+            "it in that mission's data catalog. Call this when an ObsID is genuinely missing "
+            "locally."
         ),
         "args_schema": {
             "type": "object",
             "description": (
                 "METHOD: resolves the ObsID's archive location authoritatively via the "
                 "mission master table (rather than any hand-built path), downloads it, and "
-                "records the level-2 event at processing level 2. Data lands at "
-                "<obs_db_path>/<obsid>/.\n"
+                "records the level-2 event at processing level 2. Data lands where HEASARC's "
+                "archive keeps it, below the mission's folder: <obs_db_root>/<mission>/<archive "
+                "tree>/<obsid>/ (e.g. ixpe/data/obs/01/01002901/), recorded in "
+                "<obs_db_root>/<mission>/catalog.json; the first acquire of a mission creates both. "
+                "The result names mission_dir and obsid_dir.\n"
                 "RE-DOWNLOADS ON EVERY CALL: reserve it for genuinely missing observations -- "
                 "confirm locality with a data-catalog tool first. A re-acquire regresses the "
                 "catalog to level 2, which flags any stale level-3 products for re-reduction.\n"
@@ -59,14 +63,12 @@ TOOL_MANIFEST = {
                     "enum": ["ixpe", "nicer", "nustar"],
                     "description": "Mission name (lowercase).",
                 },
-                "obs_db_path": {
+                "obs_db_root": {
                     "kind": "path",
                     "type": "string",
                     "description": (
-                        "The mission's obs-db directory, e.g. "
-                        "'/data/fzhou/XSPEC/Cyg_X-1/IXPE'. Data is downloaded to "
-                        "<obs_db_path>/<obsid>/ and recorded in "
-                        "<obs_db_path>/catalog.json."
+                        "The obs-db root: one folder per mission, named as HEASARC names it "
+                        "(ixpe, nicer, nustar)."
                     ),
                 },
                 "host": {
@@ -91,7 +93,7 @@ TOOL_MANIFEST = {
                     ),
                 },
             },
-            "required": ["obsid", "mission", "obs_db_path"],
+            "required": ["obsid", "mission", "obs_db_root"],
         },
     },
 }

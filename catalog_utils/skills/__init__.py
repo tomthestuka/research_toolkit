@@ -5,7 +5,7 @@ imports here (the read logic in ``lib/catalog_read.py`` is pure standard library
 imported only when the tool runs).
 
 Like every toolkit tool, it takes the mission's ``obs_db_path`` directly (the analyst
-context lists each mission's ``obs_db_path``, exactly as ``acquire``/``pcube`` receive it),
+context lists each mission's ``obs_db_path``, the mission folder below the obs-db root),
 so the tool runs uniformly in the worker sandbox and — since the read is pure standard
 library — in-process for the analyst lead. ``obs_db_path`` is required; ``min_level`` is
 optional.

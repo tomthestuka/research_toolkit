@@ -2,10 +2,15 @@
 
 The download mechanics are **mission-agnostic**: given a HEASARC master-table
 name, ``astroquery.heasarc`` resolves an ObsID to its archive location and
-downloads it, for any mission. The only per-mission knowledge — the master-table
-name and which file is the representative level-2 event — lives in the
-``MissionProfile`` registry (``MISSIONS``), which is the single extension point.
-Adding a mission is one ``MISSIONS`` entry against an unchanged engine.
+downloads it, for any mission. The local copy clones HEASARC's archive: the data
+lands at ``<obs_db_root>/<mission>/<HEASARC's tree>/<obsid>/``, both the mission
+folder and the tree read from the ``access_url`` the archive returns
+(``https://heasarc.gsfc.nasa.gov/FTP/ixpe/data/obs/01/01002901/``). The only
+per-mission knowledge — the master-table name and which file is the
+representative level-2 event — lives in the ``MissionProfile`` registry
+(``MISSIONS``, keyed by HEASARC's name for the mission), which is the single
+extension point here; ``obsdb_catalog._domain`` keeps the matching tree rule and
+scanner for readers.
 
 Grounded in the current ``astroquery.heasarc`` API (v0.4.x):
 ``query_region(catalog=..., column_filters={"obsid": ...}) -> locate_data ->
@@ -33,7 +38,7 @@ from typing import Callable
 from obsdb_catalog.neutral import is_locked, split_lock
 
 __all__ = ["HeasarcError", "MissionProfile", "MISSIONS", "acquire_obsid",
-           "resolve", "download", "normalize_layout", "gunzip_tree",
+           "resolve", "archive_path", "download", "gunzip_tree",
            "discover_master", "availability"]
 
 # Notes mirrored from obsdb_catalog._domain (representative-product convention).
@@ -114,9 +119,35 @@ def availability(catalog: str, obsid: str) -> dict:
     }
 
 
-def download(links, obs_db_path: str, host: str | None = None,
+def archive_path(links, obsid: str) -> tuple[str, list[str]]:
+    """``(mission folder, tree)`` of an ObsID as HEASARC's archive holds it, read from the
+    ``access_url`` of ``links`` (``.../FTP/<mission>/<tree...>/<obsid>/``): the folder names the
+    local copy clones. Raises :class:`HeasarcError` with the archive's own message for a row that
+    carries one (an ObsID with no products yet), and for links that disagree or do not end in the
+    ObsID."""
+    urls = [str(u) for u in links["access_url"]]
+    errors = [str(e) for e in (links["error_message"] if "error_message" in getattr(links, "colnames", links) else [])]
+    found = set()
+    for i, url in enumerate(urls):
+        if i < len(errors) and errors[i].strip():
+            raise HeasarcError(f"HEASARC has no data for ObsID {obsid!r}: {errors[i].strip()}")
+        parts = [p for p in url.split("FTP/", 1)[-1].split("/") if p]
+        if "FTP/" not in url or len(parts) < 2 or parts[-1] != str(obsid):
+            raise HeasarcError(f"archive link {url!r} is not .../FTP/<mission>/.../{obsid}/")
+        found.add((parts[0], tuple(parts[1:-1])))
+    if len(found) != 1:
+        raise HeasarcError(f"archive links for ObsID {obsid!r} name {len(found)} places: {sorted(found)}")
+    folder, tree = found.pop()
+    return folder, list(tree)
+
+
+def download(links, location: str, host: str | None = None,
              timeout_s: float = 1800.0) -> None:
-    """Download resolved links into ``obs_db_path`` via astroquery.
+    """Download resolved links into ``location`` via astroquery.
+
+    Every astroquery host unpacks an observation as ``<location>/<obsid>/`` (the archive's tar
+    is ObsID-rooted; the SciServer and S3 copies take the link's last folder), so the caller passes
+    the folder the ObsID's own folder belongs in. The folder is created first.
 
     The astroquery ``Heasarc`` singleton carries a ``timeout`` attribute
     (default 30 s) that its internal ``_download_heasarc`` passes directly to
@@ -127,11 +158,12 @@ def download(links, obs_db_path: str, host: str | None = None,
     duration of the call and restores the previous value on exit, so concurrent
     or subsequent callers are unaffected.
     """
+    os.makedirs(location, exist_ok=True)
     h = _heasarc()
     _prev_timeout = getattr(h, "timeout", None)
     h.timeout = timeout_s
     try:
-        kwargs = {"location": obs_db_path}
+        kwargs = {"location": location}
         if host is not None:
             kwargs["host"] = host
         h.download_data(links, **kwargs)
@@ -139,29 +171,7 @@ def download(links, obs_db_path: str, host: str | None = None,
         h.timeout = _prev_timeout
 
 
-def normalize_layout(obs_db_path: str, obsid: str) -> str:
-    """Ensure the ObsID dir sits at ``<obs_db_path>/<obsid>``; return its path.
-
-    ``download_data`` untars ``heasarc-data.tar``; if it nests the ObsID under an
-    extra prefix, relocate it to the expected top level. Raises
-    :class:`HeasarcError` if the ObsID directory cannot be located.
-    """
-    target = os.path.join(obs_db_path, str(obsid))
-    if os.path.isdir(target):
-        return target
-    candidates = [
-        d for d in glob.glob(os.path.join(obs_db_path, "**", str(obsid)), recursive=True)
-        if os.path.isdir(d)
-    ]
-    if not candidates:
-        raise HeasarcError(
-            f"download produced no directory for ObsID {obsid!r} under {obs_db_path}"
-        )
-    shutil.move(candidates[0], target)
-    return target
-
-
-def gunzip_tree(obs_db_path: str, obsid: str) -> int:
+def gunzip_tree(obs_dir: str) -> int:
     """Decompress every ``*.gz`` under the ObsID directory in place; return the count.
 
     Fresh HEASARC downloads arrive gzipped (``*.evt.gz`` / ``*.fits.gz``); acquire
@@ -171,7 +181,7 @@ def gunzip_tree(obs_db_path: str, obsid: str) -> int:
     so an interrupted gunzip leaves the original ``.gz`` intact rather than a
     half-written file masquerading as data.
     """
-    root = os.path.join(obs_db_path, str(obsid))
+    root = str(obs_dir)
     count = 0
     for gz in sorted(glob.glob(os.path.join(root, "**", "*.gz"), recursive=True)):
         dest = gz[:-3]                      # strip the trailing ".gz"
@@ -200,7 +210,7 @@ def discover_master(mission: str):
 class MissionProfile:
     """A mission's acquire knowledge: master table + level-2 representative."""
     catalog: str                                  # HEASARC master-table name
-    level2: Callable[[str, str], dict]            # (obs_db_path, obsid) -> product dict
+    level2: Callable[[str, str], dict]            # (obsid folder, obsid) -> product, absolute path
 
 
 def _pick(matches: list[str]) -> str | None:
@@ -221,13 +231,13 @@ def _pick(matches: list[str]) -> str | None:
     return None
 
 
-def _one(obs_db_path: str, obsid: str, pattern: str, what: str) -> str:
+def _one(obs_dir: str, obsid: str, pattern: str, what: str) -> str:
     """Return the representative file matching ``pattern`` under the ObsID; else raise.
 
     The glob is wrapper-agnostic (it ends in ``*``), so an encrypted copy is found
     when it is all that was served; :func:`_pick` prefers a readable copy over it.
     """
-    full = _pick(glob.glob(os.path.join(obs_db_path, str(obsid), pattern)))
+    full = _pick(glob.glob(os.path.join(obs_dir, pattern)))
     if full is None:
         raise HeasarcError(f"no {what} for ObsID {obsid!r} (looked for {pattern!r})")
     return full
@@ -239,10 +249,10 @@ def _one(obs_db_path: str, obsid: str, pattern: str, what: str) -> str:
 _IXPE_BASE_EVT = re.compile(r"_det1_evt2_(?P<ver>v\d+)\.fits(?:\.gz)?$")
 
 
-def _ixpe_level2(obs_db_path: str, obsid: str) -> dict:
+def _ixpe_level2(obs_dir: str, obsid: str) -> dict:
     cands = [
         f for f in glob.glob(os.path.join(
-            obs_db_path, str(obsid), "event_l2", f"ixpe{obsid}_det1_evt2_*.fits*"))
+            obs_dir, "event_l2", f"ixpe{obsid}_det1_evt2_*.fits*"))
         if _IXPE_BASE_EVT.search(split_lock(os.path.basename(f))[0])
     ]
     base = _pick(cands)
@@ -251,34 +261,41 @@ def _ixpe_level2(obs_db_path: str, obsid: str) -> dict:
     ver = _IXPE_BASE_EVT.search(split_lock(os.path.basename(base))[0]).group("ver")
     return {
         "kind": "level2_evt",
-        "path": os.path.relpath(base, obs_db_path),
+        "path": base,
         "produced_by": "heasarc",
         "params": {"detectors": [1, 2, 3], "calibration_version": ver, "note": _IXPE_NOTE},
     }
 
 
-def _nicer_level2(obs_db_path: str, obsid: str) -> dict:
-    full = _one(obs_db_path, obsid, os.path.join("xti", "event_cl", "*mpu7_cl.evt*"),
+def _nicer_level2(obs_dir: str, obsid: str) -> dict:
+    full = _one(obs_dir, obsid, os.path.join("xti", "event_cl", "*mpu7_cl.evt*"),
                 "NICER level-2 cleaned event")
     return {
         "kind": "level2_evt",
-        "path": os.path.relpath(full, obs_db_path),
+        "path": full,
         "produced_by": "heasarc",
         "params": {"mpu": 7},
     }
 
 
-def _nustar_level2(obs_db_path: str, obsid: str) -> dict:
-    full = _one(obs_db_path, obsid, os.path.join("event_cl", f"nu{obsid}A01_cl.evt*"),
+def _nustar_level2(obs_dir: str, obsid: str) -> dict:
+    full = _one(obs_dir, obsid, os.path.join("event_cl", f"nu{obsid}A01_cl.evt*"),
                 "NuSTAR level-2 cleaned event (FPMA)")
     return {
         "kind": "level2_evt",
-        "path": os.path.relpath(full, obs_db_path),
+        "path": full,
         "produced_by": "heasarc",
         "params": {"fpm": "A", "note": _NUSTAR_NOTE},
     }
 
 
+#: Keyed by HEASARC's name for the mission, which is also its archive folder
+#: (``https://heasarc.gsfc.nasa.gov/FTP/<name>/``) and so the local mission folder; ``acquire_obsid``
+#: refuses a link naming another. A new mission: its master table (``discover_master``) and its
+#: level-2 representative here, its tree rule and scanner in ``obsdb_catalog._domain``. Chandra
+#: (``chanmaster``, ``chandra/data/byobsid/<d>/<obsid>/``) and MAXI (``maximaster``) are on HEASARC;
+#: MAXI's master table returns no ``locate_data`` link for its rows (checked 2026-11-04), so it needs
+#: a locator of its own before this engine can fetch it.
 MISSIONS: dict[str, MissionProfile] = {
     "ixpe": MissionProfile(catalog="ixmaster", level2=_ixpe_level2),
     "nicer": MissionProfile(catalog="nicermastr", level2=_nicer_level2),
@@ -286,15 +303,18 @@ MISSIONS: dict[str, MissionProfile] = {
 }
 
 
-def acquire_obsid(mission: str, obsid: str, obs_db_path: str,
+def acquire_obsid(mission: str, obsid: str, obs_db_root: str,
                   *, host: str | None = None,
-                  timeout_s: float = 1800.0) -> dict:
-    """Resolve → download → normalize → gunzip → derive the level-2 product. No recording.
+                  timeout_s: float = 1800.0) -> tuple[str, str, dict]:
+    """Resolve → download into HEASARC's tree → gunzip → derive the level-2 product. No recording.
 
-    Returns the level-2 product dict (relative ``path`` confirmed on disk). The
-    high-level :func:`heasarc_utils.lib.heasarc_help.acquire` adds catalog
-    recording. Raises :class:`HeasarcError` for an unknown mission, a missing
-    ObsID, or a download that does not yield the expected level-2 file.
+    Returns ``(mission folder, ObsID folder, level-2 product)``, the product's ``path`` relative to
+    the mission folder and confirmed on disk. The data lands at ``<obs_db_root>/<mission>/<tree>/
+    <obsid>/``, the tree as the archive link names it (:func:`archive_path`), downloaded straight
+    into place: astroquery unpacks to ``<location>/<obsid>/`` and ``location`` is the tree. The
+    high-level :func:`heasarc_utils.lib.heasarc_help.acquire` adds catalog recording. Raises
+    :class:`HeasarcError` for an unknown mission, a missing ObsID, an archive folder other than
+    the mission's name, or a download that does not yield the expected level-2 file.
 
     Parameters
     ----------
@@ -303,6 +323,8 @@ def acquire_obsid(mission: str, obsid: str, obs_db_path: str,
         Default 1800 s (30 min). The astroquery factory default (30 s) is too
         short for large IXPE transfers.
     """
+    from obsdb_catalog.locate import mission_dir
+
     profile = MISSIONS.get(mission.lower())
     if profile is None:
         raise HeasarcError(
@@ -311,7 +333,17 @@ def acquire_obsid(mission: str, obsid: str, obs_db_path: str,
             f"master table). Known missions: {sorted(MISSIONS)}"
         )
     links = resolve(profile.catalog, obsid)
-    download(links, obs_db_path, host=host, timeout_s=timeout_s)
-    normalize_layout(obs_db_path, obsid)
-    gunzip_tree(obs_db_path, obsid)
-    return profile.level2(obs_db_path, obsid)
+    folder, tree = archive_path(links, obsid)
+    if folder.lower() != mission.lower():
+        raise HeasarcError(f"HEASARC keeps {mission} ObsID {obsid} under FTP/{folder}/; register the "
+                           f"mission under its archive name {folder!r}")
+    mission_root = str(mission_dir(obs_db_root, folder))
+    location = os.path.join(mission_root, *tree)
+    download(links, location, host=host, timeout_s=timeout_s)
+    obs_dir = os.path.join(location, str(obsid))
+    if not os.path.isdir(obs_dir):
+        raise HeasarcError(f"download produced no folder {obs_dir} for ObsID {obsid!r}")
+    gunzip_tree(obs_dir)
+    product = dict(profile.level2(obs_dir, obsid))
+    product["path"] = os.path.relpath(product["path"], mission_root)
+    return mission_root, obs_dir, product

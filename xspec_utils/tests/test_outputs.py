@@ -411,18 +411,18 @@ def test_pha_writes_into_the_obs_db_and_records_its_spectra(tmp_path):
     from xspec_utils.lib import red_ixpe, src_pos
 
     obs = IXPE_PCUBE_OBS
-    db = tmp_path / "IXPE"  # a fixture obs-db named after its mission
-    event_l2 = db / obs / "event_l2"
+    db = tmp_path / "IXPE"  # a fixture obs-db named after its mission, laid out as HEASARC's archive
+    event_l2 = db / "data/obs/02" / obs / "event_l2"
     event_l2.mkdir(parents=True)
     for source in _rej_events(IXPE_ROOT, obs):
         (event_l2 / Path(source).name).symlink_to(Path(source).resolve())
-    det1 = f"{obs}/event_l2/ixpe{obs}_det1_evt2_v01_rej.fits"
+    det1 = f"data/obs/02/{obs}/event_l2/ixpe{obs}_det1_evt2_v01_rej.fits"
     neutral.new(str(db), "ixpe", obs, products=[{"kind": "level2_evt", "path": det1, "produced_by": "heasarc"}])
     assert healthcheck(str(db)) is True
     real = _mtimes(IXPE_ROOT / obs / "event_l2")
 
     ra, dec = src_pos.SRC_COORD[obs]
-    src, bkg = red_ixpe.pha(obs, _rej_events(db, obs), src_rad=1.0, bkg_inner_rad=2.5, bkg_outer_rad=5.0,
+    src, bkg = red_ixpe.pha(obs, _rej_events(db / "data/obs/02", obs), src_rad=1.0, bkg_inner_rad=2.5, bkg_outer_rad=5.0,
                             ra=float(ra), dec=float(dec), irf_date="20230101")
 
     assert all(Path(p).parent == event_l2 and Path(p).is_file() for p in src + bkg)
@@ -435,7 +435,7 @@ def test_pha_writes_into_the_obs_db_and_records_its_spectra(tmp_path):
     for params in pha.values():
         assert (params["src_rad_arcmin"], params["bkg_inner_arcmin"], params["bkg_outer_arcmin"]) == (1.0, 2.5, 5.0)
         assert params["irfname"] == "ixpe:obssim20230101_alpha075:v13"
-    det1 = pha[f"{obs}/event_l2/ixpe{obs}_det1_evt2_v01_rej_src_pha1.fits"]
+    det1 = pha[f"data/obs/02/{obs}/event_l2/ixpe{obs}_det1_evt2_v01_rej_src_pha1.fits"]
     assert (det1["du"], det1["filter"]) == ("DU1", "rej_src")
     assert _mtimes(IXPE_ROOT / obs / "event_l2") == real
 
