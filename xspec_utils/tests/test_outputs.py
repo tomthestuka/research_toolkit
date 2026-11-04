@@ -296,3 +296,38 @@ def test_a_spectrum_missing_only_its_arf_keeps_its_rmf(xspec_session, tmp_path):
     assert AllData(1).response.rmf == rmf
     assert AllData(1).response.arf.startswith(ixpeobssim.IXPEOBSSIM_CALDB)
     AllData.clear()
+
+
+@pytest.mark.slow
+def test_audit_paths_labels_each_rate(xspec_session, capsys):
+    from xspec import AllData, AllModels, Model
+
+    pha = IXPE_ROOT / "02008201" / "event_l2" / "ixpe02008201_det1_evt2_v01_rej_src_pha1.fits"
+    bkg = pha.with_name(pha.name.replace("_src_", "_bkg_"))
+    AllData.clear()
+    AllModels.clear()
+    AllData(f"1:1 {pha}")
+    AllData(1).background = str(bkg)
+    xspec_help.assign_responses(1, str(pha))
+    AllData(1).ignore("**-2.0 8.0-**")
+    capsys.readouterr()
+    xspec_help.audit_paths()
+    before_model = capsys.readouterr().out  # no model defined: no model rate
+    Model("powerlaw")
+    xspec_help.audit_paths()
+    printed = capsys.readouterr().out
+
+    # Each rate from the files and the model themselves, over the noticed channels.
+    rows = np.asarray(AllData(1).noticed) - 1
+    with fits.open(pha) as hs, fits.open(bkg) as hb:
+        src, back = hs["SPECTRUM"], hb["SPECTRUM"]
+        scale = src.header["BACKSCAL"] / back.header["BACKSCAL"]
+        total = src.data["RATE"][rows].sum()
+        net = total - scale * back.data["RATE"][rows].sum()
+        sigma = ((src.data["STAT_ERR"][rows] ** 2).sum()
+                 + scale ** 2 * (back.data["STAT_ERR"][rows] ** 2).sum()) ** 0.5
+    model = float(np.sum(AllModels(1).folded(1)))
+    assert f"Rate: net={net:.4g} ± {sigma:.4g} cts/s  (total={total:.4g})\n" in before_model + "\n"
+    assert f"Rate: net={net:.4g} ± {sigma:.4g} cts/s  (total={total:.4g}, current model={model:.4g})" in printed
+    AllData.clear()
+    AllModels.clear()

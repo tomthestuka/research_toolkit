@@ -421,7 +421,7 @@ Freezes (or thaws when `thaw=True`) every non-linked parameter across all data g
 
 #### `xspec_help.audit_paths()`
 
-Prints a formatted table of file paths (PHA, background, RMF, ARF) and net count rates for every currently loaded XSPEC spectrum. Called automatically by `fit_tbabs_polconst_diskbb_polconst_relxillCp` when `audit_data=True`.
+Prints a formatted table of file paths (PHA, background, RMF, ARF) and count rates over the noticed channels for every currently loaded XSPEC spectrum: `net ± its standard deviation`, `total` (without background subtraction) and, while a model is defined, `current model` (the folded model's rate), from `Spectrum.rate`. Called automatically by the `fit_*` helpers when `audit_data=True`, before they set their model, so their audit block names a model only when the session already had one.
 
 ---
 
@@ -692,3 +692,14 @@ Instrumental background rejection follows the method described in [Di Marco et a
   it equals the `STAT_ERR` sum in quadrature), as a variance, so `HR`'s rate errors (and the
   hardness-ratio error) were too large (on 02008201, 2-8 keV: about 4 times); they now add in
   quadrature. `HR` is not a manifest tool, so no runtime receipt carries the old values.
+- 2026-11-04 — `xspec_help.audit_paths` labelled `Spectrum.rate` wrongly: it printed `net=rate[2]`
+  (the total rate) `± rate[3]` (the model rate), `total=rate[0]` (the net rate) and
+  `bkg=rate[1]` (the net rate's standard deviation). It now prints net = rate[0] ± rate[1],
+  total = rate[2] and, while a model is defined, current model = rate[3], checked against the
+  source and background PHAs' `RATE`/`STAT_ERR`/`BACKSCAL` and the folded model. Affected: the
+  audit block that `fit_tbfeo_hss` (`fit_tbfeo_plabs_polconst_diskbb_polconst_relxillCp`) and
+  `fit_tbabs_bknpower_polconst_diskbb_polconst_relxillCp` write at the top of their fit log (or
+  print, with no log) when `audit_data` is on, its default, and any direct `audit_paths()` call.
+  `fit_tbfeo_hss` is a manifest tool, so fit logs and results receipted in earlier runs carry the
+  old labels: there read `net=` as the total rate, `±` as the model rate, `total=` as the net rate
+  and `bkg=` as the net rate's standard deviation.

@@ -1191,7 +1191,9 @@ def audit_paths():
         except Exception:
             rmf, arf = None, None
 
-        # s.rate -> (total, background, net, net_error) cts/s over noticed channels
+        # s.rate -> (net, net standard deviation, total, model) cts/s over noticed channels
+        # (checked against the PHA's RATE/STAT_ERR and the folded model; PyXspec's docstring
+        # calls [1] a variance)
         try: rate = s.rate
         except Exception: rate = None
 
@@ -1200,8 +1202,11 @@ def audit_paths():
     for r in rows:
         i, dg, pha, bkg, rmf, arf, rate = r
         if rate is not None:
-            rate_str = (f"net={rate[2]:.4g} ± {rate[3]:.4g} cts/s  "
-                        f"(total={rate[0]:.4g}, bkg={rate[1]:.4g})")
+            # The folded model's rate only while a model is defined: the fit_* helpers audit
+            # before they set theirs, so the line then names the session's model of the moment.
+            model = f", current model={rate[3]:.4g}" if AllModels.sources else ""
+            rate_str = (f"net={rate[0]:.4g} ± {rate[1]:.4g} cts/s  "
+                        f"(total={rate[2]:.4g}{model})")
         else:
             rate_str = "N/A"
         print(f"\n[{i}] DG={dg}\n  PHA: {pha}\n  BKG: {bkg}\n  RMF: {rmf}\n  ARF/MRF: {arf}\n  Rate: {rate_str}")
