@@ -20,9 +20,17 @@ from xspec_utils.lib import xspec_help
 from xspec_utils.skills import session
 
 BOOT = Path(__file__).resolve().parents[2] / "envs" / "xspec" / "boot.py"
-IXPE_ROOT = Path("/data/fzhou/XSPEC/Cyg_X-1/IXPE")
+
+
+def _data(name: str) -> Path:
+    """The folder of a data set the ``data("<name>")`` tests read (root ``conftest.py``)."""
+    variable = f"TOOLKIT_DATA_{name.upper()}"
+    return Path(os.environ.get(variable) or f"<{variable} unset>")
+
+
+IXPE_ROOT = _data("cygx1_ixpe")  # Cyg X-1's IXPE observations
 IXPE_OBS = "01002901"  # its PHA headers name responses of the human astropy environment's ixpeobssim
-NUSTAR = Path("/data/fzhou/XSPEC/Cyg_X-1/NuSTAR/30702017002/products")
+NUSTAR = _data("cygx1_nustar") / "30702017002" / "products"  # Cyg X-1's NuSTAR observations
 SPECTRUM = NUSTAR / "nu30702017002A01_sr_grp.pha"  # RESPFILE absolute; ANCRFILE, BACKFILE relative
 EDGES = [4.0, 10.0, 20.0, 50.0]
 
@@ -101,7 +109,7 @@ def test_a_response_under_a_removed_ixpeobssim_is_read_from_the_installed_one(tm
     alias = os.path.realpath(installed)  # the installed file under another spelling: kept as named
     assert xspec_help.resolve_response(alias) == alias
     assert xspec_help.resolve_response(GONE_RMF.replace("caldb/", "caldb//")) == str(installed)
-    for kept in ("none", "", "resp.rmf", str(NUSTAR / "nu30702017002A01_sr.rmf")):
+    for kept in ("none", "", "resp.rmf", str(tmp_path / "nu30702017002A01_sr.rmf")):
         assert xspec_help.resolve_response(kept) == kept
     missing = GONE_RMF.replace("v012", "v999")
     with pytest.raises(FileNotFoundError) as excinfo:
@@ -153,6 +161,7 @@ def nustar_session(xspec_session):
 
 
 @pytest.mark.slow
+@pytest.mark.data("cygx1_nustar")
 def test_a_grouped_nustar_copy_loads_from_another_folder(xspec_session, out, tmp_path, monkeypatch):
     from xspec import AllData, AllModels
 
@@ -171,6 +180,7 @@ def test_a_grouped_nustar_copy_loads_from_another_folder(xspec_session, out, tmp
 
 
 @pytest.mark.slow
+@pytest.mark.data("cygx1_nustar")
 def test_run_fit_and_plot_fit_return_what_they_write(nustar_session, out):
     from xspec import Model
 
@@ -191,6 +201,7 @@ def test_run_fit_and_plot_fit_return_what_they_write(nustar_session, out):
 
 
 @pytest.mark.slow
+@pytest.mark.data("cygx1_nustar")
 def test_fit_tbfeo_hss_returns_its_log(nustar_session, out):
     log = out / "fit_tbfeo_hss.log"
     result = xspec_help.fit_tbfeo_plabs_polconst_diskbb_polconst_relxillCp(
@@ -203,6 +214,7 @@ def test_fit_tbfeo_hss_returns_its_log(nustar_session, out):
 
 
 @pytest.mark.slow
+@pytest.mark.data("cygx1_ixpe")
 def test_plot_iqu_returns_one_figure_per_du(xspec_session, out, capsys):
     import ixpeobssim
     from xspec import AllData, Model
@@ -226,6 +238,7 @@ def test_plot_iqu_returns_one_figure_per_du(xspec_session, out, capsys):
 
 
 @pytest.mark.slow
+@pytest.mark.data("cygx1_ixpe")
 def test_load_data_reads_ixpe_responses_from_the_installed_ixpeobssim(xspec_session, capsys):
     import ixpeobssim
     from xspec import AllData
@@ -248,6 +261,7 @@ def test_load_data_reads_ixpe_responses_from_the_installed_ixpeobssim(xspec_sess
 
 
 @pytest.mark.slow
+@pytest.mark.data("cygx1_ixpe")
 def test_sum_counts_reads_ixpe_responses_from_the_installed_ixpeobssim(xspec_session, capsys):
     import ixpeobssim
     from xspec import AllData
@@ -279,6 +293,7 @@ def test_sum_counts_reads_ixpe_responses_from_the_installed_ixpeobssim(xspec_ses
 
 
 @pytest.mark.slow
+@pytest.mark.data("cygx1_ixpe")
 def test_a_spectrum_missing_only_its_arf_keeps_its_rmf(xspec_session, tmp_path):
     import ixpeobssim
     from xspec import AllData
@@ -299,6 +314,7 @@ def test_a_spectrum_missing_only_its_arf_keeps_its_rmf(xspec_session, tmp_path):
 
 
 @pytest.mark.slow
+@pytest.mark.data("cygx1_ixpe")
 def test_audit_paths_labels_each_rate(xspec_session, capsys):
     from xspec import AllData, AllModels, Model
 
@@ -346,10 +362,11 @@ def _linked(sources: list[str], folder: Path) -> list[str]:
 
 
 @pytest.mark.slow
+@pytest.mark.data("cygx1_nustar")
 def test_run_extraction_writes_regions_and_png_to_its_folder(tmp_path, out):
     from xspec_utils.lib import find_src
 
-    source = "/data/fzhou/XSPEC/Cyg_X-1/NuSTAR/30702017002/event_cl/nu30702017002A01_cl.evt"
+    source = str(_data("cygx1_nustar") / "30702017002" / "event_cl" / "nu30702017002A01_cl.evt")
     evt = Path(_linked([source], tmp_path / "event_cl")[0])
     before = _mtimes(evt.parent)
     result = find_src.run_extraction(str(evt), str(out), 1.0, 2.0, 3.0)
@@ -371,6 +388,7 @@ def _rej_events(root: Path, obs: str) -> list[str]:
 
 
 @pytest.mark.slow
+@pytest.mark.data("cygx1_ixpe")
 def test_pcube_writes_every_file_under_its_folder(tmp_path, out):
     from xspec_utils.lib import red_ixpe, src_pos
 
@@ -404,6 +422,7 @@ def test_pcube_writes_every_file_under_its_folder(tmp_path, out):
 
 
 @pytest.mark.slow
+@pytest.mark.data("cygx1_ixpe")
 def test_pha_writes_into_the_obs_db_and_records_its_spectra(tmp_path):
     from obsdb_catalog import neutral
     from obsdb_catalog.healthcheck import healthcheck
@@ -440,6 +459,7 @@ def test_pha_writes_into_the_obs_db_and_records_its_spectra(tmp_path):
     assert _mtimes(IXPE_ROOT / obs / "event_l2") == real
 
 
+@pytest.mark.data("cygx1_ixpe")
 def test_pha_refuses_before_writing_what_it_could_not_record(tmp_path):
     from xspec_utils.lib import red_ixpe
 

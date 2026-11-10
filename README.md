@@ -8,8 +8,9 @@ Orientation and conventions for coding agents: see [CLAUDE.md](CLAUDE.md). Each 
 - [`xspec_utils/`](xspec_utils/README.md) — joint spectro-polarimetric analysis tools
   (IXPE/NICER/NuSTAR) on HEASoft/XSPEC. *(LLM toolkit)*
 - [`heasarc_utils/`](heasarc_utils/README.md) — acquire: download archive data for an ObsID
-  and record it in the catalog. *(LLM toolkit)*
-- [`catalog_utils/`](catalog_utils/) — `data_catalog`: what each mission's catalog says
+  and record it in the catalog. It reaches the HEASARC archive (`astroquery.heasarc`) for the
+  missions its profile registry holds: IXPE, NICER and NuSTAR. *(LLM toolkit)*
+- [`catalog_utils/`](catalog_utils/README.md) — `data_catalog`: what each mission's catalog says
   is local, read-only. *(LLM toolkit)*
 - [`obsdb_catalog/`](obsdb_catalog/README.md) — the single trusted writer for per-mission
   `catalog.json` (provenance/inventory). *(support package; not an LLM tool)*
@@ -59,12 +60,18 @@ still read a flat `<obsid>/` layout.
 A package names the environment its tools run in, in its `tool_config.yaml` (`env: <id>`); the
 definition lives at `envs/<id>/` (`env.yaml`, `env.lock`, optional `env.pip`, `activate.sh`,
 `boot.py`), and `auto_research` builds it as `ar-<id>`. `envs/xspec/` serves `xspec_utils`.
+`envs/analysis/` is the toolkit's default environment (`auto_research`'s `default_env`): a derived
+definition on the human `astropy` prefix with HEASoft and CALDB, where a unit's own REPL and shell
+run and where `heasarc_utils` and `catalog_utils`, which name no environment, run. Its `env.yaml`
+`probe` is the launch smoke test.
 
 ## Tests
 
-`conftest.py` defines the test classes: unmarked tests are fast and deterministic; `slow` ones run
-on real data (`pytest -m "not slow"` skips them); `live` ones reach the network and run only with
-`--live` or `TOOLKIT_LIVE=1`.
+`conftest.py` defines the test classes: unmarked tests are fast and deterministic; `slow` ones take
+minutes (`pytest -m "not slow"` skips them); `live` ones reach the network and run only with
+`--live` or `TOOLKIT_LIVE=1`; `data("<name>")` ones read a named data set from the folder
+`TOOLKIT_DATA_<NAME>` names (e.g. `TOOLKIT_DATA_CYGX1_IXPE=/path/to/IXPE pytest`) and skip, with the
+reason, without it.
 
 ## Changelog
 
@@ -72,3 +79,8 @@ on real data (`pytest -m "not slow"` skips them); `live` ones reach the network 
   tool writes; `xspec_utils` migrated (its README).
 - 2026-11-04 — Observation databases clone HEASARC's archive layout (`acquire(obs_db_root)`,
   `obsdb_catalog.locate`).
+- 2026-11-09 — `envs/analysis/`: the default environment, moved here from `auto_research`'s config
+  (`analyze_env`, `analyst_env.sh`, `analyze_probe`); `env.yaml` takes a one-line `probe`.
+- 2026-11-09 — Packages: `heasarc_utils` states the archive it reaches (HEASARC) and its missions
+  (IXPE, NICER, NuSTAR); the roles read this file as the toolkit's domain briefing.
+- 2026-11-09 — `catalog_utils/README.md` added; every package carries its briefing (checked at launch).

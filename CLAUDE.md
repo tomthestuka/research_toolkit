@@ -176,16 +176,25 @@ definition is a folder of plain files at `envs/<id>/`:
 
 ```
 envs/<id>/
-  env.yaml      # purpose (one line), base (a human environment to layer on, or none), externals
+  env.yaml      # purpose (one line), base (a human environment to layer on, or none), externals,
+                #   probe (one line of Python the launch runs in the default environment; optional)
   env.lock      # conda explicit list: @EXPLICIT, then a conda-forge URL#md5 per package — exact
   env.pip       # wheels conda-forge lacks: name==version --hash=sha256:<hex> per line (optional)
   activate.sh   # variables the tools need; sourcing a declared external's init (optional)
   boot.py       # analyst REPL session setup, run once at REPL start (optional)
 ```
 
-- **Built** (a lock, no base) or **derived** (a human `base`, no lock). Externals (HEASoft, CALDB)
-  are the human's declared software outside conda (`auto_research` config `env_externals`),
-  stamped on every receipt, never rebuilt.
+- **Built** (a lock, no base) or **derived** (a human `base`, no lock). A base is named, never a
+  path: the host declares each human conda environment by name (`auto_research` config
+  `human_envs`). Externals (HEASoft, CALDB) are the human's declared software outside conda
+  (`auto_research` config `env_externals`), stamped on every receipt, never rebuilt; an
+  `activate.sh` sources an external's init by its absolute path.
+- **The default environment** (`auto_research`'s toolkit contract `default_env`): `envs/analysis/`,
+  derived on the human `astropy` environment with HEASoft and CALDB. A unit's own REPL and shell run
+  in it, and so do packages that name no environment (`heasarc_utils`, `catalog_utils`). It has no
+  `boot.py`: none of its tools needs an XSPEC session (`envs/xspec/boot.py` holds that), and the shell
+  never runs a boot file. Its `probe` (`import xspec, heasarc_utils, catalog_utils`) runs at launch,
+  in the jail when it is on.
 - `auto_research` builds a definition, jailed, into `<runtime_dir>/conda/envs/ar-<id>` — never
   into this repo or a human's conda environments — runs the package's tests in it at the gate, and
   runs its tools in it for the analysts. Several packages may share one environment; a package
@@ -206,11 +215,15 @@ envs/<id>/
 - **Python ≥ 3.10**; standard scientific stack for `*_utils` toolkits, **standard library
   only** for support packages like `obsdb_catalog`.
 - **Tests:** `pytest`, deterministic only; live science-stack runs are exercised by hand, not
-  asserted. `python3 -m pytest <package>/tests/`. The root `conftest.py` defines three classes:
+  asserted. `python3 -m pytest <package>/tests/`. The root `conftest.py` defines four classes:
   unmarked (fast, deterministic, seconds), `slow` (real data or a real model, minutes; runs by
-  default, `-m "not slow"` gives the quick suite) and `live` (network or an external service;
-  skipped unless `--live` or `TOOLKIT_LIVE=1`). The authoring gate runs with no network, so a test
-  that needs it is `live`.
+  default, `-m "not slow"` gives the quick suite), `live` (network or an external service;
+  skipped unless `--live` or `TOOLKIT_LIVE=1`) and `data("<name>")` (reads a named data set from
+  the folder `TOOLKIT_DATA_<NAME>` names, never a hardcoded host path; skipped with the reason when
+  that is unset or absent). The authoring gate deselects `live` (it has no network), sets
+  `TOOLKIT_DATA_<NAME>` for each data set its host's `test_data` names, and fails a change whose
+  data test it skipped, and the launch refuses a data set no host declares. Live data sets:
+  `cygx1_ixpe`, `cygx1_nustar`. A test of the change that the gate skips or marks xfail fails it too.
 - **Mission data paths** are the mission folders of the obs-db root (e.g.
   `/xray02/fzhou_obsdb/{ixpe,nicer,nustar}`, laid out as HEASARC's archive, §6); a tool writes
   only what its class allows (§6): artifacts under its output argument, obs-db items into the
@@ -259,3 +272,8 @@ envs/<id>/
   paths relative to the mission folder, producers `heasarc_utils.acquire(obs_db_root)` and
   `xspec_utils.red_ixpe.pha`, and what a tool writes (artifacts, obs-db items, scratch). §7: the
   mission data paths and what a tool writes there.
+- 2026-11-09 — §6b: `envs/analysis/` is the default environment (derived on the human `astropy`
+  environment, HEASoft and CALDB; no `boot.py`), moved here from `auto_research`'s config and its
+  `analyst_env.sh`/`repl_init.py`; a base is a name the host declares (`human_envs`); `env.yaml`
+  takes an optional one-line `probe`.
+- 2026-11-09 — **The `data` test class (auto_research Phase 3 step 0a W3).** §7: `data("<name>")` in the root `conftest.py` (root from `TOOLKIT_DATA_<NAME>`, skipped with the reason when absent); `xspec_utils/tests/test_outputs.py` reads Cyg X-1's IXPE and NuSTAR folders through `data("cygx1_ixpe")` / `data("cygx1_nustar")` instead of hardcoded paths. The gate deselects `live` and fails a change whose data test it skipped.
