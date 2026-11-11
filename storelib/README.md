@@ -62,6 +62,12 @@ tool process (jailed; AWS_* + PG* + TOOLKIT_STORE from the runtime, AR_TOOLKIT_C
 - **Before the claim** every input record is resolved (HEAD by version id), so a recipe names only
   versions the store holds; a bucket outside S3's naming rules and a kind or subject holding `/`, named
   `.`/`..` or padded with spaces are refused.
+- **Multipart completion.** CompleteMultipartUpload goes through a client of its own with a
+  `COMPLETE_TIMEOUT_S` (3600 s) read timeout and no retry: the store assembles the parts before it
+  answers (27-33 s measured for 8-10 GB on NFS), and a completion retried after a timeout is answered
+  200 without its version id. An answer naming no version, like a 412, is resolved by reading the key
+  back: the same bytes give that version, other bytes fail the production; a refused upload is
+  aborted (an abort the store has nothing for is ignored).
 - **Failure paths.** Everything after a successful claim runs under one guard: any failure gives the
   claim up with its reason. A commit whose answer is lost, or which the reconciler's adoption of this
   very production overtook, is read back from the catalog and reported as stored. A reuse of a recipe
@@ -120,6 +126,7 @@ imported only when a function runs, so the package imports in any Python. Enviro
 | `SINGLE_PUT_MAX`, `PART_SIZE` | 5 GiB; 256 MiB. |
 | `SHORT_HASH` | 8: the hex digits of a product folder's short hash. |
 | `DEFAULT_LEASE_S` | 3600: a claim's lease (the catalog accepts up to a day). |
+| `COMPLETE_TIMEOUT_S` | 3600: the read timeout of a multipart completion (sent without retry). |
 | `TOOLKIT_COMMIT_VARIABLE`, `ENV_FINGERPRINT_VARIABLE` | `AR_TOOLKIT_COMMIT`, `AR_ENV_FINGERPRINT`. |
 | `StoreError`, `ProductBusy`, `ProductRefused` | See Interfaces. |
 | `contract.META_*`, `META_NAMES`, `RECIPE_FILE`, `RECIPE_KEYS`, `RECORD_KEYS`, `RECIPE_FILE_KEYS`, `RECIPE_OBJECT_KEYS` | The product contract. |
@@ -143,3 +150,8 @@ auto_research's CI pipeline, or its `tests/test_toolkit_store.py`).
   (`store_name()`, `STORE_NAME_VARIABLE`); `produce` takes no `store` and `DEFAULT_STORE` is gone.
 - 2026-11-10 — Only a manifest tool calls `produce` (auto_research ruling); a test's store inputs come
   through the seed channel (the root conftest's `seed`).
+
+- 2026-11-11 — Multipart completion through a dedicated client (3600 s read timeout, no retry); an answer
+  without a version id is read back like a 412 (same bytes → that version, other bytes → an honest
+  failure); the abort after a 412 is guarded (mirrors auto_research's `store/ingest.py`). Tests: a
+  versionless answer, a 412 over the same bytes, a 412 over other bytes.

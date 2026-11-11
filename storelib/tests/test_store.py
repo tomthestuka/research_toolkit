@@ -299,3 +299,71 @@ def test_a_recipe_stored_in_another_bucket_is_refused_as_this_buckets(store, tmp
         storelib.produce(bucket="nicer", kind="test", subject=f"s{store['tag']}",
                          tool="research_toolkit.storelib_test.make", algorithm_version="1", settings={"n": 2},
                          inputs=[], make=_writer({"a.txt": b"x"}))
+
+
+# ------------------------------------------------------------------ multipart completion answers
+
+
+def _multipart(monkeypatch):
+    """Every object above 1 KiB goes up in parts (one part each here)."""
+    pytest.importorskip("awscrt", reason="the multipart path needs awscrt")
+    monkeypatch.setattr(st, "SINGLE_PUT_MAX", 1024)
+    monkeypatch.setattr(st, "PART_SIZE", 5 * 1024 ** 2)
+
+
+def _claimed_folder(store, subject):
+    """Claim the recipe ``_produce`` makes (as its earlier attempt would) and name its folder."""
+    recipe = {"kind": "test", "subject": subject, "tool": "research_toolkit.storelib_test.make",
+              "algorithm_version": "1", "settings": {"n": 2}, "inputs": []}
+    with storelib.connect() as conn:
+        claim = conn.execute("SELECT catalog.claim(%s::jsonb)", (json.dumps(recipe),)).fetchone()[0]
+        return claim, f"test/{subject}/{st._short(conn, claim['recipe_hash'], 'test', subject)}"
+
+
+def _latest(key):
+    listing = storelib.client().list_object_versions(Bucket=BUCKET, Prefix=key)
+    return [v["VersionId"] for v in listing["Versions"] if v["Key"] == key and v["IsLatest"]][0]
+
+
+def test_a_completion_answered_without_its_version_is_read_back(store, tmp_path, monkeypatch):
+    """A completion retried after a timeout is answered 200 with no version id: the key is read back."""
+    _multipart(monkeypatch)
+    monkeypatch.chdir(tmp_path)
+    real = st._completion_client
+
+    class Versionless:
+        def __init__(self):
+            self.inner = real()
+
+        def complete_multipart_upload(self, **kwargs):
+            done = self.inner.complete_multipart_upload(**kwargs)
+            done.pop("VersionId", None)
+            return done
+
+    monkeypatch.setattr(st, "_completion_client", Versionless)
+    out = _produce(store, _writer({"big.dat": os.urandom(6 * 1024)}))
+    assert out["status"] == "stored" and out["objects"][0]["version_id"] == _latest(out["objects"][0]["key"])
+
+
+def test_a_completion_refused_412_over_the_same_bytes_keeps_that_version(store, tmp_path, monkeypatch):
+    import hashlib
+
+    _multipart(monkeypatch)
+    monkeypatch.chdir(tmp_path)
+    data = os.urandom(6 * 1024)
+    _claim, folder = _claimed_folder(store, f"s{store['tag']}")
+    earlier = storelib.client().put_object(Bucket=BUCKET, Key=f"{folder}/big.dat", Body=data, IfNoneMatch="*",
+                                           Metadata={contract.META_SHA256: hashlib.sha256(data).hexdigest()})
+    out = _produce(store, _writer({"big.dat": data}))
+    assert out["status"] == "stored" and out["objects"][0]["version_id"] == earlier["VersionId"]
+
+
+def test_a_completion_refused_412_over_other_bytes_fails_honestly(store, tmp_path, monkeypatch):
+    _multipart(monkeypatch)
+    monkeypatch.chdir(tmp_path)
+    claim, folder = _claimed_folder(store, f"s{store['tag']}")
+    storelib.client().put_object(Bucket=BUCKET, Key=f"{folder}/big.dat", Body=b"other", IfNoneMatch="*",
+                                 Metadata={contract.META_SHA256: "2" * 64})
+    with pytest.raises(storelib.StoreError, match="already holds other bytes"):
+        _produce(store, _writer({"big.dat": os.urandom(6 * 1024)}))
+    assert _product_row(claim["recipe_hash"])[0] == "failed"

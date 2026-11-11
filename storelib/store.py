@@ -50,6 +50,9 @@ SINGLE_PUT_MAX = 5 * 1024 ** 3
 PART_SIZE = 256 * 1024 ** 2
 #: The hex digits of a product folder's short hash (lengthened on a clash with another recipe).
 SHORT_HASH = 8
+#: The read timeout of a multipart completion (s): the store assembles the parts before it answers
+#: (measured 27-33 s for 8-10 GB on NFS, beyond botocore's 60 s default margin for larger files).
+COMPLETE_TIMEOUT_S = 3600
 #: The default claim lease, in seconds (catalog.claim accepts up to one day).
 DEFAULT_LEASE_S = 3600
 _CHUNK = 1 << 20
@@ -98,6 +101,20 @@ def client():
 
     return boto3.client("s3", region_name=os.environ.get("AWS_REGION") or "us-east-1",
                         config=Config(s3={"addressing_style": "path"}, retries={"max_attempts": 3},
+                                      request_checksum_calculation="when_required",
+                                      response_checksum_validation="when_supported"))
+
+
+def _completion_client():
+    """The client a multipart completion is sent with: :data:`COMPLETE_TIMEOUT_S` to read the answer and
+    no retry (a completion retried after a timeout is answered 200 without its version id)."""
+    _require(_S3_VARIABLES)
+    import boto3
+    from botocore.config import Config
+
+    return boto3.client("s3", region_name=os.environ.get("AWS_REGION") or "us-east-1",
+                        config=Config(s3={"addressing_style": "path"}, read_timeout=COMPLETE_TIMEOUT_S,
+                                      retries={"total_max_attempts": 1},
                                       request_checksum_calculation="when_required",
                                       response_checksum_validation="when_supported"))
 
@@ -365,8 +382,9 @@ def _put(s3, bucket: str, key: str, path: Path, meta: dict) -> dict:
             return _reuse_or_refuse(s3, bucket, key, sha, size)
     else:
         sha, answer = _put_parts(s3, bucket, key, path, meta)
-        if answer is None:
-            return _reuse_or_refuse(s3, bucket, key, sha, size)
+    if not (answer or {}).get("VersionId"):
+        # a 412, or an answer naming no version (a retried request): the key is read back
+        return _reuse_or_refuse(s3, bucket, key, sha, size)
     return {"key": key, "version_id": answer["VersionId"], "sha256": sha, "size": size}
 
 
@@ -380,7 +398,8 @@ def _reuse_or_refuse(s3, bucket, key, sha, size) -> dict:
 
 def _put_parts(s3, bucket: str, key: str, path: Path, meta: dict):
     """A multipart upload with a CRC64NVME full-object checksum: ``(sha256, answer)``, the answer
-    ``None`` when the key already exists (412)."""
+    ``None`` when the key already exists (412). The completion goes through :func:`_completion_client`
+    (a long read timeout, no retry); an answer without a version id is the caller's to read back."""
     try:
         from awscrt import checksums
     except ImportError as exc:
@@ -410,13 +429,16 @@ def _put_parts(s3, bucket: str, key: str, path: Path, meta: dict):
                 parts.append({"ETag": answer["ETag"], "PartNumber": number, "ChecksumCRC64NVME": value})
                 number += 1
         try:
-            done = s3.complete_multipart_upload(Bucket=bucket, Key=key, UploadId=upload, IfNoneMatch="*",
-                                                MultipartUpload={"Parts": parts}, ChecksumCRC64NVME=crc(whole),
-                                                ChecksumType="FULL_OBJECT")
+            done = _completion_client().complete_multipart_upload(
+                Bucket=bucket, Key=key, UploadId=upload, IfNoneMatch="*", MultipartUpload={"Parts": parts},
+                ChecksumCRC64NVME=crc(whole), ChecksumType="FULL_OBJECT")
         except ClientError as exc:
             if _code(exc) not in ("PreconditionFailed", "412"):
                 raise
-            s3.abort_multipart_upload(Bucket=bucket, Key=key, UploadId=upload)
+            try:
+                s3.abort_multipart_upload(Bucket=bucket, Key=key, UploadId=upload)
+            except ClientError:
+                pass  # the store kept no upload to abort
             return sha.hexdigest(), None
         return sha.hexdigest(), done
     except BaseException:
