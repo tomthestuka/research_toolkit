@@ -9,45 +9,58 @@ import ixpeobssim.core.pipeline as pipeline
 from ixpeobssim.binning.polarization import xBinnedPolarizationCube
 from contextlib import redirect_stdout, redirect_stderr
 from xspec import AllData, Spectrum, AllModels
-from obsdb_catalog import _domain, neutral
-from obsdb_catalog.locate import locate
 
-def get_all_file_list(ixpe_path: str, chatter=False) -> list[str]:
+
+def get_all_file_list(obs_dir: str, obs: str, chatter=False) -> list[str]:
     """
-    Get a list of all files for the given list of observations.
+    The level-2 event files of one IXPE observation, in its folder.
 
-    obs_list: list[str]
-        List of 9-digit Observation IDs, as strings.
+    obs_dir: str
+        The observation's folder: its product staged from the store (``storelib.stage_in``), laid out
+        as HEASARC's ObsID folder (``event_l2/...``).
 
-    ixpe_path: str
-        Path to the directory containing IXPE observation files.
+    obs: str
+        The observation's ID (``01002901_picorr`` and ``03002599`` read other files, below).
     """
-    file_list = []
-    # Every ObsID folder, where the obs-db keeps it (HEASARC's archive tree, or flat).
-    obs_dirs = [Path(d) for d in _domain.obsid_dirs('ixpe', ixpe_path) if Path(d).name[0].isdigit()]
-    obs_list = [d.name for d in obs_dirs]
-    for obs_dir in obs_dirs:
-        obs = obs_dir.name
-        for fits_file in sorted(glob.glob(f"{obs_dir}/event_l2/*evt2_v[0-9][0-9]_rej.fits", recursive=True)):
-            file_list.append(fits_file)
-        
-        # special cases
-        if obs == '01002901_picorr':
-            for fits_file in sorted(glob.glob(f"{obs_dir}/event_l2/*evt2_v[0-9][0-9]_picorr.fits", recursive=True)):
-                file_list.append(fits_file)
-        if obs == '03002599':
-            for fits_file in sorted(glob.glob(f"{obs_dir}/event_l2/*evt2_v[0-9][0-9].fits", recursive=True)):
-                file_list.append(fits_file)
+    file_list = sorted(glob.glob(f"{obs_dir}/event_l2/*evt2_v[0-9][0-9]_rej.fits"))
+    # special cases
+    if obs == '01002901_picorr':
+        file_list += sorted(glob.glob(f"{obs_dir}/event_l2/*evt2_v[0-9][0-9]_picorr.fits"))
+    if obs == '03002599':
+        file_list += sorted(glob.glob(f"{obs_dir}/event_l2/*evt2_v[0-9][0-9].fits"))
 
     if len(file_list) == 0:
-        raise ValueError(f'No files found for obs_list: {obs_list} in ixpe_path: {ixpe_path}')
-    
+        raise ValueError(f'No level-2 event files of {obs} in {obs_dir}/event_l2/')
+
     if chatter:
-        print(f'Found {len(file_list)} files for obs_list: {obs_list} in ixpe_path: {ixpe_path}')
+        print(f'Found {len(file_list)} files of {obs} in {obs_dir}:')
         for f in file_list:
             print(f)
-    
+
     return file_list
+
+
+def spectra(folder: str, obs: str) -> tuple[list[str], list[str]]:
+    """The Stokes I source and background spectra of ``obs`` below ``folder`` (a staged product
+    holding them, or a folder :func:`pha` wrote them into), DU1 to DU3. Where a
+    detector unit has spectra of both the background-rejected events (``_rej_``) and the plain ones
+    (ObsID ``03002599``), the rejected ones are read, as :func:`get_all_file_list` lists them first.
+    Raises ``ValueError`` unless one spectrum is left per role and detector unit."""
+    found = {}
+    for path in sorted(Path(folder).rglob(f'ixpe{obs}_det*_pha1.fits')):
+        match = _PHA1.search(path.name)
+        if match:
+            found.setdefault((match.group('filter').removeprefix('rej_'), match.group('du')), []).append(str(path))
+    out = {}
+    for role in ('src', 'bkg'):
+        for du in '123':
+            files = found.get((role, du), [])
+            rejected = [f for f in files if f'_rej_{role}_pha1' in Path(f).name]
+            files = rejected if len(files) > 1 and rejected else files
+            if len(files) != 1:
+                raise ValueError(f'expected one {role} PHA1 spectrum of {obs} DU{du} below {folder}, found {files}')
+            out.setdefault(role, []).append(files[0])
+    return out['src'], out['bkg']
 
 def _get_obs_file_list(obs: str, file_list: list[str], chatter=False) -> list[str]:
     """
@@ -235,20 +248,25 @@ def pha(obs: str,
         irf_date: str | None=None,
         changes: bool=True,
         overwrite: bool=True,
-        chatter: bool=False
+        chatter: bool=False,
+        *,
+        outdir: str | None=None,
+        products: list | None=None,
     ) -> tuple[list[str], list[str]]:
     """
     Reduce to IXPE PHA data for a given observation and args. returns a list of PHA file paths.
 
-    The Stokes I/Q/U spectra are a standard reduction, so they are
-    observation-database items: with changes=True they are written beside the
-    level-2 inputs (``<obsid folder>/event_l2/``, the folder ``obsdb_catalog.locate`` finds, checked before anything
-    is written) and every Stokes I source and background spectrum is recorded
-    through ``obsdb_catalog.neutral.advance`` (kind ``pha``) with the radii,
-    position and response set in ``params``. changes=True needs overwrite=True.
+    Library code writes no store (only a manifest tool does): with changes=True
+    the level-2 inputs are linked into ``outdir`` and the reduction runs there
+    (ixpeobssim writes each product beside the file it reads), so the selected
+    event lists and the source and background PHA1/PHA1Q/PHA1U spectra all land
+    in ``outdir`` and the inputs are only read. A ``products`` list, when given,
+    is extended with one ``{'path', 'caption'}`` per spectrum written. A tool
+    wrapping this function is what would store the spectra as a product.
+    changes=True needs overwrite=True.
 
-    When changes=False: only obs and file_list are required.
-    When changes=True: src_rad, bkg_inner_rad, bkg_outer_rad, ra, dec, irf_date are required.
+    When changes=False: only obs and file_list are required; the spectra are read beside the inputs.
+    When changes=True: src_rad, bkg_inner_rad, bkg_outer_rad, ra, dec, irf_date and outdir are required.
 
     Parameters
     ----------
@@ -279,6 +297,12 @@ def pha(obs: str,
         Date string for the IRF version to use, in the format 'YYYYMMDD'. Required if changes=True.
         Avaliable IRF versions at: <installed ixpeobssim>/caldb/ixpe/gpd (ixpeobssim.IXPEOBSSIM_CALDB)
 
+    outdir: str
+        Folder the call writes into (keyword only; required if changes=True).
+
+    products: list or None
+        When given, extended with one ``{'path', 'caption'}`` per spectrum written (changes=True).
+
     Returns
     -------
     tuple[list[str], list[str]]
@@ -299,32 +323,32 @@ def pha(obs: str,
             # so the catalog would record settings the file was not made with.
             raise ValueError('changes=True records the spectra with these settings; pass overwrite=True '
                              'so every spectrum is made with them')
-        root = _obs_db_of(obs, obs_file_list)
-        '''
-        If changes were made to input params, redo reduction
-        '''
-
+        if outdir is None:
+            raise ValueError('changes=True writes the spectra into a folder of its own: pass outdir')
+        for f in obs_file_list:
+            if not _EVT2.search(Path(f).name):
+                raise ValueError(f'{f} is not ixpe{obs}_det<n>_evt2_v<NN>[_rej].fits; pha reduces only level-2 '
+                                 'event files of its observation')
+        links = _stage(obs_file_list, outdir)
+        bin_kwargs = dict(overwrite=overwrite, irfname=f'ixpe:obssim{irf_date}_alpha075:v13', weights=True)
         with open(os.devnull, 'w') as fnull:
             with redirect_stdout(fnull):
                 # Select source and background regions (Stokes-agnostic event files)
-                src_sel = pipeline.xpselect(*obs_file_list , rad= src_rad , suffix='src', ra = ra, dec = dec, overwrite=overwrite)
-                bkg_sel = pipeline.xpselect(*obs_file_list, ra = ra, dec = dec , innerrad=bkg_inner_rad , rad=bkg_outer_rad , suffix='bkg', overwrite=overwrite)
-
+                src_sel = pipeline.xpselect(*links, rad=src_rad, suffix='src', ra=ra, dec=dec, overwrite=overwrite)
+                bkg_sel = pipeline.xpselect(*links, ra=ra, dec=dec, innerrad=bkg_inner_rad, rad=bkg_outer_rad,
+                                            suffix='bkg', overwrite=overwrite)
                 # Bin the selected events into Stokes I/Q/U PHA spectra.  PHA1 (I)
                 # paths are returned; PHA1Q/PHA1U (Q/U) are written to disk with the
                 # _pha1q/_pha1u suffixes that get_pha_q/get_pha_u expect.
-                bin_kwargs = dict(overwrite=overwrite, irfname=f'ixpe:obssim{irf_date}_alpha075:v13', weights=True)
-                src_pha_file_list = pipeline.xpbin(*src_sel, algorithm='PHA1', **bin_kwargs)
-                bkg_pha_file_list = pipeline.xpbin(*bkg_sel, algorithm='PHA1', **bin_kwargs)
-                pipeline.xpbin(*src_sel, algorithm='PHA1Q', **bin_kwargs)
-                pipeline.xpbin(*bkg_sel, algorithm='PHA1Q', **bin_kwargs)
-                pipeline.xpbin(*src_sel, algorithm='PHA1U', **bin_kwargs)
-                pipeline.xpbin(*bkg_sel, algorithm='PHA1U', **bin_kwargs)
-        _record_pha(root, obs, src_pha_file_list + bkg_pha_file_list, {
-            'src_rad_arcmin': float(src_rad), 'bkg_inner_arcmin': float(bkg_inner_rad),
-            'bkg_outer_arcmin': float(bkg_outer_rad), 'ra': float(ra), 'dec': float(dec),
-            'irfname': bin_kwargs['irfname'], 'weights': True,
-        })
+                written = {}
+                for algorithm in ('PHA1', 'PHA1Q', 'PHA1U'):
+                    written[algorithm] = (pipeline.xpbin(*src_sel, algorithm=algorithm, **bin_kwargs),
+                                          pipeline.xpbin(*bkg_sel, algorithm=algorithm, **bin_kwargs))
+        src_pha_file_list, bkg_pha_file_list = (list(files) for files in written['PHA1'])
+        if products is not None:
+            products.extend({'path': str(f), 'caption': f'IXPE {obs} {role} Stokes {stokes} spectrum {Path(f).name}'}
+                            for stokes, algorithm in (('I', 'PHA1'), ('Q', 'PHA1Q'), ('U', 'PHA1U'))
+                            for role, files in zip(('source', 'background'), written[algorithm]) for f in files)
     else:
         '''
         Use existing reduction results
@@ -348,54 +372,6 @@ def pha(obs: str,
 
 _PHA1 = re.compile(r'_det(?P<du>[123])_evt2_(?P<ver>v\d+)_(?P<filter>(?:rej_)?(?:src|bkg))_pha1\.fits$')
 _EVT2 = re.compile(r'_det[123]_evt2_v\d+(?:_rej)?\.fits$')
-
-
-def _obs_db_of(obs: str, obs_file_list: list[str]) -> Path:
-    """The IXPE mission folder of the observation database the level-2 inputs lie in: every input
-    is ``<obs folder>/event_l2/ixpe<obs>_det<n>_evt2_v<NN>[_rej].fits``, its ObsID folder is the
-    one ``obsdb_catalog.locate`` finds below the nearest folder named ``ixpe`` (any case). Raises
-    ``ValueError`` for an input outside that (a working copy such as ``<obs>_picorr/``), before
-    anything is written."""
-    obs_dirs = set()
-    for f in obs_file_list:
-        path = Path(f)
-        if path.parent.name != 'event_l2' or path.parent.parent.name != obs or not _EVT2.search(path.name):
-            raise ValueError(f'{f} is not <obs folder>/event_l2/ixpe{obs}_det<n>_evt2_v<NN>[_rej].fits; '
-                             'pha writes its spectra into an observation database and records them in '
-                             'its catalog, so it reduces only files in that layout')
-        obs_dirs.add(path.parent.parent)
-    (obs_dir,) = obs_dirs if len(obs_dirs) == 1 else (None,)
-    mission = next((d for d in obs_dir.parents if d.name.lower() == 'ixpe'), None) if obs_dir else None
-    try:
-        found = locate(mission.parent, mission.name, obs) if mission else None
-    except (FileNotFoundError, LookupError):
-        found = None
-    if found is None or Path(found).resolve() != obs_dir.resolve():
-        raise ValueError(f'{sorted(map(str, obs_dirs))} is not the folder obsdb_catalog.locate finds for '
-                         f'{obs} in an IXPE observation database; the spectra cannot be recorded there')
-    return mission
-
-
-def _record_pha(root: Path, obs: str, pha_file_list: list[str], params: dict) -> None:
-    """Record every Stokes I spectrum :func:`pha` wrote (source and background per detector
-    unit, kind ``pha``) in the catalog of the observation database *root*, each with the
-    reduction's *params*; the Q/U spectra follow each I file's name (``_pha1q``/``_pha1u``)."""
-    products = []
-    for f in pha_file_list:
-        match = _PHA1.search(Path(f).name)
-        if match is None:
-            raise ValueError(f'{f} is not an ixpeobssim PHA1 name; the spectra cannot be recorded')
-        products.append({
-            'kind': 'pha',
-            'path': str(Path(f).relative_to(root)),
-            'produced_by': 'xspec_utils.lib.red_ixpe.pha',
-            'params': {
-                'du': f"DU{match.group('du')}", 'stokes': 'I', 'filter': match.group('filter'),
-                'calibration_version': match.group('ver'), **params,
-                'note': 'the Stokes Q/U spectra follow the same name with _pha1q/_pha1u',
-            },
-        })
-    neutral.advance(str(root), 'ixpe', obs, level=3, products=products)
 
 
 def get_pha_q(pha_path: str) -> str:

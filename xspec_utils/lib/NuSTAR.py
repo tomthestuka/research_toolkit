@@ -1,16 +1,12 @@
 import glob
 from pathlib import Path
 
-from obsdb_catalog.locate import locate
 
+def _obs_dir(obs_dir: str, obs: str) -> Path:
+    """The ObsID folder ``obs_dir`` (a product staged from the store, laid out as HEASARC's ObsID folder)."""
+    return Path(obs_dir)
 
-def _obs_dir(mission_path: str, obs: str) -> Path:
-    """The folder holding ``obs`` under the mission folder ``mission_path``, wherever the obs-db
-    keeps it (HEASARC's archive tree, or flat): ``obsdb_catalog.locate``."""
-    path = Path(mission_path)
-    return locate(path.parent, path.name, obs)
-
-def pha(obs: str, nustar_path: str, chatter=False) -> tuple[list[str], list[str]]:
+def pha(obs: str, obs_dir: str, chatter=False) -> tuple[list[str], list[str]]:
     """
     Get the paths to the pha files for a given observation.
 
@@ -18,24 +14,24 @@ def pha(obs: str, nustar_path: str, chatter=False) -> tuple[list[str], list[str]
     ----------
     obs : str
         The observation ID.
-    nustar_path : str
-        The path to the NuSTAR data directory.
+    obs_dir : str
+        The observation's folder: its product staged from the store (``storelib.stage_in``).
 
     Returns
     -------
     tuple[list[str], list[str]]
         The paths to the source and background pha files. First list is source pha files (FPMA/FPMB), second list is background pha files (FPMA/FPMB).
     """
-    src_pha = sorted(glob.glob(f"{_obs_dir(nustar_path, obs)}/products/*sr_grp.pha"))
-    bkg_pha = sorted(glob.glob(f"{_obs_dir(nustar_path, obs)}/products/*bk.pha"))
+    src_pha = sorted(glob.glob(f"{_obs_dir(obs_dir, obs)}/products/*sr_grp.pha"))
+    bkg_pha = sorted(glob.glob(f"{_obs_dir(obs_dir, obs)}/products/*bk.pha"))
     if len(src_pha) != 2:
         raise ValueError(
             f'Expected 2 source pha files (FPMA/FPMB) for obs: {obs}, but found {len(src_pha)}\n'
-            f'the search was: {_obs_dir(nustar_path, obs)}/products/*sr_grp.pha')
+            f'the search was: {_obs_dir(obs_dir, obs)}/products/*sr_grp.pha')
     if len(bkg_pha) != 2:
         raise ValueError(
             f'Expected 2 background pha files (FPMA/FPMB) for obs: {obs}, but found {len(bkg_pha)}\n'
-            f'the search was: {_obs_dir(nustar_path, obs)}/products/*bk.pha')
+            f'the search was: {_obs_dir(obs_dir, obs)}/products/*bk.pha')
     
     if chatter:
         print(f"NuSTAR PHA query results for obs: {obs}")
@@ -48,7 +44,7 @@ def pha(obs: str, nustar_path: str, chatter=False) -> tuple[list[str], list[str]
 
     return src_pha, bkg_pha
 
-def rmf(obs: str, nustar_path: str, chatter=False) -> list[str]:
+def rmf(obs: str, obs_dir: str, chatter=False) -> list[str]:
     """
     Get the paths to the rmf files for a given observation, in order of FPMA, FPMB.
 
@@ -56,19 +52,19 @@ def rmf(obs: str, nustar_path: str, chatter=False) -> list[str]:
     ----------
     obs : str
         The observation ID.
-    nustar_path : str
-        The path to the NuSTAR data directory.
+    obs_dir : str
+        The observation's folder: its product staged from the store (``storelib.stage_in``).
 
     Returns
     -------
     list[str]
         The paths to the rmf files.
     """
-    rmf_files = sorted(glob.glob(f"{_obs_dir(nustar_path, obs)}/products/*rmf"))
+    rmf_files = sorted(glob.glob(f"{_obs_dir(obs_dir, obs)}/products/*rmf"))
     if len(rmf_files) != 2:
         raise ValueError(
             f'Expected 2 NuSTAR rmf files (FPMA/FPMB) for obs: {obs}, but found {len(rmf_files)}\n'
-            f'the search was: {_obs_dir(nustar_path, obs)}/products/*rmf')
+            f'the search was: {_obs_dir(obs_dir, obs)}/products/*rmf')
     
     if chatter:
         print(f"NuSTAR RMF query results for obs: {obs}")
@@ -78,7 +74,7 @@ def rmf(obs: str, nustar_path: str, chatter=False) -> list[str]:
 
     return rmf_files
 
-def arf(obs: str, nustar_path: str, chatter=False) -> list[str]:
+def arf(obs: str, obs_dir: str, chatter=False) -> list[str]:
     """
     Get the paths to the arf files for a given observation, in order of FPMA, FPMB.
 
@@ -86,19 +82,19 @@ def arf(obs: str, nustar_path: str, chatter=False) -> list[str]:
     ----------
     obs : str
         The observation ID.
-    nustar_path : str
-        The path to the NuSTAR data directory.
+    obs_dir : str
+        The observation's folder: its product staged from the store (``storelib.stage_in``).
 
     Returns
     -------
     list[str]
         The paths to the arf files.
     """
-    arf_files = sorted(glob.glob(f"{_obs_dir(nustar_path, obs)}/products/*arf"))
+    arf_files = sorted(glob.glob(f"{_obs_dir(obs_dir, obs)}/products/*arf"))
     if len(arf_files) != 2:
         raise ValueError(
             f'Expected 2 NuSTAR arf files (FPMA/FPMB) for obs: {obs}, but found {len(arf_files)}\n'
-            f'the search was: {_obs_dir(nustar_path, obs)}/products/*arf')
+            f'the search was: {_obs_dir(obs_dir, obs)}/products/*arf')
     
     if chatter:
         print(f"NuSTAR ARF query results for obs: {obs}")

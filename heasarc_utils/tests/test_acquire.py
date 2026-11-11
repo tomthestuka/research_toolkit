@@ -1,24 +1,29 @@
+"""acquire against a fake archive (the ``_heasarc`` seam) and a throwaway store (root conftest
+``store``): what a download stores, when it is answered from the store, and every refusal."""
+
 import gzip
 import os
+from pathlib import PurePosixPath
 
 import pytest
 
+import storelib
 from heasarc_utils.lib import heasarc
-from heasarc_utils.lib.heasarc_help import acquire
-from obsdb_catalog import neutral
+from heasarc_utils.lib.heasarc_help import ALGORITHM_VERSION, KIND, TOOL, acquire
 
-# Relative level-2 file each mission's download lands on disk, below its ObsID folder. Fresh
-# archive downloads are gzipped (the live run confirmed this); acquire gunzips them, so the
-# recorded path is the plain (decompressed) twin — see ``_plain``.
+# The level-2 file each mission's download holds, below its ObsID folder. Fresh archive downloads are
+# gzipped (the live run of 2026-06-17 confirmed this); acquire gunzips them, so the stored file is the
+# plain twin (``_plain``).
 LEVEL2_REL = {
-    "ixpe": "{obsid}/event_l2/ixpe{obsid}_det1_evt2_v01.fits.gz",
-    "nicer": "{obsid}/xti/event_cl/ni{obsid}_0mpu7_cl.evt.gz",
-    "nustar": "{obsid}/event_cl/nu{obsid}A01_cl.evt.gz",
+    "ixpe": "event_l2/ixpe{obsid}_det1_evt2_v01.fits.gz",
+    "nicer": "xti/event_cl/ni{obsid}_0mpu7_cl.evt.gz",
+    "nustar": "event_cl/nu{obsid}A01_cl.evt.gz",
 }
 OBSID = {"ixpe": "01002901", "nicer": "4690010101", "nustar": "30702017002"}
-# Where HEASARC's archive keeps each ObsID below the mission (the access_url locate_data returned
-# for these ObsIDs, 2026-11-04), and so where the local copy keeps it.
+# Where HEASARC's archive keeps each ObsID below the mission (the access_url locate_data returned for
+# these ObsIDs, 2026-11-04).
 TREE = {"ixpe": "data/obs/01", "nicer": "data/obs/2022_02", "nustar": "data/obs/07/3"}
+IXPE_LOCKED_REL = "event_l2/ixpe{obsid}_det1_evt2_v03.fits.gz" + heasarc.LOCK_SUFFIX
 
 
 def _url(mission, obsid, tree=None):
@@ -26,33 +31,45 @@ def _url(mission, obsid, tree=None):
     return f"https://heasarc.gsfc.nasa.gov/FTP/{mission}/{tree or TREE[mission]}//{obsid}/"
 
 
-def _recorded(mission, obsid, rel=None):
-    """The level-2 path the catalog records: relative to the mission folder, through the tree."""
-    return f"{TREE[mission]}/" + _plain((rel or LEVEL2_REL[mission]).format(obsid=obsid))
-
-
 def _plain(rel: str) -> str:
-    """The decompressed path acquire records after gunzipping the download."""
     return rel[:-3] if rel.endswith(".gz") else rel
 
 
-def _write(path):
-    """Write a fixture file. A ``.gz`` path gets valid gzip content so that the
-    acquire-time gunzip can decompress it (mirrors a real archive download)."""
+#: The processing the fake master-table row names, and its level-2 files' headers state by default.
+SOFTVER, CALDBVER = "Hea_test_V6.36", "20251101"
+
+
+def _fits(softver=SOFTVER, caldbver=CALDBVER) -> bytes:
+    """A minimal FITS file: a primary header carrying the processing keywords a level-2 event states."""
+    cards = ["SIMPLE  =                    T", "BITPIX  =                    8", "NAXIS   =                    0",
+             f"SOFTVER = '{softver}'", f"CALDBVER= '{caldbver}'", "END"]
+    return "".join(c.ljust(80) for c in cards).ljust(2880).encode("ascii")
+
+
+def _write(path, data=None, *, softver=SOFTVER):
+    """A fixture file: an event file (``.fits``/``.evt``) is a FITS file stating ``softver``, anything
+    else one byte; a ``.gz`` path gets valid gzip content (as an archive download has)."""
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    if path.endswith(".gz"):
-        with gzip.open(path, "wb") as fh:
-            fh.write(b"x")
-    else:
-        with open(path, "wb") as fh:
-            fh.write(b"x")
+    plain = path[:-3] if path.endswith(".gz") else path
+    if data is None:
+        data = _fits(softver) if plain.endswith((".fits", ".evt")) else b"x"
+    with (gzip.open(path, "wb") if path.endswith(".gz") else open(path, "wb")) as fh:
+        fh.write(data)
 
 
-def _fake(mission, obsid, *, found=True, create=True, folder=None):
-    """Build a fake Heasarc whose download_data lands the level-2 file(s)."""
+def _row(processing_date, public_date=None):
+    """A master-table row as astroquery's table answers ``table[column][0]``."""
+    return {"processing_date": [processing_date], "software_version": [SOFTVER],
+            "caldb_version": [CALDBVER], "public_date": [public_date if public_date is not None else 60000.0]}
+
+
+def _fake(mission, obsid, *, processing_date, found=True, files=None, folder=None, public_date=None,
+          downloads=None, tree=None, softver=SOFTVER):
+    """A fake Heasarc: its row carries ``processing_date`` (unique per test, so each test's recipe is
+    its own), its download lands ``files`` (default: the mission's level-2 event) below the ObsID."""
     class _Result:
         def to_table(self):
-            return ["row"] if found else []
+            return _row(processing_date, public_date) if found else []
 
     class FakeHeasarc:
         @classmethod
@@ -62,448 +79,211 @@ def _fake(mission, obsid, *, found=True, create=True, folder=None):
 
         @classmethod
         def locate_data(cls, tab, catalog_name=None):
-            return {"access_url": [_url(folder or mission, obsid, tree=TREE[mission])]}
-
-        @classmethod
-        def download_data(cls, links, location=None, host=None):
-            if not create:
-                return
-            # astroquery unpacks the observation as <location>/<obsid>/ (every host)
-            _write(os.path.join(location, LEVEL2_REL[mission].format(obsid=obsid)))
-
-    return FakeHeasarc
-
-
-@pytest.mark.parametrize("mission", ["ixpe", "nicer", "nustar"])
-def test_acquire_records_level2(tmp_path, monkeypatch, mission):
-    obsid = OBSID[mission]
-    monkeypatch.setattr(heasarc, "_heasarc", lambda: _fake(mission, obsid))
-    summary = acquire(obsid, mission, str(tmp_path))
-
-    assert summary["obsid"] == obsid and summary["mission"] == mission
-    assert summary["mission_dir"] == str(tmp_path / mission)
-    assert summary["obsid_dir"] == str(tmp_path / mission / TREE[mission] / obsid)
-    entry = neutral.read(tmp_path / mission)["entries"][obsid]
-    assert entry["max_level"] == 2 and entry["levels_present"] == [1, 2]
-    (prod,) = entry["products"]
-    assert prod["kind"] == "level2_evt" and prod["produced_by"] == "heasarc"
-    assert prod["path"] == _recorded(mission, obsid)
-
-    expected_params = {
-        "ixpe": {"detectors": [1, 2, 3], "calibration_version": "v01",
-                 "note": heasarc._IXPE_NOTE},
-        "nicer": {"mpu": 7},
-        "nustar": {"fpm": "A", "note": heasarc._NUSTAR_NOTE},
-    }[mission]
-    assert prod["params"] == expected_params
-
-
-@pytest.mark.parametrize("mission", ["ixpe", "nicer", "nustar"])
-def test_acquire_gunzips_download(tmp_path, monkeypatch, mission):
-    """Acquire decompresses the gzipped download: the plain level-2 file exists on
-    disk, its ``.gz`` source is gone, and the recorded path is the plain file."""
-    obsid = OBSID[mission]
-    monkeypatch.setattr(heasarc, "_heasarc", lambda: _fake(mission, obsid))
-    summary = acquire(obsid, mission, str(tmp_path))
-
-    gz = tmp_path / mission / TREE[mission] / LEVEL2_REL[mission].format(obsid=obsid)
-    plain = tmp_path / mission / _recorded(mission, obsid)
-    assert plain.exists(), "decompressed level-2 file should be on disk"
-    assert not gz.exists(), "the .gz source should be removed after gunzip"
-    assert plain.read_bytes() == b"x", "decompressed content should match the source"
-
-    prod = neutral.read(tmp_path / mission)["entries"][obsid]["products"][0]
-    assert prod["path"] == _recorded(mission, obsid)
-
-
-def test_reacquire_regresses_to_level2(tmp_path, monkeypatch):
-    obsid = OBSID["ixpe"]
-    # pre-existing level-3 reduction product
-    pha_rel = f"{TREE['ixpe']}/{obsid}/event_l2/ixpe{obsid}_det1_evt2_v01_rej_src_pha1.fits"
-    _write(os.path.join(tmp_path, "ixpe", pha_rel))
-    neutral.advance(tmp_path / "ixpe", "ixpe", obsid, level=3, products=[
-        {"kind": "pha", "path": pha_rel, "produced_by": "x", "params": {}}])
-
-    monkeypatch.setattr(heasarc, "_heasarc", lambda: _fake("ixpe", obsid))
-    acquire(obsid, "ixpe", str(tmp_path))
-
-    entry = neutral.read(tmp_path / "ixpe")["entries"][obsid]
-    assert entry["max_level"] == 2                       # regressed
-    assert {p["kind"] for p in entry["products"]} == {"pha", "level2_evt"}
-
-
-def test_obsid_not_found_raises_and_no_record(tmp_path, monkeypatch):
-    monkeypatch.setattr(heasarc, "_heasarc", lambda: _fake("ixpe", "01002901", found=False))
-    with pytest.raises(heasarc.HeasarcError):
-        acquire("01002901", "ixpe", str(tmp_path))
-    assert neutral.read(tmp_path / "ixpe")["entries"] == {}
-
-
-def test_download_without_level2_raises_and_no_record(tmp_path, monkeypatch):
-    monkeypatch.setattr(heasarc, "_heasarc", lambda: _fake("nicer", "4690010101", create=False))
-    with pytest.raises(heasarc.HeasarcError):
-        acquire("4690010101", "nicer", str(tmp_path))
-    assert neutral.read(tmp_path / "nicer")["entries"] == {}
-
-
-@pytest.mark.parametrize("mission", ["ixpe", "nicer", "nustar"])
-def test_first_acquire_into_an_empty_root_clones_heasarcs_tree(tmp_path, monkeypatch, mission):
-    from obsdb_catalog import locate
-    from obsdb_catalog.healthcheck import healthcheck
-
-    root = tmp_path / "obsdb"
-    root.mkdir()
-    obsid = OBSID[mission]
-    monkeypatch.setattr(heasarc, "_heasarc", lambda: _fake(mission, obsid))
-    acquire(obsid, mission, str(root))
-
-    assert sorted(p.name for p in root.iterdir()) == [mission]
-    assert (root / mission / "catalog.json").is_file()
-    obs_dir = root / mission / TREE[mission] / obsid
-    assert obs_dir.is_dir()
-    assert locate(root, mission, obsid) == obs_dir
-    assert healthcheck(root / mission) is True
-
-
-def test_an_archive_folder_other_than_the_mission_is_refused(tmp_path, monkeypatch):
-    monkeypatch.setattr(heasarc, "_heasarc", lambda: _fake("ixpe", "01002901", folder="other"))
-    with pytest.raises(heasarc.HeasarcError, match="FTP/other"):
-        acquire("01002901", "ixpe", str(tmp_path))
-    assert not (tmp_path / "ixpe").exists() and not (tmp_path / "other").exists()
-
-
-def test_unregistered_mission_raises(tmp_path):
-    with pytest.raises(heasarc.HeasarcError):
-        acquire("12345", "chandra", str(tmp_path))
-
-
-# ── timeout_s tests ───────────────────────────────────────────────────────
-
-
-def test_timeout_threaded_to_download(tmp_path, monkeypatch):
-    """Differential: timeout_s value threads through all three layers to the
-    astroquery object at download time.
-
-    A capturing fake reads ``cls.timeout`` inside ``download_data``; the value
-    must equal exactly what was passed to ``acquire``.  The default (omitted
-    timeout_s) must land as 1800.0, confirming the old astroquery factory
-    default (30 s) is never used when this tool is the caller.
-    """
-    obsid = OBSID["ixpe"]
-    mission = "ixpe"
-    captured: list[float] = []
-
-    class CapturingFakeHeasarc:
-        @classmethod
-        def query_tap(cls, adql):
-            class _R:
-                def to_table(self):
-                    return ["row"]
-            return _R()
-
-        @classmethod
-        def locate_data(cls, tab, catalog_name=None):
-            return {"access_url": [_url(mission, obsid)]}
-
-        @classmethod
-        def download_data(cls, links, location=None, host=None):
-            captured.append(cls.timeout)
-            _write(os.path.join(location, LEVEL2_REL[mission].format(obsid=obsid)))
-
-    monkeypatch.setattr(heasarc, "_heasarc", lambda: CapturingFakeHeasarc)
-
-    # custom value — must arrive unchanged
-    acquire(obsid, mission, str(tmp_path), timeout_s=900.0)
-    assert captured[-1] == 900.0, (
-        f"expected timeout 900.0 at download_data, got {captured[-1]}"
-    )
-
-    # default (omitted) — must be 1800.0, NOT the astroquery factory 30 s
-    acquire(obsid, mission, str(tmp_path))
-    assert captured[-1] == 1800.0, (
-        f"default timeout must be 1800.0, got {captured[-1]}"
-    )
-
-
-def test_timeout_does_not_suppress_obsid_error(tmp_path, monkeypatch):
-    """Regression: passing timeout_s must not alter the loud-failure contract
-    for a missing ObsID — HeasarcError still raised, nothing recorded."""
-    monkeypatch.setattr(heasarc, "_heasarc",
-                        lambda: _fake("ixpe", "01002901", found=False))
-    with pytest.raises(heasarc.HeasarcError):
-        acquire("01002901", "ixpe", str(tmp_path), timeout_s=1800.0)
-    assert neutral.read(tmp_path / "ixpe")["entries"] == {}
-
-
-def test_timeout_default_in_all_three_layers():
-    """Regression: default timeout_s is 1800 s at every call layer, confirming
-    the old astroquery 30 s bound cannot silently reappear when the argument is
-    omitted anywhere in the chain."""
-    import inspect
-    from heasarc_utils.lib import heasarc as hm
-
-    for fn, name in [
-        (acquire, "heasarc_help.acquire"),
-        (hm.acquire_obsid, "heasarc.acquire_obsid"),
-        (hm.download, "heasarc.download"),
-    ]:
-        params = inspect.signature(fn).parameters
-        assert "timeout_s" in params, f"{name} missing timeout_s parameter"
-        assert params["timeout_s"].default == 1800.0, (
-            f"{name}: timeout_s default is {params['timeout_s'].default}, "
-            f"expected 1800.0"
-        )
-
-
-def test_tool_manifest_exposes_timeout_s():
-    """Pin the AI-facing half: TOOL_MANIFEST must expose timeout_s in args_schema.
-
-    A lib/ change that adds timeout_s to heasarc_help.acquire but forgets to
-    surface it in skills/__init__.py would leave the LLM unable to set the
-    parameter.  This test makes that gap a Layer-B failure.
-
-    Asserts:
-    - timeout_s is present in args_schema.properties
-    - its type is "number" (JSON Schema — not "float" or "integer")
-    - timeout_s is NOT listed in required (optional argument with a default)
-    - the description records the 1800 s default so the LLM knows what to expect
-    """
-    from heasarc_utils.skills import TOOL_MANIFEST
-
-    entry = TOOL_MANIFEST["research_toolkit.heasarc_utils.acquire"]
-    schema = entry["args_schema"]
-    props = schema["properties"]
-
-    assert "timeout_s" in props, (
-        "timeout_s missing from args_schema.properties — "
-        "LLM callers cannot pass it"
-    )
-    assert props["timeout_s"]["type"] == "number", (
-        f"timeout_s type should be 'number', got {props['timeout_s'].get('type')!r}"
-    )
-    assert "timeout_s" not in schema.get("required", []), (
-        "timeout_s must not be required — it has a default of 1800 s"
-    )
-    desc = props["timeout_s"].get("description", "")
-    assert "1800" in desc, (
-        "timeout_s description must mention the 1800 s default so the LLM "
-        f"knows the baseline; got: {desc!r}"
-    )
-
-
-# ── encrypted (proprietary-period) observations ───────────────────────────
-#
-# HEASARC serves an observation still inside its proprietary period GPG-encrypted.
-# That download is complete and correct; it simply cannot be read. Before this, the
-# level-2 deriver rejected the ``.gpg`` name and raised *before* anything was
-# recorded, so a finished multi-GB download left no trace — and the next request,
-# seeing nothing local, downloaded it again, forever.
-
-IXPE_LOCKED_REL = ("{obsid}/event_l2/ixpe{obsid}_det1_evt2_v03.fits.gz"
-                   + neutral.LOCK_SUFFIX)
-
-
-def _fake_locked(obsid, *, public_date_mjd=None, create=True, downloads=None):
-    """A fake archive that serves this ObsID encrypted, and reports a public_date.
-
-    ``downloads`` (a list) records each transfer, so a test can assert that a
-    re-acquire consulted metadata *instead of* re-transferring.
-    """
-    class _Result:
-        def __init__(self, adql):
-            self._adql = adql
-
-        def to_table(self):
-            if "public_date" in self._adql:
-                if public_date_mjd is None:
-                    raise RuntimeError("archive reports no public_date for this row")
-                return {"public_date": [public_date_mjd]}
-            return ["row"]
-
-    class FakeHeasarc:
-        @classmethod
-        def query_tap(cls, adql):
-            assert obsid in adql
-            return _Result(adql)
-
-        @classmethod
-        def locate_data(cls, tab, catalog_name=None):
-            return {"access_url": [_url("ixpe", obsid, tree="data/obs/04")]}
+            return {"access_url": [_url(folder or mission, obsid, tree=tree or TREE.get(mission, "data/obs"))]}
 
         @classmethod
         def download_data(cls, links, location=None, host=None):
             if downloads is not None:
-                downloads.append(location)
-            if create:
-                _write(os.path.join(location, IXPE_LOCKED_REL.format(obsid=obsid)))
+                downloads.append(cls.timeout)
+            for rel in (files if files is not None else [LEVEL2_REL[mission]]):
+                # astroquery unpacks the observation as <location>/<obsid>/ (every host)
+                _write(os.path.join(location, obsid, rel.format(obsid=obsid)), softver=softver)
 
     return FakeHeasarc
 
 
-def _mjd(days_from_now: float) -> float:
-    import datetime
-    now = (datetime.datetime.now(datetime.timezone.utc)
-           - datetime.datetime(1858, 11, 17, tzinfo=datetime.timezone.utc))
-    return now.total_seconds() / 86400.0 + days_from_now
+@pytest.fixture
+def archive(store, tmp_path, monkeypatch):
+    """Install a fake archive: ``archive(mission, obsid, **fake)``; the working folder is the test's."""
+    monkeypatch.chdir(tmp_path)
+    date = 61000 + int(store["tag"][:6], 16) / 2 ** 24  # a processing date of this test alone
+
+    def install(mission, obsid, **fake):
+        fake.setdefault("processing_date", date)
+        monkeypatch.setattr(heasarc, "_heasarc", lambda: _fake(mission, obsid, **fake))
+    return install
 
 
-def test_acquire_records_encrypted_download_instead_of_raising(tmp_path, monkeypatch):
-    """The core regression: an encrypted download is recorded, so it is never re-fetched."""
+def _products():
+    """The catalog's product rows of kind raw, oldest first."""
+    with storelib.connect() as conn:
+        return conn.execute("SELECT state, reason, recipe FROM catalog.product WHERE kind = 'raw' "
+                            "ORDER BY claimed_at").fetchall()
+
+
+@pytest.mark.parametrize("mission", ["ixpe", "nicer", "nustar"])
+def test_acquire_stores_the_observation_as_a_raw_product(archive, tmp_path, mission):
+    obsid = OBSID[mission]
+    archive(mission, obsid, files=[LEVEL2_REL[mission], "auxil/extra.txt"])
+    summary = acquire(obsid, mission)
+
+    record = summary["record"]
+    assert summary["downloaded"] is True and summary["locked"] is False and summary["files"] == 2
+    assert record["store"] == storelib.store_name() and record["bucket"] == mission
+    assert PurePosixPath(record["key"]).parts[:2] == (KIND, obsid) and record["key"].endswith("/recipe.json")
+    level2 = _plain(LEVEL2_REL[mission].format(obsid=obsid))
+    assert summary["level2_evt"]["key"] == f"{storelib.product_folder(record)}/{level2}"
+    [folder] = storelib.stage_in(record, tmp_path / "in")
+    assert (folder / level2).read_bytes() == _fits(), "the stored event is the gunzipped file"
+    assert sorted(str(p.relative_to(folder)) for p in folder.rglob("*") if p.is_file()) == sorted(
+        [level2, "auxil/extra.txt", "recipe.json"])
+    assert summary["archive"]["software_version"] == "Hea_test_V6.36" and summary["archive"]["public"] is True
+
+
+def test_a_repeat_acquire_is_answered_from_the_store_and_a_reprocessing_downloads_afresh(archive):
+    obsid, downloads = OBSID["ixpe"], []
+    archive("ixpe", obsid, downloads=downloads)
+    first = acquire(obsid, "ixpe")
+    again = acquire(obsid, "ixpe")
+    assert len(downloads) == 1 and again["downloaded"] is False and again["record"] == first["record"]
+
+    archive("ixpe", obsid, downloads=downloads, processing_date=first["archive"]["processing_date"] + 1.5)
+    later = acquire(obsid, "ixpe")
+    assert len(downloads) == 2 and later["downloaded"] is True and later["record"] != first["record"]
+
+
+def test_an_obsid_the_archive_lacks_raises_before_any_claim(archive):
+    archive("ixpe", "01002901", found=False)
+    before = len(_products())
+    with pytest.raises(heasarc.HeasarcError, match="not found"):
+        acquire("01002901", "ixpe")
+    assert len(_products()) == before
+
+
+def test_a_download_without_its_level2_event_stores_nothing_and_says_why(archive):
+    archive("nicer", OBSID["nicer"], files=["auxil/other.txt"])
+    with pytest.raises(heasarc.HeasarcError, match="NICER level-2 cleaned event"):
+        acquire(OBSID["nicer"], "nicer")
+    state, reason, _ = _products()[-1]
+    assert state == "failed" and "NICER level-2 cleaned event" in reason
+
+
+def test_a_download_older_than_the_processing_its_row_names_stores_nothing(archive):
+    """The archive's catalog row can name a newer processing than the files it still serves (seen for
+    IXPE 01250101: row 1.11, files 1.5): the download fails, naming both, and nothing is stored."""
+    obsid = OBSID["ixpe"]
+    archive("ixpe", obsid, softver="Hea_10Mar2022_V6.30_IXPE_21JUNE2022_1.5")
+    with pytest.raises(heasarc.HeasarcError) as raised:
+        acquire(obsid, "ixpe")
+    assert "Hea_10Mar2022_V6.30_IXPE_21JUNE2022_1.5" in str(raised.value) and SOFTVER in str(raised.value)
+    assert "lags its catalog" in str(raised.value)
+    state, reason, recipe = _products()[-1]
+    assert state == "failed" and "lags its catalog" in reason and recipe["settings"]["software_version"] == SOFTVER
+    with storelib.connect() as conn:
+        assert conn.execute("SELECT count(*) FROM catalog.object o JOIN catalog.product p USING (recipe_hash) "
+                            "WHERE p.state = 'failed' AND p.subject = %s", (obsid,)).fetchone()[0] == 0
+
+
+def test_the_file_state_reads_softver_and_caldbver_from_the_header(tmp_path):
+    path = tmp_path / "evt.fits"
+    path.write_bytes(_fits("Hea_X_1.11", "20260101"))
+    assert heasarc.file_state(str(path)) == {"SOFTVER": "Hea_X_1.11", "CALDBVER": "20260101"}
+    state = {"software_version": "Hea_X_1.11", "caldb_version": "20260101"}
+    assert heasarc.state_mismatch(state, str(path)) is None
+    assert "CALDBVER '20260101'" in heasarc.state_mismatch({**state, "caldb_version": "20270101"}, str(path))
+    assert heasarc.state_mismatch({"software_version": None, "caldb_version": None}, str(path)) is None
+
+
+def test_an_archive_folder_other_than_the_mission_is_refused(archive):
+    archive("ixpe", "01002901", folder="ixpe_other")
+    with pytest.raises(heasarc.HeasarcError, match="register the mission under its archive name"):
+        acquire("01002901", "ixpe")
+
+
+def test_unregistered_mission_raises():
+    with pytest.raises(heasarc.HeasarcError, match="no MissionProfile"):
+        acquire("123", "nosuchmission")
+
+
+def test_timeout_threads_to_the_download(archive):
+    """The value acquire is given reaches astroquery's ``timeout`` at download time."""
+    captured = []
+    archive("ixpe", OBSID["ixpe"], downloads=captured)
+    acquire(OBSID["ixpe"], "ixpe", timeout_s=900.0)
+    assert captured == [900.0]
+
+
+def test_timeout_default_in_every_layer():
+    """Omitted, the timeout is 1800 s at every layer, never astroquery's factory 30 s."""
+    import inspect
+
+    for fn in (acquire, heasarc.download_obsid, heasarc.download):
+        assert inspect.signature(fn).parameters["timeout_s"].default == 1800.0, fn.__name__
+
+
+def test_the_manifest_names_the_tool_its_version_and_its_store():
+    from heasarc_utils.skills import TOOL_MANIFEST
+
+    entry = TOOL_MANIFEST[TOOL]
+    assert entry["writes"] == ["db"] and entry["algorithm_version"] == ALGORITHM_VERSION
+    schema = entry["args_schema"]
+    assert schema["properties"]["timeout_s"]["type"] == "number"
+    assert "1800" in schema["properties"]["timeout_s"]["description"]
+    assert schema["required"] == ["obsid", "mission"]
+
+
+# ── encrypted (proprietary-period) observations ───────────────────────────
+# HEASARC serves an observation still inside its proprietary period GPG-encrypted. That download is
+# complete and correct; it simply cannot be read. It is stored, and asking again while it is still
+# proprietary is the same recipe, so nothing is transferred again.
+
+
+def test_an_encrypted_download_is_stored_locked_and_not_fetched_again_until_public(archive):
+    obsid, downloads = "04004001", []
+    archive("ixpe", obsid, files=[IXPE_LOCKED_REL], tree="data/obs/04",
+            public_date=heasarc.mjd_now() + 72, downloads=downloads)
+    first = acquire(obsid, "ixpe")
+    assert first["locked"] is True and first["downloaded"] is True and "proprietary" in first["note"]
+    assert first["level2_evt"]["key"].endswith(".fits.gz.gpg") and 71 <= first["days_until_public"] <= 73
+
+    again = acquire(obsid, "ixpe")
+    assert len(downloads) == 1 and again["downloaded"] is False and again["locked"] is True
+
+    # the proprietary period has lapsed: the archive serves it in the clear
+    archive("ixpe", obsid, tree="data/obs/04", public_date=heasarc.mjd_now() - 1, downloads=downloads,
+            processing_date=first["archive"]["processing_date"])
+    public = acquire(obsid, "ixpe")
+    assert len(downloads) == 2 and public["downloaded"] is True and public["locked"] is False
+
+
+def test_a_public_observation_still_served_encrypted_stores_nothing(archive):
+    obsid = "04004002"
+    archive("ixpe", obsid, files=[IXPE_LOCKED_REL], tree="data/obs/04", public_date=heasarc.mjd_now() - 3)
+    with pytest.raises(heasarc.HeasarcError, match="still serves it GPG-encrypted"):
+        acquire(obsid, "ixpe")
+    state, reason, recipe = _products()[-1]
+    assert state == "failed" and recipe["subject"] == obsid and "GPG-encrypted" in reason
+
+
+def test_an_archive_row_without_a_processing_date_is_refused_before_any_claim(archive):
+    archive("ixpe", "01002901", processing_date=None)
+    before = len(_products())
+    with pytest.raises(heasarc.HeasarcError, match="no processing_date"):
+        acquire("01002901", "ixpe")
+    assert len(_products()) == before
+
+
+def test_a_decrypted_copy_wins_over_its_encrypted_twin(archive):
     obsid = "04004001"
-    monkeypatch.setattr(heasarc, "_heasarc", lambda: _fake_locked(obsid))
-
-    summary = acquire(obsid, "ixpe", str(tmp_path))
-
-    assert summary["downloaded"] is True and summary["locked"] is True
-    assert "proprietary" in summary["note"]
-
-    entry = neutral.read(tmp_path / "ixpe")["entries"][obsid]
-    (prod,) = entry["products"]
-    assert prod["kind"] == "level2_evt"
-    assert prod["path"] == "data/obs/04/" + IXPE_LOCKED_REL.format(obsid=obsid)
-    assert neutral.is_locked(prod["path"])
-    assert entry["max_level"] == 2, (
-        "the file genuinely is the level-2 event; the .gpg path, not a demoted "
-        "level, is what says it cannot be read"
-    )
+    archive("ixpe", obsid, tree="data/obs/04",
+            files=[IXPE_LOCKED_REL, LEVEL2_REL["ixpe"].replace("v01", "v03")])
+    summary = acquire(obsid, "ixpe")
+    assert summary["locked"] is False and not heasarc.is_locked(summary["level2_evt"]["key"])
 
 
-def test_reacquire_of_locked_obsid_asks_instead_of_downloading(tmp_path, monkeypatch):
-    """Still proprietary → skip the transfer, report when it unlocks.
-
-    Re-downloading would spend ~25 minutes to receive the same unreadable bytes,
-    which is precisely the loop this closes.
-    """
-    obsid = "04004001"
-    downloads: list[str] = []
-    monkeypatch.setattr(heasarc, "_heasarc",
-                        lambda: _fake_locked(obsid, public_date_mjd=_mjd(72),
-                                             downloads=downloads))
-    acquire(obsid, "ixpe", str(tmp_path))          # first acquire: one transfer
-    assert len(downloads) == 1
-
-    summary = acquire(obsid, "ixpe", str(tmp_path))  # second: answered from metadata
-
-    assert len(downloads) == 1, "a proprietary re-acquire must not transfer again"
-    assert summary["downloaded"] is False and summary["locked"] is True
-    assert summary["mission_dir"] == str(tmp_path / "ixpe")
-    assert summary["obsid_dir"] == str(tmp_path / "ixpe" / "data/obs/04" / obsid)
-    assert 71 <= summary["days_until_public"] <= 73
-    assert "still inside its proprietary period" in summary["note"]
-
-
-def test_reacquire_downloads_once_the_observation_is_public(tmp_path, monkeypatch):
-    """Public → the archive now serves readable bytes, so acquire fetches them."""
-    obsid = "04004001"
-    downloads: list[str] = []
-    monkeypatch.setattr(heasarc, "_heasarc",
-                        lambda: _fake_locked(obsid, public_date_mjd=_mjd(72),
-                                             downloads=downloads))
-    acquire(obsid, "ixpe", str(tmp_path))
-    assert len(downloads) == 1
-
-    # the proprietary period has now lapsed and the archive serves it in the clear
-    def _public():
-        return _fake_locked(obsid, public_date_mjd=_mjd(-1), downloads=downloads)
-    monkeypatch.setattr(heasarc, "_heasarc", _public)
-
-    summary = acquire(obsid, "ixpe", str(tmp_path))
-
-    assert len(downloads) == 2, "a public re-acquire downloads normally"
-    assert summary["downloaded"] is True
-
-
-def test_unknown_public_date_does_not_hold_back_a_reacquire(tmp_path, monkeypatch):
-    """No availability information is not evidence to skip work.
-
-    A mission whose row carries no ``public_date`` (or an archive that will not
-    answer) leaves the caller exactly where it was: acquire behaves as it always did.
-    """
-    obsid = "04004001"
-    downloads: list[str] = []
-    monkeypatch.setattr(heasarc, "_heasarc",
-                        lambda: _fake_locked(obsid, public_date_mjd=None,
-                                             downloads=downloads))
-    acquire(obsid, "ixpe", str(tmp_path))
-    acquire(obsid, "ixpe", str(tmp_path))
-
-    assert len(downloads) == 2
-    assert heasarc.availability("ixmaster", obsid)["is_public"] is None
-
-
-def test_decrypted_copy_wins_over_its_encrypted_twin(tmp_path, monkeypatch):
-    """With both copies on disk the readable one is what gets recorded."""
-    obsid = "04004001"
-
-    class _Fake:
-        @classmethod
-        def query_tap(cls, adql):
-            class _R:
-                def to_table(self):
-                    return ["row"]
-            return _R()
-
-        @classmethod
-        def locate_data(cls, tab, catalog_name=None):
-            return {"access_url": [_url("ixpe", obsid, tree="data/obs/04")]}
-
-        @classmethod
-        def download_data(cls, links, location=None, host=None):
-            _write(os.path.join(location, IXPE_LOCKED_REL.format(obsid=obsid)))
-            _write(os.path.join(location, LEVEL2_REL["ixpe"].format(obsid=obsid)
-                                .replace("v01", "v03")))
-
-    monkeypatch.setattr(heasarc, "_heasarc", lambda: _Fake)
-    summary = acquire(obsid, "ixpe", str(tmp_path))
-
-    assert summary["locked"] is False
-    assert not neutral.is_locked(summary["level2_evt"])
-
-
-def test_register_new_mission_profile(tmp_path, monkeypatch):
+def test_a_mission_profile_is_all_a_mission_needs(archive, monkeypatch):
     obsid = "999"
-
-    def _level2(obs_dir, oid):
-        full = os.path.join(obs_dir, "data", "evt.fits")
-        if not os.path.exists(full):
-            raise heasarc.HeasarcError("missing")
-        return {"kind": "level2_evt", "path": full, "produced_by": "heasarc", "params": {}}
-
-    monkeypatch.setitem(heasarc.MISSIONS, "newmis",
-                        heasarc.MissionProfile(catalog="newmaster", level2=_level2))
-
-    class _Result:
-        def to_table(self):
-            return ["row"]
-
-    class FakeHeasarc:
-        @classmethod
-        def query_tap(cls, adql):
-            assert "newmaster" in adql
-            return _Result()
-
-        @classmethod
-        def locate_data(cls, tab, catalog_name=None):
-            return {"access_url": [_url("newmis", obsid, tree="data/obs")]}
-
-        @classmethod
-        def download_data(cls, links, location=None, host=None):
-            _write(os.path.join(location, obsid, "data", "evt.fits"))
-
-    monkeypatch.setattr(heasarc, "_heasarc", lambda: FakeHeasarc)
-    acquire(obsid, "newmis", str(tmp_path))
-    entry = neutral.read(tmp_path / "newmis")["entries"][obsid]
-    assert entry["max_level"] == 2 and entry["products"][0]["path"] == f"data/obs/{obsid}/data/evt.fits"
+    monkeypatch.setitem(heasarc.MISSIONS, "ixpe", heasarc.MissionProfile(
+        catalog="newmaster", level2=lambda paths, oid: heasarc._one(paths, oid, "data", "evt.fits", "event")))
+    archive("ixpe", obsid, files=["data/evt.fits"], tree="data/obs")
+    summary = acquire(obsid, "ixpe")
+    assert summary["level2_evt"]["key"].endswith("/data/evt.fits")
 
 
-def test_a_mission_folder_passed_as_the_root_is_refused(tmp_path, monkeypatch):
-    monkeypatch.setattr(heasarc, "_heasarc", lambda: _fake("ixpe", "01002901"))
-    with pytest.raises(heasarc.HeasarcError, match="mission folder"):
-        acquire("01002901", "ixpe", str(tmp_path / "IXPE"))
-    assert not (tmp_path / "IXPE").exists()
+# ── the archive's answers (no store) ─────────────────────────────────────
 
 
-def test_the_archives_own_message_names_an_obsid_without_data(tmp_path):
+def test_the_archives_own_message_names_an_obsid_without_data():
     links = {"access_url": [""], "error_message": ["NotFoundFault: No products found for id 64"]}
     with pytest.raises(heasarc.HeasarcError, match="No products found"):
         heasarc.archive_path(links, "60464001")
@@ -512,35 +292,21 @@ def test_the_archives_own_message_names_an_obsid_without_data(tmp_path):
         heasarc.archive_path(two, "01002901")
 
 
-def test_a_flat_root_is_refused_naming_both_layouts(tmp_path, monkeypatch):
-    """The obs-db is HEASARC's tree only; a flat <mission>/<obsid>/ folder is the human's copy."""
-    obsid = OBSID["ixpe"]
-    flat = f"{obsid}/event_l2/ixpe{obsid}_det1_evt2_v01.fits"
-    _write(os.path.join(tmp_path, "ixpe", flat))
-    neutral.new(tmp_path / "ixpe", "ixpe", obsid, products=[
-        {"kind": "level2_evt", "path": flat, "produced_by": "heasarc", "params": {}}])
-    downloads = []
-    monkeypatch.setattr(heasarc, "_heasarc", lambda: _fake("ixpe", obsid))
-    monkeypatch.setattr(heasarc, "download", lambda *a, **k: downloads.append(a))
-    for target in (obsid, "02008201"):  # this ObsID's flat folder, or another's
-        with pytest.raises(heasarc.HeasarcError, match="laid out flat") as excinfo:
-            acquire(target, "ixpe", str(tmp_path))
-        assert "<obsid>/ at its top" in str(excinfo.value) and "ixpe/data/obs/*/<obsid>/" in str(excinfo.value)
-
-    # flat with no catalog: the ObsID folders alone say so
-    bare = tmp_path / "bare"
-    _write(os.path.join(bare, "nustar", "80902318002", "event_cl", "a.evt"))
-    with pytest.raises(heasarc.HeasarcError, match="laid out flat"):
-        acquire(OBSID["nustar"], "nustar", str(bare))
-    assert downloads == []
+def test_the_archive_state_reads_the_row_and_leaves_blanks_empty():
+    state = heasarc.archive_state({"processing_date": [61000.25], "software_version": [b"Hea_V6"],
+                                   "caldb_version": ["  "], "public_date": [float("nan")]})
+    assert state == {"processing_date": 61000.25, "software_version": "Hea_V6", "caldb_version": None,
+                     "public_date": None}
+    assert heasarc.archive_state([]) == dict.fromkeys(state)
 
 
-def test_a_heasarc_tree_with_root_level_records_is_accepted(tmp_path, monkeypatch):
-    obsid = OBSID["ixpe"]
-    folder = tmp_path / "ixpe"
-    _write(os.path.join(folder, "survey.csv"))
-    neutral.advance(folder, "ixpe", "02008201", level=3, products=[
-        {"kind": "hardness_ratio", "path": "survey.csv", "produced_by": "x", "params": {}}])
-    monkeypatch.setattr(heasarc, "_heasarc", lambda: _fake("ixpe", obsid))
-    summary = acquire(obsid, "ixpe", str(tmp_path))
-    assert summary["obsid_dir"] == str(folder / TREE["ixpe"] / obsid)
+@pytest.mark.parametrize("mission, paths, found", [
+    ("ixpe", ["event_l2/ixpe01002901_det1_evt2_v01_rej.fits", "event_l2/ixpe01002901_det1_evt2_v02.fits"],
+     "event_l2/ixpe01002901_det1_evt2_v02.fits"),
+    ("nicer", ["xti/event_cl/ni4690010101_0mpu7_cl.evt.gpg", "xti/event_cl/ni4690010101_0mpu7_cl.evt"],
+     "xti/event_cl/ni4690010101_0mpu7_cl.evt"),
+    ("nustar", ["event_cl/sub/nu30702017002A01_cl.evt", "event_cl/nu30702017002A01_cl.evt.gz"],
+     "event_cl/nu30702017002A01_cl.evt.gz"),
+])
+def test_each_mission_names_its_level2_event_among_the_files(mission, paths, found):
+    assert heasarc.MISSIONS[mission].level2(paths, OBSID[mission]) == found

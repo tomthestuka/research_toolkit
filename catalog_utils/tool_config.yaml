@@ -1,0 +1,5 @@
+# Per-package tool configuration, read by auto_research's ToolkitRegistry.
+
+# The software environment the package's tools run in (envs/archive/: psycopg and boto3 for the store,
+# heasarc_utils' mission profiles).
+env: archive

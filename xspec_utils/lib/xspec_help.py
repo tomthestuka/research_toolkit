@@ -74,20 +74,16 @@ def assign_responses(spec_index: int, pha: str) -> list[str]:
 
 def load_data(
     epoch: dict,
-    ixpe_path: str,
-    nicer_path: str | None = None,
-    nustar_path: str | None = None,
-    ixpe_changes: bool = False,
-    ixpe_src_rad: float = 1.0,
-    ixpe_bkg_inner_rad: float = 3.0,
-    ixpe_bkg_outer_rad: float = 5.0,
-    ixpe_irf_date: str = '20230702',
+    ixpe: dict | list | None = None,
+    nicer: dict | list | None = None,
+    nustar: dict | list | None = None,
     ixpe_erange: tuple[float, float] = (2.0, 8.0),
     nicer_erange: tuple[float, float] = (1.0, 10.0),
     nustar_erange: tuple[float, float] = (4.0, 50.0),
     nustar_use_bkg: bool = False,
     clear_existing: bool = True,
     chatter: bool = False,
+    staged: str | None = None,
 ) -> dict:
     """Load spectra for one epoch into XSPEC.
 
@@ -117,27 +113,19 @@ def load_data(
         Expected keys: ``'IXPE'``, ``'NICER'``, ``'NuSTAR'`` (each a list of
         obs-ID strings) and ``'STATE'``.  Only one IXPE observation per epoch
         is supported.
-    ixpe_path : str
-        Path to the directory containing IXPE observation sub-directories
-        (passed to ``red_ixpe.get_all_file_list``).
-    nicer_path : str or None
-        Path to the NICER data directory.  Required when ``'NICER'`` is in
-        *epoch*.
-    nustar_path : str or None
-        Path to the NuSTAR data directory.  Required when ``'NuSTAR'`` is in
-        *epoch*.
-    ixpe_changes : bool
-        If True, re-run the IXPE reduction pipeline; if False (default), use
-        existing pipeline products on disk.
-    ixpe_src_rad : float
-        IXPE source-region radius in arcminutes (default 1.0).
-    ixpe_bkg_inner_rad : float
-        IXPE background annulus inner radius in arcminutes (default 3.0).
-    ixpe_bkg_outer_rad : float
-        IXPE background annulus outer radius in arcminutes (default 5.0).
-    ixpe_irf_date : str
-        IRF date string in ``'YYYYMMDD'`` format used to select the IXPE
-        response (default ``'20230702'``).
+    ixpe : dict or list or None
+        The record (``{store, bucket, key, version_id}``) of the store product
+        holding the epoch's IXPE spectra: the Stokes I/Q/U source and background
+        PHA1 files per detector unit (found by ``red_ixpe.spectra`` anywhere
+        in the product), one record per ObsID in *epoch* order.  Required when ``'IXPE'`` is in *epoch*.
+    nicer : dict or list or None
+        The record(s) of the product(s) holding each NICER ObsID's reduced
+        spectrum, background, RMF and ARF (``xti/event_cl/``), in *epoch* order.
+        Required when ``'NICER'`` is in *epoch*.
+    nustar : dict or list or None
+        The record(s) of the product(s) holding each NuSTAR ObsID's grouped
+        spectra, backgrounds, RMFs and ARFs (``products/``), in *epoch* order.
+        Required when ``'NuSTAR'`` is in *epoch*.
     ixpe_erange : tuple[float, float]
         (lo, hi) energy range in keV to *notice* for IXPE (default 2–8 keV).
     nicer_erange : tuple[float, float]
@@ -152,6 +140,10 @@ def load_data(
         before loading new spectra.
     chatter : bool
         If True, print file paths and per-instrument loading summaries.
+    staged : str or None
+        The folder records are staged into (``storelib.stage_in``); default
+        ``staged/`` in the working folder.  NICER and NuSTAR copies are
+        writable: their spectra's ``XFLT0001`` keyword is set in the copy.
 
     Returns
     -------
@@ -185,6 +177,10 @@ def load_data(
     import NICER as _NICER
     import NuSTAR as _NuSTAR
 
+    staged = staged or os.path.join(os.getcwd(), 'staged')
+    folders = {inst: _staged_folders(inst, epoch.get(inst) or [], records, staged, read_only=(inst == 'IXPE'))
+               for inst, records in (('IXPE', ixpe), ('NICER', nicer), ('NuSTAR', nustar)) if inst in epoch}
+
     if clear_existing:
         AllData.clear()
         AllModels.clear()
@@ -198,16 +194,12 @@ def load_data(
 
         # ------------------------------------------------------------ NuSTAR
         if inst == 'NuSTAR':
-            if nustar_path is None:
-                raise ValueError(
-                    "'nustar_path' is required when the epoch contains NuSTAR observations.")
-
             FPM_LABELS = ['FPMA', 'FPMB']
             result['NuSTAR'] = {}
-            for obs in epoch['NuSTAR']:
-                src_lst, bkg_lst = _NuSTAR.pha(obs, nustar_path, chatter=chatter)
-                rmf_lst = _NuSTAR.rmf(obs, nustar_path, chatter=chatter)
-                arf_lst = _NuSTAR.arf(obs, nustar_path, chatter=chatter)
+            for obs, folder in zip(epoch['NuSTAR'], folders['NuSTAR']):
+                src_lst, bkg_lst = _NuSTAR.pha(obs, folder, chatter=chatter)
+                rmf_lst = _NuSTAR.rmf(obs, folder, chatter=chatter)
+                arf_lst = _NuSTAR.arf(obs, folder, chatter=chatter)
 
                 for f in src_lst:
                     with fits.open(f, mode='update') as hdul:
@@ -233,15 +225,11 @@ def load_data(
 
         # ------------------------------------------------------------- NICER
         elif inst == 'NICER':
-            if nicer_path is None:
-                raise ValueError(
-                    "'nicer_path' is required when the epoch contains NICER observations.")
-
             result['NICER'] = {}
-            for obs in epoch['NICER']:
-                src, bkg = _NICER.pha(obs, nicer_path, chatter=chatter)
-                f_rmf = _NICER.rmf(obs, nicer_path, chatter=chatter)
-                f_arf = _NICER.arf(obs, nicer_path, chatter=chatter)
+            for obs, folder in zip(epoch['NICER'], folders['NICER']):
+                src, bkg = _NICER.pha(obs, folder, chatter=chatter)
+                f_rmf = _NICER.rmf(obs, folder, chatter=chatter)
+                f_arf = _NICER.arf(obs, folder, chatter=chatter)
 
                 for f in (src, bkg):
                     with fits.open(f, mode='update') as hdul:
@@ -266,18 +254,10 @@ def load_data(
                     "load_data currently supports only one IXPE observation per epoch; "
                     f"got {epoch['IXPE']}.")
 
-            ixpe_file_list = _red_ixpe.get_all_file_list(ixpe_path, chatter=chatter)
             obs = epoch['IXPE'][0]
-            ixpe_src, ixpe_bkg = _red_ixpe.pha(
-                obs=obs,
-                file_list=ixpe_file_list,
-                src_rad=ixpe_src_rad,
-                bkg_inner_rad=ixpe_bkg_inner_rad,
-                bkg_outer_rad=ixpe_bkg_outer_rad,
-                irf_date=ixpe_irf_date,
-                changes=ixpe_changes,
-                chatter=chatter,
-            )
+            ixpe_src, ixpe_bkg = _red_ixpe.spectra(folders['IXPE'][0], obs)
+            if chatter:
+                print(f'IXPE {obs} spectra: {ixpe_src} {ixpe_bkg}')
 
             DU_LABELS = ['DU1', 'DU2', 'DU3']
             ixpe_obs_result = {}
@@ -324,6 +304,28 @@ def load_data(
     if resolved:
         print(responses_used(resolved))
     return result
+
+
+def _staged_folders(inst: str, obs_list: list, records, staged: str, *, read_only: bool) -> list:
+    """The staged folder of each ObsID of ``inst`` in ``obs_list``: ``records`` (one record or a list,
+    one per ObsID in order, each naming its product's ``recipe.json``) staged below ``staged``. A record
+    whose key names another subject than its ObsID is refused."""
+    import storelib
+
+    records = [records] if isinstance(records, dict) else list(records or [])
+    if len(records) != len(obs_list):
+        raise ValueError(f"the epoch lists {len(obs_list)} {inst} ObsID(s) {list(obs_list)}; pass one record each "
+                         f"(the data catalog lists them), got {len(records)}")
+    for obs, record in zip(obs_list, records):
+        record = storelib.check_record(record)
+        if not storelib.is_product(record):
+            raise ValueError(f"{inst} {obs}: pass the record of a product (its key ends in recipe.json), "
+                             f"not {record['key']}")
+        parts = record['key'].split('/')
+        if len(parts) < 4 or parts[1] != str(obs):
+            raise ValueError(f"{inst} {obs}: the record {record['key']} is a product of {parts[1:2] or '?'}, "
+                             f"not of {obs}")
+    return storelib.stage_in(records, staged, read_only=read_only) if records else []
 
 
 def freeze_all(thaw=False):

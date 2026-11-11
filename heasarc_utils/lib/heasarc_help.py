@@ -1,96 +1,50 @@
-"""High-level acquire entry point — download an ObsID and record it.
+"""High-level acquire entry point — download an ObsID and store it as a product.
 
-This is the abstracted, human-callable API (and the function the LLM tool wraps).
-It is the first producer wired into ``obsdb_catalog``: after the archive data is
-on disk it records the level-2 event through the single trusted writer
-(``obsdb_catalog.neutral.new``) — the only path that may mutate ``catalog.json``.
+This is the abstracted, human-callable API (and the function the LLM tool wraps). An archive download
+is a product like any other (``storelib.produce``): bucket = the mission (HEASARC's name for it),
+kind = ``raw``, subject = the ObsID, settings = what identifies the archive's copy (the master-table
+row's processing date, software and CALDB versions, and whether the observation is public yet). The
+same recipe is downloaded once: a repeat acquire is answered from the store. A reprocessed
+observation, or one that has since become public, is a new recipe and a fresh download.
 
-**Encrypted (proprietary) observations.** HEASARC serves data still inside its
-proprietary period GPG-encrypted. Such a download is complete and correct — it is
-simply not readable without the key — so it is *recorded* rather than treated as a
-failed download, and re-running acquire consults the archive's ``public_date``
-instead of transferring the payload again. The lifecycle is: download once, then on
-a repeat request ask whether the observation has become public, and download again
-only once it has. Before this, an encrypted download recorded nothing, so the
-catalog could never learn the ObsID existed and every later request re-downloaded
-gigabytes that could never be read.
+**Encrypted (proprietary) observations.** HEASARC serves data still inside its proprietary period
+GPG-encrypted. Such a download is complete and correct — it is simply not readable without the key —
+so it is stored rather than treated as a failed download, and the result says so (``locked``). Asking
+again while the observation is still proprietary is the same recipe, so the stored copy is returned
+without a transfer; once it is public the recipe changes and the readable copy is downloaded.
 """
 
 from __future__ import annotations
 
-import os
+import posixpath
 
-from obsdb_catalog import neutral
+import storelib
 
 from . import heasarc
 
-__all__ = ["acquire"]
+__all__ = ["acquire", "TOOL", "ALGORITHM_VERSION", "KIND"]
+
+#: The manifest key of the tool this function backs: the recipe names it.
+TOOL = "research_toolkit.heasarc_utils.acquire"
+#: Bumped whenever what a download stores changes (the manifest's ``algorithm_version``).
+ALGORITHM_VERSION = "1"
+#: The product kind of an archive download.
+KIND = "raw"
+#: How long a download may hold its claim (seconds): above the tool's call timeout ceiling (6 h).
+LEASE_S = 7 * 3600
 
 
-def _locked_copy_on_disk(obs_db_path: str, obsid: str) -> str | None:
-    """Relative path of an already-recorded encrypted product still on disk, else None.
-
-    Checked live rather than trusted from the catalog alone: a human may decrypt the
-    archive out of band, at which point the recorded ``.gpg`` path stops existing and
-    this correctly reports nothing to hold back for.
-    """
-    try:
-        entries = neutral.read(obs_db_path).get("entries") or {}
-    except neutral.CatalogError:
-        return None  # a broken catalog is repair's problem, never a reason to skip work
-    for product in (entries.get(str(obsid)) or {}).get("products") or []:
-        path = (product or {}).get("path") or ""
-        if neutral.is_locked(path) and os.path.exists(os.path.join(obs_db_path, path)):
-            return path
-    return None
-
-
-def _flat_layout(obs_db_path: str) -> str | None:
-    """A sign that a mission folder is laid out flat (``<mission>/<obsid>/``, the human's copy
-    before obs-dbs cloned HEASARC's tree), as a path relative to it: a top-level folder named by
-    digits alone (the ObsIDs here are; a HEASARC tree's top level holds ``data/``), or a catalog
-    record whose path starts with its own ObsID. ``None`` for a HEASARC-tree or new folder."""
-    if os.path.isdir(obs_db_path):
-        digits = sorted(d for d in os.listdir(obs_db_path)
-                        if d.isdigit() and os.path.isdir(os.path.join(obs_db_path, d)))
-        if digits:
-            return digits[0] + "/"
-    try:
-        entries = neutral.read(obs_db_path).get("entries") or {}
-    except neutral.CatalogError:
-        return None
-    for key, entry in entries.items():
-        for product in (entry or {}).get("products") or []:
-            path = str((product or {}).get("path") or "")
-            if path.split("/", 1)[0] == str(key):
-                return path
-    return None
-
-
-def acquire(obsid: str, mission: str, obs_db_root: str,
-            *, host: str | None = None, chatter: bool = False,
+def acquire(obsid: str, mission: str, *, host: str | None = None, chatter: bool = False,
             timeout_s: float = 1800.0) -> dict:
-    """Acquire archive data for ``obsid`` under ``obs_db_root`` and record it.
+    """Acquire archive data for ``obsid`` of ``mission`` into the store and return its record.
 
-    The local copy clones HEASARC's archive: the data lands at
-    ``<obs_db_root>/<mission>/<HEASARC's tree>/<obsid>/`` (e.g.
-    ``ixpe/data/obs/01/01002901/``) and is recorded in ``<obs_db_root>/<mission>/catalog.json``;
-    the first acquire of a mission creates both.
-
-    Resolves the ObsID authoritatively via the mission's HEASARC master table,
-    downloads it (astroquery only — no fallback), confirms the representative
-    level-2 event is on disk, and records it via ``obsdb_catalog.neutral.new``
-    (level 2). **Re-downloads on every call**, so the caller decides when to
-    acquire; a deliberate re-acquire regresses ``max_level`` to 2, flagging stale
-    downstream products for re-reduction.
-
-    **One exception, and only one:** when this ObsID was already acquired and its
-    data is on disk **GPG-encrypted** (HEASARC serves an observation inside its
-    proprietary period that way), the archive is asked for its ``public_date``
-    first. While the observation is still proprietary the download is skipped and
-    the encrypted state reported, because re-transferring gigabytes would return
-    the same unreadable bytes. Once the observation is public, acquire downloads
-    normally and the readable copy replaces the encrypted record.
+    Resolves the ObsID authoritatively via the mission's HEASARC master table (one row, which also
+    states the archive's processing and public date), then stores the observation as the product
+    ``raw/<obsid>/<short hash>/`` in the mission's bucket of the store the process's keys reach (``storelib.store_name``):
+    downloaded (astroquery only — no fallback) into a temporary folder in the working folder,
+    gunzipped, checked to hold the representative level-2 event, and uploaded file by file with the
+    ObsID folder's own layout (``event_l2/...``). When the store already holds this recipe, nothing is
+    downloaded.
 
     Parameters
     ----------
@@ -98,105 +52,96 @@ def acquire(obsid: str, mission: str, obs_db_root: str,
         Observation ID (mission-native format, e.g. ``"01002901"`` for IXPE).
     mission : str
         ``"ixpe"`` | ``"nicer"`` | ``"nustar"`` (or any registered mission).
-    obs_db_root : str
-        The obs-db root holding one folder per mission, named as HEASARC names it.
     host : str, optional
-        astroquery download host (``"heasarc"`` | ``"sciserver"`` | ``"aws"``).
-        Default lets astroquery choose based on the environment.
+        astroquery download host (``"heasarc"`` | ``"sciserver"`` | ``"aws"``). Default lets
+        astroquery choose based on the environment.
     timeout_s : float, optional
-        HTTP transfer timeout in seconds for the archive download. Default
-        1800 s (30 min). The astroquery factory default (30 s) is too short
-        for large IXPE observations (> 1 GB). Increase further if transfers
-        are still being cut off on very slow connections.
+        HTTP transfer timeout in seconds for the archive download. Default 1800 s (30 min). The
+        astroquery factory default (30 s) is too short for large IXPE observations (> 1 GB).
 
     Returns
     -------
     dict
-        ``{"obsid", "mission", "mission_dir", "obsid_dir", "level2_evt": <path relative to
-        mission_dir>, "catalog_entry", "downloaded": bool, "locked": bool}``. ``locked`` is true when the
-        level-2 product on disk is GPG-encrypted and therefore not directly
-        usable; a skipped re-download additionally carries ``"public_date_mjd"``,
-        ``"days_until_public"`` and a human-readable ``"note"``.
+        ``{"obsid", "mission", "record", "level2_evt", "downloaded", "locked", "archive", "files"}``:
+        ``record`` the product's record (pass it to tools that read the observation), ``level2_evt``
+        the record of its level-2 event, ``downloaded`` false when the store already held it,
+        ``locked`` true when that event is GPG-encrypted, ``archive`` the master-table state the
+        recipe holds, ``files`` how many files the product holds. A locked observation adds
+        ``days_until_public`` and a ``note``.
 
     Raises
     ------
     heasarc.HeasarcError
-        Unknown mission, ObsID not found, the download did not yield the
-        expected level-2 file, ``obs_db_root`` is itself a mission folder, or
-        the mission folder is laid out flat (``<mission>/<obsid>/``, the
-        human's copy; the obs-db is HEASARC's tree only). Nothing is recorded
-        on failure.
+        Unknown mission, ObsID not found, an archive folder other than the mission's, or a download
+        that does not yield the expected level-2 file. Nothing is stored on failure (the claim is
+        given up with the reason).
+    storelib.StoreError
+        The store refused, or this process holds no store keys; ``storelib.ProductBusy`` while another
+        unit downloads the same recipe.
     """
-    from obsdb_catalog.locate import locate, mission_dir
-
     mission = mission.lower()
-    root = os.path.abspath(obs_db_root)
-    if os.path.isfile(os.path.join(root, neutral.CATALOG_NAME)) or \
-            os.path.basename(root).lower() in heasarc.MISSIONS:
+    profile = heasarc.profile(mission)
+    tab, links = heasarc.resolve(profile.catalog, obsid)
+    folder, _tree = heasarc.archive_path(links, obsid)
+    if folder.lower() != mission:
+        raise heasarc.HeasarcError(f"HEASARC keeps {mission} ObsID {obsid} under FTP/{folder}/; register the "
+                                   f"mission under its archive name {folder!r}")
+    state = heasarc.archive_state(tab)
+    if state["processing_date"] is None:
         raise heasarc.HeasarcError(
-            f"{obs_db_root} is a mission folder; pass the obs-db root that holds the mission "
-            f"folders (its parent), so the data lands in <root>/{mission}/")
-    obs_db_path = str(mission_dir(obs_db_root, mission))
-    flat = _flat_layout(obs_db_path)
-    if flat is not None:
-        from obsdb_catalog import _domain
+            f"{profile.catalog} states no processing_date for ObsID {obsid!r}: the archive's processing state "
+            "identifies a download, so there is nothing to store until the archive has processed it")
+    public = state["public_date"] is None or state["public_date"] <= heasarc.mjd_now()
+    settings = {"mission": mission, "processing_date": state["processing_date"],
+                "software_version": state["software_version"], "caldb_version": state["caldb_version"],
+                "public": public}
 
-        tree = _domain.TREES.get(mission, ("<tree>/{obsid}",))[0].format(obsid="<obsid>")
-        raise heasarc.HeasarcError(
-            f"{obs_db_path} is laid out flat (<obsid>/ at its top, e.g. {flat}); acquire writes "
-            f"HEASARC's archive tree only ({mission}/{tree}/). Pass an obs-db root laid out as "
-            f"HEASARC's archive; a new, empty folder becomes one on the first acquire")
+    def make(work):
+        paths = heasarc.download_obsid(links, obsid, str(work), host=host, timeout_s=timeout_s)
+        level2 = profile.level2(paths, obsid)  # raises when the download holds no level-2 event
+        if not heasarc.is_locked(level2):
+            # The recipe names the row's processing; the bytes must be that processing.
+            lag = heasarc.state_mismatch(state, str(work / level2))
+            if lag:
+                raise heasarc.HeasarcError(
+                    f"{obsid}: the archive's level-2 file {level2} holds {lag}: the archive still serves an "
+                    "older processing than its catalog names (it lags its catalog); nothing is stored. "
+                    "Acquire it again later")
+        if public and heasarc.is_locked(level2):
+            # The archive still serves the encrypted copy after the public date (a lag): storing it
+            # under a public recipe would answer every later acquire of this state with it.
+            raise heasarc.HeasarcError(
+                f"{obsid} is public since MJD {state['public_date']:.0f}, but the archive still serves it "
+                "GPG-encrypted; nothing is stored. Acquire it again later")
+        if chatter:
+            print(f"[heasarc_utils] {mission} {obsid}: {len(paths)} files downloaded (timeout_s={timeout_s})")
+        return paths
 
-    locked_rel = _locked_copy_on_disk(obs_db_path, obsid)
-    if locked_rel is not None:
-        profile = heasarc.MISSIONS.get(mission)
-        status = heasarc.availability(profile.catalog, obsid) if profile else {}
-        if status.get("is_public") is False:
-            days = status.get("days_until_public")
-            note = (
-                f"{obsid} is already on disk GPG-encrypted and is still inside its "
-                f"proprietary period (public in {days:.0f} days, MJD "
-                f"{status['public_date_mjd']:.0f}), so the archive would serve the "
-                f"same encrypted bytes — the download was skipped. Decrypt the local "
-                f"copy out of band, or acquire again once the observation is public."
-            )
-            if chatter:
-                print(f"[heasarc_utils] {mission} {obsid}: {note}")
-            return {
-                "obsid": obsid,
-                "mission": mission,
-                "mission_dir": obs_db_path,
-                "obsid_dir": str(locate(obs_db_root, mission, obsid)),
-                "level2_evt": locked_rel,
-                "catalog_entry": neutral.read(obs_db_path)["entries"].get(str(obsid)),
-                "downloaded": False,
-                "locked": True,
-                "public_date_mjd": status.get("public_date_mjd"),
-                "days_until_public": days,
-                "note": note,
-            }
-
-    obs_db_path, obs_dir, product = heasarc.acquire_obsid(mission, obsid, obs_db_root,
-                                                          host=host, timeout_s=timeout_s)
-    locked = neutral.is_locked(product["path"])
-    if chatter:
-        print(f"[heasarc_utils] {mission} {obsid}: recording {product['path']}"
-              f"{' (GPG-encrypted)' if locked else ''} (timeout_s={timeout_s})")
-    entry = neutral.new(obs_db_path, mission, obsid, products=[product])
+    out = storelib.produce(bucket=mission, kind=KIND, subject=str(obsid), tool=TOOL,
+                           algorithm_version=ALGORITHM_VERSION, settings=settings, inputs=[], make=make,
+                           lease_s=LEASE_S)
+    folder_key = storelib.product_folder(out["record"])
+    files = {posixpath.relpath(o["key"], folder_key): o for o in out["objects"]
+             if o["key"] != out["record"]["key"]}
+    level2 = files[profile.level2(sorted(files), obsid)]
+    locked = heasarc.is_locked(level2["key"])
     summary = {
-        "obsid": obsid,
+        "obsid": str(obsid),
         "mission": mission,
-        "mission_dir": obs_db_path,
-        "obsid_dir": obs_dir,
-        "level2_evt": product["path"],
-        "catalog_entry": entry,
-        "downloaded": True,
+        "record": out["record"],
+        "level2_evt": {k: level2[k] for k in ("store", "bucket", "key", "version_id")},
+        "downloaded": out["status"] == "stored",
         "locked": locked,
+        "archive": {k: v for k, v in settings.items() if k != "mission"},
+        "files": len(files),
     }
     if locked:
+        days = max(0.0, state["public_date"] - heasarc.mjd_now()) if state["public_date"] is not None else None
+        summary["days_until_public"] = days
         summary["note"] = (
-            f"{obsid} was served GPG-encrypted (proprietary period) and is recorded "
-            f"as present but not directly usable. Decrypt the local copy out of band, "
-            f"or acquire again once the observation is public."
-        )
+            f"{obsid} was served GPG-encrypted (proprietary period"
+            f"{'' if days is None else f', public in {days:.0f} days'}): it is stored but not directly usable. "
+            "Acquire again once the observation is public; until then the store answers with this copy.")
+    if chatter:
+        print(f"[heasarc_utils] {mission} {obsid}: {out['status']} as {out['record']['key']}")
     return summary

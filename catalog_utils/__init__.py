@@ -1,19 +1,12 @@
-"""catalog_utils — the AI-facing READ of the local data catalog.
+"""catalog_utils — the AI-facing read of the data catalog.
 
-The domain read-half of the per-mission data inventory. ``obsdb_catalog`` (its
-sibling package) is the single trusted *writer* and low-level reader of a mission's
-``<obs_db_path>/catalog.json``; this package renders that catalog into the listing
-analysts consult BEFORE acquiring, so they acquire only genuinely-missing data.
+Renders the store's catalog (Postgres, read with the unit's own catalog login) into the listing analysts
+consult BEFORE acquiring, so they acquire only genuinely missing data, and from which they take the
+records analysis tools read.
 
-Split (CLAUDE.md §9.2):
+Split (CLAUDE.md §5):
   skills/__init__.py  — TOOL_MANIFEST (pure data; no heavy imports)
-  lib/catalog_read.py — the read + listing logic (pure standard library, reusing
-                        ``obsdb_catalog.neutral.read``)
-
-Pure standard library (no science stack), so the orchestration layer can both
-discover the manifest and invoke the read in-process. The orchestration layer owns
-*where* data lives (it resolves each mission's ``obs_db_path`` from its own config
-and passes it in); this package owns *how* the catalog is read and presented.
+  lib/catalog_read.py — the query and the listing (``storelib`` imported when it runs)
 
 This package re-exports TOOL_MANIFEST for ToolkitRegistry discovery.
 """

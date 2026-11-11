@@ -12,40 +12,41 @@ TOOL_MANIFEST = {
     "research_toolkit.heasarc_utils.acquire": {
         "module": "heasarc_utils.lib.heasarc_help",
         "fn": "acquire",
+        "writes": ["db"],
+        "algorithm_version": "1",
         "description": (
-            "Acquire (download) HEASARC archive data for one IXPE, NICER or NuSTAR "
-            "observation into the obs-db root, laid out as HEASARC's archive is, and record "
-            "it in that mission's data catalog. Call this when an ObsID is genuinely missing "
-            "locally."
+            "Acquire (download) HEASARC archive data for one IXPE, NICER or NuSTAR observation into "
+            "the data store, and return its record. Call this when the data catalog lists no raw "
+            "product for the ObsID, or to fetch the archive's newest processing of it."
         ),
         "args_schema": {
             "type": "object",
             "description": (
-                "METHOD: resolves the ObsID's archive location authoritatively via the "
-                "mission master table (rather than any hand-built path), downloads it, and "
-                "records the level-2 event at processing level 2. Data lands where HEASARC's "
-                "archive keeps it, below the mission's folder: <obs_db_root>/<mission>/<archive "
-                "tree>/<obsid>/ (e.g. ixpe/data/obs/01/01002901/), recorded in "
-                "<obs_db_root>/<mission>/catalog.json; the first acquire of a mission creates both. "
-                "The result names mission_dir and obsid_dir.\n"
-                "RE-DOWNLOADS ON EVERY CALL: reserve it for genuinely missing observations -- "
-                "confirm locality with a data-catalog tool first. A re-acquire regresses the "
-                "catalog to level 2, which flags any stale level-3 products for re-reduction.\n"
-                "ENCRYPTED (PROPRIETARY) DATA: an observation still inside its proprietary "
-                "period is served GPG-encrypted. That download is complete but unreadable, and "
-                "it is recorded as present-but-locked rather than reported as a failure, so the "
-                "data-catalog listing shows it as LOCKED, NOT USABLE. Asking for it again is "
-                "answered from the archive's public_date without re-transferring: while it is "
-                "still proprietary the download is skipped and the reply says when it becomes "
-                "public ('downloaded': false, 'locked': true). Treat a locked observation as "
-                "unavailable and report that honestly.\n"
+                "METHOD: resolves the ObsID in the mission's master table (rather than any hand-built "
+                "path), downloads the observation, and stores it as one product of kind raw in the "
+                "mission's bucket, its files laid out as the ObsID folder of HEASARC's archive "
+                "(event_l2/..., xti/event_cl/..., event_cl/...). The result names the product's "
+                "'record' (pass it to tools that read the observation), the 'level2_evt' record of its "
+                "level-2 event, and 'downloaded'.\n"
+                "ONE DOWNLOAD PER ARCHIVE STATE: the archive's processing date, software and CALDB "
+                "versions and public status identify the download. When the store already holds that "
+                "download, the call returns its record at once ('downloaded': false); a reprocessed "
+                "observation, or one that has become public, is downloaded afresh.\n"
+                "ENCRYPTED (PROPRIETARY) DATA: an observation still inside its proprietary period is "
+                "served GPG-encrypted. That download is complete but unreadable; it is stored and the "
+                "result says 'locked': true with the days until it becomes public. Treat a locked "
+                "observation as unavailable and report that honestly.\n"
+                "BUSY: when another unit holds the same download, the call says so and names when its "
+                "claim ends; work on other data meanwhile and call again after that time.\n"
                 "SUPPORTED MISSIONS: ixpe, nicer, nustar.\n"
-                "TIMEOUTS: this tool overrides the astroquery factory default of 30 s, which "
-                "is too short for archive downloads, with a 1800 s default; for large IXPE "
-                "observations (> 1 GB) that still time out, pass a longer 'timeout_s' (e.g. "
-                "1800 or 3600).\n"
-                "FAILS loudly, recording nothing, when the ObsID is absent from the archive "
-                "or the download yields no level-2 file."
+                "TIMEOUTS: this tool overrides the astroquery factory default of 30 s with a 1800 s "
+                "default; for large IXPE observations (> 1 GB) that still time out, pass a longer "
+                "'timeout_s' (e.g. 3600).\n"
+                "FAILS loudly, storing nothing, when the ObsID is absent from the archive, the archive "
+                "states no processing date for it, the download yields no level-2 file, the archive still "
+                "serves an older processing than its catalog names (the level-2 header's SOFTVER or CALDBVER "
+                "differs from the row; call again later), or a public observation is still served "
+                "encrypted (call again later)."
             ),
             "properties": {
                 "obsid": {
@@ -61,17 +62,7 @@ TOOL_MANIFEST = {
                     "kind": "setting",
                     "type": "string",
                     "enum": ["ixpe", "nicer", "nustar"],
-                    "description": "Mission name (lowercase).",
-                },
-                "obs_db_root": {
-                    "kind": "path",
-                    "type": "string",
-                    "description": (
-                        "The obs-db root: one folder per mission, named as HEASARC names it "
-                        "(ixpe, nicer, nustar), each laid out as HEASARC's archive tree. A new, "
-                        "empty folder becomes one on the first acquire; a mission folder laid out "
-                        "flat (<mission>/<obsid>/) is refused."
-                    ),
+                    "description": "Mission name (lowercase); also the store bucket the download goes to.",
                 },
                 "host": {
                     "kind": "setting",
@@ -95,7 +86,7 @@ TOOL_MANIFEST = {
                     ),
                 },
             },
-            "required": ["obsid", "mission", "obs_db_root"],
+            "required": ["obsid", "mission"],
         },
     },
 }

@@ -105,12 +105,13 @@ Xset.allowPrompting = False
 import xspec_help, epoch
 from src_pos import SRC_COORD
 
-# Load one epoch (NuSTAR + NICER + IXPE Stokes I/Q/U)
+# Load one epoch (NuSTAR + NICER + IXPE Stokes I/Q/U) from the data store: one record per ObsID,
+# in the epoch's order, as catalog_utils.data_catalog lists them (the process holds store keys)
 idx = xspec_help.load_data(
     epoch=epoch.epoch["E5"],
-    ixpe_path="/path/to/IXPE",
-    nicer_path="/path/to/NICER",
-    nustar_path="/path/to/NuSTAR",
+    ixpe=ixpe_record,
+    nicer=[nicer_record_1, nicer_record_2],
+    nustar=[nustar_record],
 )
 
 # Fit a model
@@ -143,27 +144,23 @@ python3 lib/find_src.py event_file.evt --outdir regions/ \
 
 ---
 
-#### `xspec_help.load_data(epoch, ixpe_path, ...)`
+#### `xspec_help.load_data(epoch, ixpe=None, nicer=None, nustar=None, ...)`
 
-Loads all instruments for one epoch into XSPEC and returns a nested index dict.
+Loads all instruments for one epoch into XSPEC from the data store and returns a nested index dict.
 
 ```python
 def load_data(
     epoch: dict,
-    ixpe_path: str,
-    nicer_path: str | None = None,
-    nustar_path: str | None = None,
-    ixpe_changes: bool = False,
-    ixpe_src_rad: float = 1.0,
-    ixpe_bkg_inner_rad: float = 3.0,
-    ixpe_bkg_outer_rad: float = 5.0,
-    ixpe_irf_date: str = '20230702',
+    ixpe: dict | list | None = None,
+    nicer: dict | list | None = None,
+    nustar: dict | list | None = None,
     ixpe_erange: tuple[float, float] = (2.0, 8.0),
     nicer_erange: tuple[float, float] = (1.0, 10.0),
     nustar_erange: tuple[float, float] = (4.0, 50.0),
     nustar_use_bkg: bool = False,
     clear_existing: bool = True,
     chatter: bool = False,
+    staged: str | None = None,
 ) -> dict
 ```
 
@@ -172,20 +169,20 @@ def load_data(
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `epoch` | `dict` | — | Single-epoch sub-dict from `epoch.epoch`, e.g. `epoch.epoch['E5']`. Expected keys: `'IXPE'`, `'NICER'`, `'NuSTAR'` (each a list of obs-ID strings) and `'STATE'`. Instruments absent from the dict are silently skipped.|
-| `ixpe_path` | `str` | — | Path to the directory containing IXPE observation sub-directories. |
-| `nicer_path` | `str \| None` | `None` | Path to the NICER data directory. Required when `'NICER'` is in `epoch`. |
-| `nustar_path` | `str \| None` | `None` | Path to the NuSTAR data directory. Required when `'NuSTAR'` is in `epoch`. |
-| `ixpe_changes` | `bool` | `False` | Re-run the IXPE `ixpeobssim` pipeline if `True`; reuse products already on disk if `False`. |
-| `ixpe_src_rad` | `float` | `1.0` | IXPE source-region radius in arcminutes. |
-| `ixpe_bkg_inner_rad` | `float` | `3.0` | IXPE background annulus inner radius in arcminutes. |
-| `ixpe_bkg_outer_rad` | `float` | `5.0` | IXPE background annulus outer radius in arcminutes. |
-| `ixpe_irf_date` | `str` | `'20230702'` | IRF date string (`'YYYYMMDD'`) used to select the IXPE response matrix. Available IRFs live under the installed ixpeobssim's `caldb/ixpe/gpd/cpf/rmf/` (`ixpeobssim.IXPEOBSSIM_CALDB`). |
+| `ixpe` | record | `None` | The record (`{store, bucket, key, version_id}`, a product's `recipe.json`) of the product holding the IXPE ObsID's Stokes I/Q/U source and background PHA1 files found by `red_ixpe.spectra` anywhere in the product. Required when `'IXPE'` is in `epoch`. |
+| `nicer` | record(s) | `None` | One record per NICER ObsID, in the epoch's order: products holding `xti/event_cl/*sr.pha`, `*bg.pha`, `*mpu7.rmf`, `*mpu7.arf`. Required when `'NICER'` is in `epoch`. |
+| `nustar` | record(s) | `None` | One record per NuSTAR ObsID, in the epoch's order: products holding `products/*sr_grp.pha`, `*bk.pha`, `*rmf`, `*arf` (FPMA, FPMB). Required when `'NuSTAR'` is in `epoch`. |
 | `ixpe_erange` | `tuple[float, float]` | `(2.0, 8.0)` | Energy range in keV to *notice* for IXPE spectra. |
 | `nicer_erange` | `tuple[float, float]` | `(1.0, 10.0)` | Energy range in keV to *notice* for NICER spectra. |
 | `nustar_erange` | `tuple[float, float]` | `(4.0, 50.0)` | Energy range in keV to *notice* for NuSTAR spectra. |
 | `nustar_use_bkg` | `bool` | `False` | Load NuSTAR background spectrum. Disabled by default because clean background regions are often unavailable for bright sources like Cyg X-1. |
 | `clear_existing` | `bool` | `True` | Call `AllData.clear()` and `AllModels.clear()` before loading. |
 | `chatter` | `bool` | `False` | Print file paths and per-instrument loading summaries. |
+| `staged` | `str \| None` | `None` | Where records are staged (`storelib.stage_in`, every file checked against its recorded sha256); default `staged/` in the working folder. |
+
+Before staging, each record is checked: one per ObsID, a product's `recipe.json`, and a key whose
+subject is that ObsID (`<kind>/<obsid>/...`); otherwise `ValueError`. The IXPE copies are read-only;
+the NICER and NuSTAR copies are writable, since `load_data` sets their `XFLT0001` keyword.
 
 **Data-group assignment**
 
@@ -429,11 +426,15 @@ Prints a formatted table of file paths (PHA, background, RMF, ARF) and count rat
 
 ---
 
-#### `red_ixpe.get_all_file_list(ixpe_path, chatter=False)`
+#### `red_ixpe.get_all_file_list(obs_dir, obs, chatter=False)`
 
-Scans `ixpe_path` for numeric observation sub-directories and returns a flat list of all Level-2 event files (`*evt2_v??_rej.fits`). Handles the special cases `01002901_picorr` (pi-corrected files) and `03002599` (non-`_rej` files). Raises `ValueError` if no files are found.
+Lists the Level-2 event files (`event_l2/*evt2_v??_rej.fits`) of one observation in its folder `obs_dir` (its product staged from the store). Handles the special cases `01002901_picorr` (pi-corrected files) and `03002599` (non-`_rej` files). Raises `ValueError` if no files are found.
 
-**Returns** `list[str]` — absolute paths to all event files, sorted within each observation.
+**Returns** `list[str]` — paths to the event files, sorted.
+
+#### `red_ixpe.spectra(folder, obs)`
+
+The Stokes I source and background PHA1 spectra of `obs` below `folder` (`ixpe<obs>_det<n>_evt2_v<NN>[_rej]_{src,bkg}_pha1.fits`), DU1 to DU3; where a detector unit has spectra of both the rejected and the plain events (`03002599`), the rejected ones (as the earlier loader read them, first in its list); `ValueError` unless one is left per role and detector unit. The working copy `01002901_picorr` of the earlier layout is a folder name, not an ObsID: in the store its spectra are a product of ObsID `01002901`. `load_data` finds the IXPE spectra with it.
 
 ---
 
@@ -484,10 +485,13 @@ def pha(
     changes: bool = True,
     overwrite: bool = True,
     chatter: bool = False,
+    *,
+    outdir: str | None = None,
+    products: list | None = None,
 ) -> tuple[list[str], list[str]]
 ```
 
-Same `changes` toggle as `pcube`. When `changes=True`, runs `xpselect` + `xpbin PHA1` with IRF name `ixpe:obssim{irf_date}_alpha075:v13`. The spectra are a standard reduction, so they are observation-database items: they are written beside the level-2 inputs (`<obsid folder>/event_l2/`, the folder `obsdb_catalog.locate` finds) and every Stokes I source and background spectrum is recorded through `obsdb_catalog.neutral.advance` (kind `pha`, level 3; `params`: `du`, `stokes`, `filter`, `calibration_version`, the radii, position and response set; Q/U follow each I file's name). The database root is read from that layout, checked before anything is written: an input outside it (a working copy such as `<obsid>_picorr/`) raises `ValueError`, and so does `overwrite=False`, under which ixpeobssim keeps an existing spectrum the record would then misdescribe. One source and one background PHA1 file is produced per detector unit (DU1, DU2, DU3). The Q and U files are derived from the I paths by `red_ixpe.get_pha_q` / `red_ixpe.get_pha_u`.
+Same `changes` toggle as `pcube`. When `changes=True`, runs `xpselect` + `xpbin PHA1/PHA1Q/PHA1U` with IRF name `ixpe:obssim{irf_date}_alpha075:v13` on links to the level-2 inputs in `outdir` (required), so the selected event lists and the 18 spectra (I/Q/U, source and background, per DU) land in `outdir` and the inputs are only read; `products`, when given, is extended with one `{"path", "caption"}` per spectrum. Library code writes no store (ruling: only a manifest tool writes the store); a tool wrapping `pha` would store the spectra as a product. Inputs that are not `ixpe<obs>_det<n>_evt2_v<NN>[_rej].fits`, `changes=True` without `outdir`, and `overwrite=False` raise `ValueError` before anything runs. When `changes=False` the spectra beside the inputs are read. The Q and U files are derived from the I paths by `red_ixpe.get_pha_q` / `red_ixpe.get_pha_u`.
 
 **Returns** `(src_pha_list, bkg_pha_list)` — each a list of three paths ordered DU1, DU2, DU3.
 
@@ -517,17 +521,17 @@ Computes the hardness ratio `H/S` for a given observation by loading PHA files i
 
 ### `NICER` — NICER file locators
 
-All three functions share the same signature pattern: `(obs: str, nicer_path: str, chatter=False)`. They glob under `<nicer_path>/<obs>/xti/event_cl/` and raise `ValueError` if exactly one match is not found.
+All three functions share the same signature pattern: `(obs: str, obs_dir: str, chatter=False)`, `obs_dir` the observation's folder (its product staged from the store). They glob under `<obs_dir>/xti/event_cl/` and raise `ValueError` if exactly one match is not found.
 
-#### `NICER.pha(obs, nicer_path)`
+#### `NICER.pha(obs, obs_dir)`
 Locates source (`*sr.pha`) and background (`*bg.pha`) PHA files.
 **Returns** `tuple[str, str]` — `(src_pha, bkg_pha)`.
 
-#### `NICER.rmf(obs, nicer_path)`
+#### `NICER.rmf(obs, obs_dir)`
 Locates the RMF file (`*mpu7.rmf`).
 **Returns** `str`.
 
-#### `NICER.arf(obs, nicer_path)`
+#### `NICER.arf(obs, obs_dir)`
 Locates the ARF file (`*mpu7.arf`).
 **Returns** `str`.
 
@@ -535,17 +539,17 @@ Locates the ARF file (`*mpu7.arf`).
 
 ### `NuSTAR` — NuSTAR file locators
 
-All three functions share the same signature pattern: `(obs: str, nustar_path: str, chatter=False)`. They glob under `<nustar_path>/<obs>/products/` and raise `ValueError` if exactly two matches are not found (one per focal-plane module).
+All three functions share the same signature pattern: `(obs: str, obs_dir: str, chatter=False)`, `obs_dir` the observation's folder (its product staged from the store). They glob under `<obs_dir>/products/` and raise `ValueError` if exactly two matches are not found (one per focal-plane module).
 
-#### `NuSTAR.pha(obs, nustar_path)`
+#### `NuSTAR.pha(obs, obs_dir)`
 Locates optimally-grouped source (`*sr_grp.pha`) and background (`*bk.pha`) PHA files for FPMA and FPMB.
 **Returns** `tuple[list[str], list[str]]` — `(src_phas, bkg_phas)`, each a two-element list.
 
-#### `NuSTAR.rmf(obs, nustar_path)`
+#### `NuSTAR.rmf(obs, obs_dir)`
 Locates RMF files for FPMA and FPMB (sorted alphabetically, giving FPMA first).
 **Returns** `list[str]`.
 
-#### `NuSTAR.arf(obs, nustar_path)`
+#### `NuSTAR.arf(obs, obs_dir)`
 Locates ARF files for FPMA and FPMB (sorted alphabetically).
 **Returns** `list[str]`.
 
@@ -608,7 +612,7 @@ Each entry has the structure:
 }
 ```
 
-Any subset of the instrument keys may be present; the loader silently skips absent ones. The order of keys is also the data-group ordering — see [Data-group assignment](#xspec_helpload_dataepoch-ixpe_path-).
+Any subset of the instrument keys may be present; the loader silently skips absent ones. The order of keys is also the data-group ordering — see [Data-group assignment](#xspec_helpload_dataepoch-ixpenone-nicernone-nustarnone-).
 
 | Epoch | State | IXPE obs | NICER | NuSTAR |
 |---|---|---|---|---|
@@ -636,7 +640,7 @@ In principle this catalogue is superseded by the on-the-fly centroiding in `find
 ## AI tool interface: what each tool writes
 
 `skills/__init__.py` (`TOOL_MANIFEST`) is what `auto_research` reads. A file a tool writes is a
-science artifact, an obs-db item or scratch. The files the xspec_utils tools below write are
+science artifact, a store product or scratch. The files the xspec_utils tools below write are
 artifacts: each goes under an argument of kind `output`, which names its `shape` (`file` or
 `prefix` here) and a `default` file name, and the runtime places it in the call's own folder. The
 tool returns each file a report may cite under `products` (`{"path", "caption"}`) or, for a PNG,
@@ -651,8 +655,10 @@ under `figures`. `plot_fit` appends `.png` to a name without it; `plot_iqu` drop
 | `plot_fit` | `save_path` (file) | `fit.png` | `figures`: one PNG |
 | `plot_iqu` | `save_path_prefix` (prefix) | `iqu` | `figures`: `<prefix>_DU<n>.png` per DU |
 
-`load_data` tags NICER and NuSTAR spectra in place (`XFLT0001 = 'Stokes:0'`) so XSPEC tells them
-from IXPE Stokes spectra; the catalog's record of those files stays as it is.
+`load_data` reads the data store: its `ixpe`, `nicer` and `nustar` arguments are records (kind
+`record`), staged into the working folder's `staged/` and checked; it tags the NICER and NuSTAR
+copies (`XFLT0001 = 'Stokes:0'`) so XSPEC tells them from IXPE Stokes spectra; the stored objects stay
+as they are.
 
 `group_pha` reads its input's `RESPFILE` and `ANCRFILE` through `resolve_response`, writes the
 files it reads into the copy's header, and names each one read in place of the header's in
@@ -660,7 +666,9 @@ stdout. It raises on a spectrum whose `RESPFILE` is `none` (the NICER spectra he
 response found nowhere.
 
 Tests (`tests/test_outputs.py`) write under a folder of their own (`tmp_path / "out"`) and read the
-observation database only.
+data sets only; those that load or reduce spectra store them in a throwaway store first (the root
+conftest's `store` fixture). `tests/test_staged_layout.py` checks the readers on a staged ObsID
+folder and `load_data`'s record checks.
 
 ## IXPE background filtering
 
@@ -686,7 +694,7 @@ Instrumental background rejection follows the method described in [Di Marco et a
   ixpeobssim install is read inside the installed ixpeobssim's CALDB at the same relative path;
   `xspec_help.assign_responses` gives it to a loaded spectrum (`load_data`'s IXPE path,
   `red_ixpe._sum_counts`/`HR`) and returns a `Response:` line each caller prints; `group_pha`
-  reads it and writes it into the copy. Obs-db files are left as they are. Tests in `tests/test_outputs.py`.
+  reads it and writes it into the copy. Data files are left as they are. Tests in `tests/test_outputs.py`.
 - 2026-11-04 — Every response under an `ixpeobssim/caldb/` tree is read from the installed
   ixpeobssim's CALDB, not only a missing one (a call's responses belong to its environment's
   fingerprint); `Response:` lines name only files read in place of the header's.
@@ -726,3 +734,23 @@ Instrumental background rejection follows the method described in [Di Marco et a
   `NuSTAR/nustar_red.sh`, `NuSTAR/nustar_grp.sh`) still loop over flat `<obsid>/` folders in the
   current directory (the NuSTAR ones under `/data/fzhou/XSPEC/Cyg_X-1/NuSTAR`): they work on a
   flat obs-db only, and in a HEASARC-tree mission folder they find no ObsID and do nothing.
+- 2026-11-10 — **The data store** (auto_research Phase 3 step 0b, S8). `load_data(epoch, ixpe=,
+  nicer=, nustar=, ..., staged=)` takes records (manifest kind `record`) and stages them with
+  `storelib.stage_in`; the path arguments, `ixpe_changes` and the IXPE reduction parameters are gone
+  (the reduction path needed a position it was never given). `NICER`/`NuSTAR` locators take the
+  ObsID's folder; `red_ixpe.get_all_file_list(obs_dir, obs)`; new `red_ixpe.spectra(folder, obs)`;
+  `red_ixpe.pha(changes=True, source=, staged=)` stores its 18 spectra as one product through
+  `storelib.produce` (kind `pha`), its selected events left in the temporary folder; the
+  `obsdb_catalog` record and its layout check are gone. `envs/xspec/` gains boto3 + awscrt, s3fs,
+  psycopg (lock re-solved with every earlier package pinned to its version). Tests:
+  `tests/test_staged_layout.py` replaces `tests/test_obsdb_layout.py`; the IXPE loading and `pha`
+  data tests store their inputs in a throwaway store. Note: `lib/` diverges from the mirrored working
+  directory (`sync_from_src.sh` would revert these edits).
+- 2026-11-10 — Stateless review fixes: `red_ixpe.pha(changes=True)` stages `source` and reduces its copies
+  of the named inputs (the recipe's input is what is read); `red_ixpe.spectra` reads the rejected
+  events' spectra where plain ones lie beside them (`03002599`, as the earlier loader did).
+- 2026-11-10 — Ruling: only a manifest tool writes the store; library code never calls `storelib.produce`.
+  `red_ixpe.pha(changes=True, outdir=, products=)` writes its spectra (and the selected event lists)
+  into `outdir` and returns them, like `pcube`; `PHA_TOOL`/`PHA_VERSION`/`source`/`staged` are gone. Its
+  data test checks the local outputs; the IXPE spectra the loading tests read are seeded through the
+  CI seed channel (`seed`).

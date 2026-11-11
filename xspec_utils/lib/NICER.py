@@ -1,16 +1,12 @@
 import glob
 from pathlib import Path
 
-from obsdb_catalog.locate import locate
 
+def _obs_dir(obs_dir: str, obs: str) -> Path:
+    """The ObsID folder ``obs_dir`` (a product staged from the store, laid out as HEASARC's ObsID folder)."""
+    return Path(obs_dir)
 
-def _obs_dir(mission_path: str, obs: str) -> Path:
-    """The folder holding ``obs`` under the mission folder ``mission_path``, wherever the obs-db
-    keeps it (HEASARC's archive tree, or flat): ``obsdb_catalog.locate``."""
-    path = Path(mission_path)
-    return locate(path.parent, path.name, obs)
-
-def pha(obs: str, nicer_path: str, chatter=False) -> tuple[str, str]:
+def pha(obs: str, obs_dir: str, chatter=False) -> tuple[str, str]:
     """
     Get the path to the pha file for a given observation.
 
@@ -18,28 +14,28 @@ def pha(obs: str, nicer_path: str, chatter=False) -> tuple[str, str]:
     ----------
     obs : str
         The observation ID.
-    nicer_path : str
-        The path to the NICER data directory.
+    obs_dir : str
+        The observation's folder: its product staged from the store (``storelib.stage_in``).
 
     Returns
     -------
     tuple[str, str]
         The paths to the source and background pha files.
     """
-    src_pha = glob.glob(f"{_obs_dir(nicer_path, obs)}/xti/event_cl/*sr.pha")
-    bkg_pha = glob.glob(f"{_obs_dir(nicer_path, obs)}/xti/event_cl/*bg.pha")
+    src_pha = glob.glob(f"{_obs_dir(obs_dir, obs)}/xti/event_cl/*sr.pha")
+    bkg_pha = glob.glob(f"{_obs_dir(obs_dir, obs)}/xti/event_cl/*bg.pha")
     if len(src_pha) == 0:
         raise ValueError(f'No source pha file found for obs: {obs}\n'
-                         f'the search was: {_obs_dir(nicer_path, obs)}/xti/event_cl/*sr.pha')
+                         f'the search was: {_obs_dir(obs_dir, obs)}/xti/event_cl/*sr.pha')
     elif len(src_pha) > 1:
         raise ValueError(f'Multiple source pha files found for obs: {obs}\n'
-                         f'the search was: {_obs_dir(nicer_path, obs)}/xti/event_cl/*sr.pha')
+                         f'the search was: {_obs_dir(obs_dir, obs)}/xti/event_cl/*sr.pha')
     if len(bkg_pha) == 0:
         raise ValueError(f'No background pha file found for obs: {obs}\n'
-                         f'the search was: {_obs_dir(nicer_path, obs)}/xti/event_cl/*bg.pha')
+                         f'the search was: {_obs_dir(obs_dir, obs)}/xti/event_cl/*bg.pha')
     elif len(bkg_pha) > 1:
         raise ValueError(f'Multiple background pha files found for obs: {obs}\n'
-                         f'the search was: {_obs_dir(nicer_path, obs)}/xti/event_cl/*bg.pha')
+                         f'the search was: {_obs_dir(obs_dir, obs)}/xti/event_cl/*bg.pha')
     
     if chatter:
         print(f"NICER PHA query results for obs: {obs}")
@@ -52,7 +48,7 @@ def pha(obs: str, nicer_path: str, chatter=False) -> tuple[str, str]:
 
     return src_pha[0], bkg_pha[0]
 
-def rmf(obs: str, nicer_path: str, chatter=False) -> str:
+def rmf(obs: str, obs_dir: str, chatter=False) -> str:
     """
     Get the path to the rmf file for a given observation.
 
@@ -60,21 +56,21 @@ def rmf(obs: str, nicer_path: str, chatter=False) -> str:
     ----------
     obs : str
         The observation ID.
-    nicer_path : str
-        The path to the NICER data directory.
+    obs_dir : str
+        The observation's folder: its product staged from the store (``storelib.stage_in``).
 
     Returns
     -------
     str
         The path to the rmf file.
     """
-    rmf_file = glob.glob(f"{_obs_dir(nicer_path, obs)}/xti/event_cl/*mpu7.rmf")
+    rmf_file = glob.glob(f"{_obs_dir(obs_dir, obs)}/xti/event_cl/*mpu7.rmf")
     if len(rmf_file) == 0:
         raise ValueError(f'No NICER rmf file found for obs: {obs}\n'
-                         f'the search was: {_obs_dir(nicer_path, obs)}/xti/event_cl/*mpu7.rmf')
+                         f'the search was: {_obs_dir(obs_dir, obs)}/xti/event_cl/*mpu7.rmf')
     elif len(rmf_file) > 1:
         raise ValueError(f'Multiple NICER rmf files found for obs: {obs}\n'
-                         f'the search was: {_obs_dir(nicer_path, obs)}/xti/event_cl/*mpu7.rmf')
+                         f'the search was: {_obs_dir(obs_dir, obs)}/xti/event_cl/*mpu7.rmf')
     
     if chatter:
         print(f"NICER RMF query results for obs: {obs}")
@@ -84,7 +80,7 @@ def rmf(obs: str, nicer_path: str, chatter=False) -> str:
 
     return rmf_file[0]
 
-def arf(obs: str, nicer_path: str, chatter=False) -> str:
+def arf(obs: str, obs_dir: str, chatter=False) -> str:
     """
     Get the path to the arf file for a given observation.
 
@@ -92,21 +88,21 @@ def arf(obs: str, nicer_path: str, chatter=False) -> str:
     ----------
     obs : str
         The observation ID.
-    nicer_path : str
-        The path to the NICER data directory.
+    obs_dir : str
+        The observation's folder: its product staged from the store (``storelib.stage_in``).
 
     Returns
     -------
     str
         The path to the arf file.
     """
-    arf_file = glob.glob(f"{_obs_dir(nicer_path, obs)}/xti/event_cl/*mpu7.arf")
+    arf_file = glob.glob(f"{_obs_dir(obs_dir, obs)}/xti/event_cl/*mpu7.arf")
     if len(arf_file) == 0:
         raise ValueError(f'No NICER arf file found for obs: {obs}\n'
-                         f'the search was: {_obs_dir(nicer_path, obs)}/xti/event_cl/*mpu7.arf')
+                         f'the search was: {_obs_dir(obs_dir, obs)}/xti/event_cl/*mpu7.arf')
     elif len(arf_file) > 1:
         raise ValueError(f'Multiple NICER arf files found for obs: {obs}\n'
-                         f'the search was: {_obs_dir(nicer_path, obs)}/xti/event_cl/*mpu7.arf')
+                         f'the search was: {_obs_dir(obs_dir, obs)}/xti/event_cl/*mpu7.arf')
     
     if chatter:
         print(f"NICER ARF query results for obs: {obs}")

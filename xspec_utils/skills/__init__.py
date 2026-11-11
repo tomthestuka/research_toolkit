@@ -42,7 +42,10 @@ TOOL_MANIFEST: dict = {
             "Cyg X-1, NuSTAR/NICER background is None by design — not an error or missing data. "
             "IXPE responses are read from the installed ixpeobssim's CALDB, at the path the "
             "spectrum's header names inside its ixpeobssim CALDB; each file read in place of the "
-            "header's is named in a 'Response:' line."
+            "header's is named in a 'Response:' line. The spectra come from the data store: pass, for "
+            "each instrument in the epoch, the records of its products (one per ObsID, in the epoch's "
+            "order) as the data catalog lists them; they are copied into the working folder's staged/ "
+            "folder, checked against their recorded hashes."
         ),
         "args_schema": {
             "type": "object",
@@ -61,28 +64,27 @@ TOOL_MANIFEST: dict = {
                         "Omit any instrument not present in the epoch."
                     ),
                 },
-                "ixpe_path": {
-                    "kind": "path",
-                    "type": "string",
+                "ixpe": {
+                    "kind": "record",
                     "description": (
-                        "Directory containing IXPE observation sub-directories, "
-                        "e.g. '/data/fzhou/XSPEC/Cyg_X-1/IXPE'."
+                        "The record of the product holding the epoch's IXPE Stokes I/Q/U source and "
+                        "background spectra, as the data catalog lists it. Required when the epoch has 'IXPE'."
                     ),
                 },
-                "nicer_path": {
-                    "kind": "path",
-                    "type": "string",
+                "nicer": {
+                    "kind": "record",
                     "description": (
-                        "NICER data directory, e.g. '/data/fzhou/XSPEC/Cyg_X-1/NICER'. "
-                        "Required if epoch has 'NICER'."
+                        "The records of the products holding each NICER ObsID's spectrum, background, "
+                        "RMF and ARF, as the data catalog lists them: a list in the epoch's NICER order. "
+                        "Required when the epoch has 'NICER'."
                     ),
                 },
-                "nustar_path": {
-                    "kind": "path",
-                    "type": "string",
+                "nustar": {
+                    "kind": "record",
                     "description": (
-                        "NuSTAR data directory, e.g. '/data/fzhou/XSPEC/Cyg_X-1/NuSTAR'. "
-                        "Required if epoch has 'NuSTAR'."
+                        "The records of the products holding each NuSTAR ObsID's FPMA/FPMB spectra, "
+                        "backgrounds, RMFs and ARFs, as the data catalog lists them: a list in the epoch's "
+                        "NuSTAR order. Required when the epoch has 'NuSTAR'."
                     ),
                 },
                 "clear_existing": {
@@ -98,7 +100,7 @@ TOOL_MANIFEST: dict = {
                     "description": "Print file paths and loading summaries. Default false.",
                 },
             },
-            "required": ["epoch", "ixpe_path"],
+            "required": ["epoch"],
         },
     },
 

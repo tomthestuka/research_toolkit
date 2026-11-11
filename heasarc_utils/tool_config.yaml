@@ -7,3 +7,6 @@
 # finish or fail cleanly on its own first; large data transfers need a high ceiling.
 call_timeout_s:
   acquire: 21600
+
+# The software environment the package's tools run in (envs/archive/: astroquery, boto3, psycopg).
+env: archive

@@ -1,142 +1,137 @@
 # heasarc_utils
 
-The **acquire** toolkit: fetch not-yet-local archive data for an ObsID into a mission's
-obs-db directory and record it in the data catalog. A `*_utils` toolkit (CLAUDE.md §5) —
-LLM-discoverable via `skills/TOOL_MANIFEST`, human-half in `lib/`.
+The **acquire** toolkit: fetch archive data for an ObsID and store it in the data store as a product
+of kind `raw`. A `*_utils` toolkit (CLAUDE.md §5) — LLM-discoverable via `skills/TOOL_MANIFEST`,
+human-half in `lib/`.
 
 ## Purpose
 
-Given `(obsid, mission, obs_db_root)`, download the observation from the HEASARC archive into
-a local clone of the archive's own layout, `<obs_db_root>/<mission>/<HEASARC's tree>/<obsid>/`
-(e.g. `ixpe/data/obs/01/01002901/`), and record its level-2 event in
-`<obs_db_root>/<mission>/catalog.json`; the first acquire of a mission creates both. The mission
-folder and the tree are read from the archive's own link, so they are HEASARC's names. This is
-the first producer wired into [`obsdb_catalog`](../obsdb_catalog/README.md) — it records
-through `obsdb_catalog.neutral.new`, the single trusted catalog writer.
+Given `(obsid, mission)`, download the observation from the HEASARC archive and store it, through
+[`storelib`](../storelib/README.md), as the product `raw/<obsid>/<short hash>/` in the mission's bucket
+of the store the process's keys reach (`storelib.store_name()`, `TOOLKIT_STORE`): every file of the ObsID folder at its path in that folder (`event_l2/...`,
+`xti/event_cl/...`), beside the product's `recipe.json`. The result names the product's record, which
+the analysis tools take, and the record of its level-2 event.
 
 ## Architecture
 
-The download path is resolved **authoritatively** via `astroquery.heasarc` — never by
-hand-built FTP paths. This matters because, e.g., the NICER archive path component is the
-*observation date* (`/FTP/nicer/data/obs/2022_03/<obsid>/`), which is not derivable from the
-ObsID (CLAUDE.md §4, "ground every line — no guessing").
+The download path is resolved **authoritatively** via `astroquery.heasarc` — never by hand-built FTP
+paths. This matters because, e.g., the NICER archive path component is the *observation date*
+(`/FTP/nicer/data/obs/2022_03/<obsid>/`), which is not derivable from the ObsID (CLAUDE.md §4, "ground
+every line — no guessing").
 
-- **`lib/heasarc.py`** — the **mission-agnostic engine** (`resolve` → `archive_path` →
-  `download` → `gunzip_tree`) plus the **`MissionProfile` registry** (`MISSIONS`). astroquery is
-  imported lazily (`_heasarc()`) so the module loads without it and tests inject a fake.
-- **`lib/heasarc_help.py`** — `acquire(...)`, the abstracted human/LLM entry; wires the engine
-  to `obsdb_catalog.neutral.new`.
-- **`skills/__init__.py`** — `TOOL_MANIFEST` (pure data; no astroquery import) wrapping
-  `acquire`, so the orchestration environment can discover the tool.
+- **`lib/heasarc.py`** — the **mission-agnostic engine** (`resolve` → `archive_path` → `archive_state`
+  → `download_obsid` = `download` + `gunzip_tree`) plus the **`MissionProfile` registry** (`MISSIONS`).
+  astroquery is imported lazily (`_heasarc()`) so the module loads without it and tests inject a fake.
+- **`lib/heasarc_help.py`** — `acquire(...)`, the abstracted human/LLM entry; wires the engine to
+  `storelib.produce`.
+- **`skills/__init__.py`** — `TOOL_MANIFEST` (pure data; no astroquery import) wrapping `acquire`,
+  declaring `writes: ["db"]` and `algorithm_version`.
+- **`tool_config.yaml`** — the call timeout ceiling and `env: archive` (`envs/archive/`: astroquery,
+  astropy, boto3 + awscrt, s3fs, psycopg).
 
 Grounded in — and **live-verified against** — the installed `astroquery.heasarc` (v0.4.x):
 `query_tap("SELECT * FROM <master> WHERE obsid='…'") → locate_data(tab, catalog_name=…) →
-download_data(location=…)`
-([docs](https://astroquery.readthedocs.io/en/stable/heasarc/heasarc.html)). **astroquery
-only — no wget fallback; failures raise and record nothing.**
+download_data(location=…)` ([docs](https://astroquery.readthedocs.io/en/stable/heasarc/heasarc.html)).
+**astroquery only — no wget fallback; failures raise and store nothing.**
 
-Two facts the live run pinned down (don't "fix" them back):
-- **Resolve uses `query_tap`, not `query_region(column_filters=…)`** — the latter silently
-  drops the obsid filter for a position-less query and returns the whole catalog. `SELECT *`
-  carries the `__row` column `locate_data` needs.
-- **Fresh archive event files are gzipped** (`*.evt.gz` / `*.fits.gz`); **acquire gunzips the
-  whole ObsID tree after download** (`heasarc.gunzip_tree`), so downstream reduction and the
-  level-2 derivers operate on plain files and the recorded level-2 path is the decompressed
-  `.fits`. The level-2 globs stay gz-tolerant and prefer the uncompressed twin for robustness.
-- **The local tree is HEASARC's.** `archive_path` reads the mission folder and tree from the
-  first `access_url` `locate_data` returns (`.../FTP/<mission>/<tree>/<obsid>/`; checked
-  2026-11-04: `ixpe/data/obs/01/01002901/`, `nicer/data/obs/2022_02/4690010101/`,
-  `nustar/data/obs/07/3/30702017002/`). Every astroquery host unpacks an observation as
-  `<location>/<obsid>/` (the archive's tar is ObsID-rooted; the SciServer and S3 copies take the
-  link's last folder), so `acquire_obsid` downloads with `location = <obs_db_root>/<mission>/<tree>`
-  and nothing is moved. A link naming an archive folder other than the mission is refused, and so
-  is a mission folder laid out flat (`<mission>/<obsid>/`, the human's copy): one with a top-level
-  folder named by digits, or a catalog record whose path starts with its ObsID.
+Facts the live runs pinned down (don't "fix" them back):
+- **Resolve uses `query_tap`, not `query_region(column_filters=…)`** — the latter silently drops the
+  obsid filter for a position-less query and returns the whole catalog. `SELECT *` carries the `__row`
+  column `locate_data` needs, and the row's archive state (below).
+- **Fresh archive event files are gzipped** (`*.evt.gz` / `*.fits.gz`); **acquire gunzips the whole
+  ObsID tree after download** (`heasarc.gunzip_tree`), so downstream reduction operates on plain files
+  and the stored level-2 event is the decompressed file. The level-2 matchers stay gz-tolerant.
+- **The archive's link names the mission.** `archive_path` reads the mission folder and tree from the
+  first `access_url` `locate_data` returns (`.../FTP/<mission>/<tree>/<obsid>/`; checked 2026-11-04:
+  `ixpe/data/obs/01/01002901/`, `nicer/data/obs/2022_02/4690010101/`,
+  `nustar/data/obs/07/3/30702017002/`); a link naming an archive folder other than the mission is
+  refused. Every astroquery host unpacks an observation as `<location>/<obsid>/`; `download_obsid`
+  moves that folder's contents up into the production's temporary folder, so the stored paths are the
+  ObsID folder's own.
 
 ## Interfaces / Usage
 
 ```python
 from heasarc_utils.lib.heasarc_help import acquire
 
-acquire("01002901", "ixpe", "/xray02/fzhou_obsdb")
-# -> downloads to /xray02/fzhou_obsdb/ixpe/data/obs/01/01002901/, records level2_evt at level 2
-#    in /xray02/fzhou_obsdb/ixpe/catalog.json, returns
-#    {"obsid", "mission", "mission_dir", "obsid_dir", "level2_evt": <path relative to
-#     mission_dir>, "catalog_entry", "downloaded": True, "locked": False}
+acquire("01002901", "ixpe")
+# -> {"obsid", "mission", "record": {"store": "db", "bucket": "ixpe",
+#     "key": "raw/01002901/<short hash>/recipe.json", "version_id": ...},
+#     "level2_evt": {... "key": "raw/01002901/<short hash>/event_l2/ixpe01002901_det1_evt2_v01.fits"},
+#     "downloaded": True, "locked": False, "archive": {...}, "files": <n>}
 
-# Large/slow IXPE transfers that would otherwise time out:
-acquire("03005801", "ixpe", "/xray02/fzhou_obsdb", timeout_s=3600)
+acquire("03005801", "ixpe", timeout_s=3600)   # large/slow IXPE transfers
 ```
 
-Signature: `acquire(obsid, mission, obs_db_root, *, host=None, chatter=False, timeout_s=1800.0)`.
-A reader finds the ObsID's folder with `obsdb_catalog.locate(obs_db_root, mission, obsid)`.
+Signature: `acquire(obsid, mission, *, host=None, chatter=False, timeout_s=1800.0)`. The process holds
+the unit's store keys (the runtime sets them); `TOOL`, `ALGORITHM_VERSION` (`"1"`), `KIND` (`"raw"`)
+are the recipe's names.
 
-- **Re-downloads on every call** — the tool executes; the caller decides *when* to acquire. A
-  deliberate re-acquire records at level 2, regressing `max_level` to 2 and thereby flagging
-  any stale level-3 products for re-reduction. The single exception is an encrypted
-  observation, below.
+- **One download per archive state.** The recipe's settings are the mission and the master-table row's
+  `processing_date`, `software_version`, `caldb_version` (the archive replaces files in place when it
+  reprocesses an observation, and these columns change then; all three registered master tables carry
+  them, HEASARC TAP schema checked 2026-11-10) and whether the observation is public yet
+  (`public_date`). A repeat acquire of the same state is answered from the store
+  (`downloaded: False`, no transfer); a reprocessed observation, or one that has become public, is a
+  new recipe and a fresh download. `host` and `timeout_s` change no bytes and are not in the recipe.
 - **Encrypted (proprietary) observations** — HEASARC serves an observation still inside its
-  proprietary period GPG-encrypted (`…fits.gz.gpg`). That download is complete and correct;
-  it just cannot be read without the key. So it is **recorded as present** (level 2 — the file
-  genuinely is the level-2 event, and the `.gpg` path is what tells readers it is unusable)
-  rather than raising, and the summary carries `locked: True`. Asking for the same ObsID again
-  is then answered from the archive's `public_date` (`heasarc.availability`, one metadata row,
-  no transfer): while it is still proprietary the download is **skipped** and the reply reports
-  when it unlocks (`downloaded: False`); once public, acquire downloads normally and the
-  readable copy replaces the encrypted record. Before this, the deriver rejected the `.gpg`
-  name and raised *before* recording, so a finished multi-GB download left no trace and every
-  later request re-downloaded it — a loop no number of runs could break.
-- **Fails loudly** — unknown mission, ObsID not in the master table, or a download that does
-  not yield the expected level-2 file all raise `heasarc.HeasarcError`; nothing is recorded.
+  proprietary period GPG-encrypted (`…fits.gz.gpg`). That download is complete and correct; it is
+  stored, and the summary carries `locked: True`, `days_until_public` and a `note`. Asking again while
+  it is still proprietary is the same recipe, so the stored copy answers without a transfer; once it
+  is public the recipe changes and the readable copy is downloaded.
+- **Fails loudly** — unknown mission, ObsID not in the master table, a row stating no
+  `processing_date` (the archive state identifies a download), an archive folder other than the
+  mission's, a download that does not yield the expected level-2 file, a download whose level-2
+  header states another processing than the row (its `SOFTVER` differs from `software_version`, or its
+  `CALDBVER` from a named `caldb_version`: the archive lags its catalog, seen for IXPE 01250101, row 1.11
+  and files 1.5; `heasarc.state_mismatch`), or a public observation the
+  archive still serves encrypted (a lag; storing it would answer every later acquire of that state
+  with the locked copy) all raise
+  `heasarc.HeasarcError`; the claim is given up with the reason (`catalog.fail`) and nothing is
+  committed. `storelib.ProductBusy` while another unit downloads the same recipe.
 - `host` (`heasarc`/`sciserver`/`aws`) is optional; omit to let astroquery choose.
-- `timeout_s` — HTTP transfer timeout in seconds. Defaults to 1800 s (30 min). The astroquery
-  factory default is **30 s**, which is far too short for large IXPE observations (> 1 GB).
-  This tool always overrides it. The three-layer threading path is:
-  `acquire(timeout_s)` → `acquire_obsid(timeout_s)` → `download(timeout_s)` →
-  `h.timeout = timeout_s` on the astroquery singleton before `download_data`.
+- `timeout_s` — HTTP transfer timeout in seconds. Defaults to 1800 s (30 min). The astroquery factory
+  default is **30 s**, far too short for large IXPE observations (> 1 GB); this tool always overrides
+  it: `acquire(timeout_s)` → `download_obsid(timeout_s)` → `download(timeout_s)` → `h.timeout =
+  timeout_s` on the astroquery singleton before `download_data`. The claim's lease (7 h) outlives the
+  tool's call timeout ceiling (6 h).
 
-Shipped missions and the level-2 representative each records (these mirror
-`obsdb_catalog._domain` exactly — keep the two in sync):
+Shipped missions and the level-2 representative each checks (a path below the ObsID folder):
 
-| mission (HEASARC's folder) | master table | level-2 file (under the ObsID folder) | `params` |
-|---|---|---|---|
-| ixpe | `ixmaster` | `event_l2/ixpe<obsid>_det1_evt2_v0N.fits` | `detectors:[1,2,3]`, `calibration_version`, `note` |
-| nicer | `nicermastr` | `xti/event_cl/ni<obsid>_0mpu7_cl.evt` | `mpu:7` |
-| nustar | `numaster` | `event_cl/nu<obsid>A01_cl.evt` | `fpm:"A"`, `note` |
+| mission (HEASARC's folder = bucket) | master table | level-2 file |
+|---|---|---|
+| ixpe | `ixmaster` | `event_l2/ixpe<obsid>_det1_evt2_v0N.fits` |
+| nicer | `nicermastr` | `xti/event_cl/*mpu7_cl.evt` |
+| nustar | `numaster` | `event_cl/nu<obsid>A01_cl.evt` |
 
 ## Adding a mission
 
-The engine is mission-agnostic: the local folder names and tree come from HEASARC's own link.
-A mission HEASARC's `locate_data` serves needs:
+The engine is mission-agnostic: the mission folder comes from HEASARC's own link. A mission HEASARC's
+`locate_data` serves needs:
 
-1. Its master table: `heasarc.discover_master("<mission>")`
-   (`list_catalogs(master=True, keywords=…)`).
-2. A `MissionProfile` in `MISSIONS` in `lib/heasarc.py`, keyed by HEASARC's name for the mission
-   (its `FTP/<name>/` folder): the master `catalog` name and a `level2(obsid_dir, obsid) -> product`
-   deriver that globs the representative cleaned-event file (grounded in that mission's archive
-   layout docs), returns its path and **raises if absent**.
-3. In `obsdb_catalog/_domain.py`: its tree rule in `TREES` (the archive's path below
-   `FTP/<name>/`, with `*` for the folders the ObsID alone does not give) and, for
-   `repair`/`healthcheck` coverage, a scanner with the identical `level2_evt`
-   `kind`/`params`/`produced_by`.
+1. Its master table: `heasarc.discover_master("<mission>")` (`list_catalogs(master=True, keywords=…)`),
+   with `processing_date`, `software_version`, `caldb_version` and `public_date` columns (check its TAP
+   schema; a column it lacks reads as `None`).
+2. A `MissionProfile` in `MISSIONS` in `lib/heasarc.py`, keyed by HEASARC's name for the mission (its
+   `FTP/<name>/` folder, and the store bucket): the master `catalog` name and a
+   `level2(paths, obsid) -> path` deriver that picks the representative cleaned-event file among the
+   ObsID folder's relative paths (grounded in that mission's archive layout docs) and **raises if
+   absent**.
+3. The mission in the manifest (`heasarc_utils/skills/__init__.py`: the `mission` enum and the
+   description's mission list), a bucket of that name in the store, and readers for its data where a
+   toolkit analyses it.
 
-4. The mission in the manifest (`heasarc_utils/skills/__init__.py`: the `mission` enum and the
-   description's mission list), and readers for its data where a toolkit analyses it.
-
-A missing or wrong `TREES` rule leaves the mission's ObsID folders invisible to `repair` and
-`healthcheck` (which then report nothing) and to `locate` without a catalog record.
-
-Chandra is on HEASARC (`chanmaster`; `chandra/data/byobsid/<last digit>/<obsid>/`, its tree rule
-already in `TREES`): it needs steps 2 and the scanner. MAXI is on HEASARC (`maximaster`; tree
-`maxi/data/obs/MJD<thousands>/MJD<day>/`), but `locate_data` returns no link for its rows
-(checked 2026-11-04), so it needs a locator of its own before this engine can fetch it.
+Chandra is on HEASARC (`chanmaster`; `chandra/data/byobsid/<last digit>/<obsid>/`): it needs step 2.
+MAXI is on HEASARC (`maximaster`), but `locate_data` returns no link for its rows (checked
+2026-11-04), so it needs a locator of its own before this engine can fetch it.
 
 `acquire` on an unregistered mission raises a clear, actionable error.
 
 ## Dependencies
 
 - `astroquery` (≥ 0.4.x; pulls `pyvo`) + `astropy` — imported lazily, only when downloading.
-- `obsdb_catalog.neutral` (same repo) — the catalog writer.
+- `storelib` (same repo) — the store; `envs/archive/` holds its clients.
+- Used by `catalog_utils` (the mission profiles find a raw product's level-2 event).
 - Does **not** import `auto_research`.
 
 ## Tests
@@ -144,10 +139,10 @@ already in `TREES`): it needs steps 2 and the scanner. MAXI is on HEASARC (`maxi
 ```bash
 python3 -m pytest heasarc_utils/tests/
 ```
-Offline: a fake `Heasarc` (injected via the `_heasarc` seam) creates the expected gzipped
-files, so the resolve/normalize/gunzip/record/regression/extensibility paths run without
-network or astroquery; `test_acquire_gunzips_download` asserts the `.gz` is decompressed and
-removed and the plain file is recorded. The download layout, the `query_tap` resolve path, and
+Offline: a fake `Heasarc` (injected via the `_heasarc` seam) answers the master-table row and
+creates the expected gzipped files, so the resolve/gunzip/store/reuse/reprocessing/encryption paths run
+without network or astroquery, against a throwaway store (the root conftest's `store` fixture; skipped
+with its reason without one). The download layout, the `query_tap` resolve path, and
 gzip handling were pinned by a live NICER `acquire` run on 2026-06-17 (see
 `logs/dev/live_acquire_nicer.md`).
 
@@ -188,14 +183,33 @@ gzip handling were pinned by a live NICER `acquire` run on 2026-06-17 (see
   proprietary, download once public. `acquire`'s summary gains `downloaded`/`locked` (+
   `public_date_mjd`/`days_until_public`/`note` on a skip); `TOOL_MANIFEST` states the behavior.
   Five offline tests (`test_acquire.py`), no network.
-- 2026-11-04 — **The local obs-db clones HEASARC's archive.** `acquire(obsid, mission, obs_db_root)`
-  (was `obs_db_path`) downloads into `<obs_db_root>/<mission>/<tree>/<obsid>/`, mission folder and
+- 2026-11-04 — **The local obs-db clones HEASARC's archive.** `acquire(obsid, mission, <obs-db root>)`
+  (was the mission folder) downloads into `<obs-db root>/<mission>/<tree>/<obsid>/`, mission folder and
   tree read from the archive link (`heasarc.archive_path`), and records in
-  `<obs_db_root>/<mission>/catalog.json` (created on the first acquire); catalog paths stay
+  `<obs-db root>/<mission>/catalog.json` (created on the first acquire); catalog paths stay
   relative to the mission folder. `normalize_layout` is gone (nothing is moved); `gunzip_tree` and
   the level-2 derivers take the ObsID folder. The result names `mission_dir` and `obsid_dir`.
-  Manifest: `obs_db_root` (kind `path`) replaces `obs_db_path`. Tests: an acquire into an empty
+  Manifest: the obs-db root (kind `path`) replaces the mission folder. Tests: an acquire into an empty
   root creates HEASARC's tree and a healthy catalog, per mission; a link naming another archive
   folder is refused.
 - 2026-11-04 — A flat mission folder (`<mission>/<obsid>/`) is refused as an acquire target, the
   refusal naming both layouts (ruling: the obs-db is HEASARC's tree only).
+- 2026-11-10 — **Downloads are store products** (auto_research Phase 3 step 0b, S8).
+  `acquire(obsid, mission)` stores the observation through `storelib.produce` (bucket = mission,
+  kind `raw`, subject = ObsID; files at their ObsID-folder paths) and returns its record and its
+  level-2 event's record; the recipe holds the archive state (processing date, software and CALDB
+  versions, public or not), so a repeat is answered from the store and a reprocessing or a lapsed
+  proprietary period downloads afresh (`availability` and the locked-copy check retired). Engine:
+  `resolve` returns the row with the links, `archive_state`, `download_obsid`, `profile`, `mjd_now`;
+  level-2 derivers pick among relative paths; `split_lock`/`is_locked`/`LOCK_SUFFIX` moved here from
+  `obsdb_catalog`. Manifest: no store location argument; `writes: ["db"]`, `algorithm_version: "1"`.
+  `tool_config.yaml`: `env: archive`. Tests against a throwaway store.
+- 2026-11-10 — Stateless review fixes: a row with no `processing_date` is refused before any claim; a
+  public observation still served encrypted fails its production (nothing stored; a later acquire
+  retries); manifest text says when to acquire again and what a busy answer names.
+- 2026-11-10 — `acquire` stores into the store `TOOLKIT_STORE` names (`storelib.store_name()`).
+- 2026-11-11 — Before anything is stored, the level-2 event's own `SOFTVER` (and `CALDBVER` when the
+  row names one) must equal the row's `software_version`/`caldb_version` (`heasarc.file_state`,
+  `state_mismatch`); a lagging archive fails the production naming both values. The keyword match was
+  checked on IXPE 01250101, NuSTAR 30702017002 and NICER 4690010101 (its archive header, 2026-11-11); the processing date has no header keyword and is
+  not compared. Fixture events are FITS headers stating the row's versions.

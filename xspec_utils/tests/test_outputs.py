@@ -39,6 +39,17 @@ def _sha(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def _stored_spectra(seed, obs: str) -> dict:
+    """The Stokes I/Q/U spectra of IXPE ``obs`` (a few hundred kB), seeded as a synthetic product of kind
+    pha; its record, as load_data takes it."""
+    import base64
+
+    files = sorted((IXPE_ROOT / obs / "event_l2").glob(f"ixpe{obs}_det*_pha1*.fits"))
+    assert files, f"fixture precondition: no spectra of {obs}"
+    return seed(kind="pha", subject=obs, bucket="ixpe",
+                files={f.name: base64.b64encode(f.read_bytes()).decode("ascii") for f in files})["record"]
+
+
 @pytest.fixture
 def out(tmp_path: Path) -> Path:
     folder = tmp_path / "out"
@@ -89,7 +100,7 @@ def test_group_pha_groups_and_resolves_only_names_found_next_to_the_input(tmp_pa
     assert header["BACKFILE"] == "missing_bk.pha"  # names no file next to the input: left as written
 
 
-# A response path ixpeobssim wrote into obs-db PHA files from a pip --user install since removed.
+# A response path ixpeobssim wrote into the data set's PHA files from a pip --user install since removed.
 GONE_RMF = ("/grad/fzhou/.local/lib/python3.13/site-packages/ixpeobssim/caldb/ixpe/gpd/cpf/rmf/"
             "ixpe_d1_obssim_alpha075_v012.rmf")
 
@@ -215,11 +226,12 @@ def test_fit_tbfeo_hss_returns_its_log(nustar_session, out):
 
 @pytest.mark.slow
 @pytest.mark.data("cygx1_ixpe")
-def test_plot_iqu_returns_one_figure_per_du(xspec_session, out, capsys):
+def test_plot_iqu_returns_one_figure_per_du(xspec_session, seed, out, tmp_path, capsys):
     import ixpeobssim
     from xspec import AllData, Model
 
-    indices = xspec_help.load_data({"IXPE": [IXPE_OBS], "STATE": "test"}, str(IXPE_ROOT))
+    indices = xspec_help.load_data({"IXPE": [IXPE_OBS], "STATE": "test"}, ixpe=_stored_spectra(seed, IXPE_OBS),
+                                   staged=str(tmp_path / "staged"))
     # Responses that exist where the headers name them are read from the installed CALDB too.
     pha = IXPE_ROOT / IXPE_OBS / "event_l2"
     named = fits.getheader(next(pha.glob("*_det1_*_src_pha1.fits")), "SPECTRUM")["RESPFILE"]
@@ -239,14 +251,15 @@ def test_plot_iqu_returns_one_figure_per_du(xspec_session, out, capsys):
 
 @pytest.mark.slow
 @pytest.mark.data("cygx1_ixpe")
-def test_load_data_reads_ixpe_responses_from_the_installed_ixpeobssim(xspec_session, capsys):
+def test_load_data_reads_ixpe_responses_from_the_installed_ixpeobssim(xspec_session, seed, tmp_path, capsys):
     import ixpeobssim
     from xspec import AllData
 
     obs = "02008201"  # its PHA headers name responses under the removed install
     pha = IXPE_ROOT / obs / "event_l2" / f"ixpe{obs}_det1_evt2_v01_rej_src_pha1.fits"
     assert fits.getheader(pha, "SPECTRUM")["RESPFILE"].startswith("/grad/fzhou/.local/")
-    indices = xspec_help.load_data({"IXPE": [obs], "STATE": "test"}, str(IXPE_ROOT))
+    indices = xspec_help.load_data({"IXPE": [obs], "STATE": "test"}, ixpe=_stored_spectra(seed, obs),
+                                   staged=str(tmp_path / "staged"))
     printed = capsys.readouterr().out
 
     assert AllData.nSpectra == 9
@@ -423,53 +436,44 @@ def test_pcube_writes_every_file_under_its_folder(tmp_path, out):
 
 @pytest.mark.slow
 @pytest.mark.data("cygx1_ixpe")
-def test_pha_writes_into_the_obs_db_and_records_its_spectra(tmp_path):
-    from obsdb_catalog import neutral
-    from obsdb_catalog.healthcheck import healthcheck
-
+def test_pha_writes_its_spectra_into_its_folder_and_only_reads_its_inputs(tmp_path, out):
     from xspec_utils.lib import red_ixpe, src_pos
 
     obs = IXPE_PCUBE_OBS
-    db = tmp_path / "IXPE"  # a fixture obs-db named after its mission, laid out as HEASARC's archive
-    event_l2 = db / "data/obs/02" / obs / "event_l2"
-    event_l2.mkdir(parents=True)
-    for source in _rej_events(IXPE_ROOT, obs):
-        (event_l2 / Path(source).name).symlink_to(Path(source).resolve())
-    det1 = f"data/obs/02/{obs}/event_l2/ixpe{obs}_det1_evt2_v01_rej.fits"
-    neutral.new(str(db), "ixpe", obs, products=[{"kind": "level2_evt", "path": det1, "produced_by": "heasarc"}])
-    assert healthcheck(str(db)) is True
+    events = _rej_events(IXPE_ROOT, obs)
     real = _mtimes(IXPE_ROOT / obs / "event_l2")
-
     ra, dec = src_pos.SRC_COORD[obs]
-    src, bkg = red_ixpe.pha(obs, _rej_events(db / "data/obs/02", obs), src_rad=1.0, bkg_inner_rad=2.5, bkg_outer_rad=5.0,
-                            ra=float(ra), dec=float(dec), irf_date="20230101")
+    products: list = []
+    src, bkg = red_ixpe.pha(obs, events, src_rad=1.0, bkg_inner_rad=2.5, bkg_outer_rad=5.0, ra=float(ra),
+                            dec=float(dec), irf_date="20230101", outdir=str(out), products=products)
 
-    assert all(Path(p).parent == event_l2 and Path(p).is_file() for p in src + bkg)
-    assert healthcheck(str(db)) is True
-    entry = neutral.read(str(db))["entries"][obs]
-    assert entry["max_level"] == 3
-    pha = {p["path"]: p["params"] for p in entry["products"] if p["kind"] == "pha"}
-    assert sorted(pha) == sorted(str(Path(f).relative_to(db)) for f in src + bkg)  # every Stokes I spectrum
-    assert len(pha) == 6
-    for params in pha.values():
-        assert (params["src_rad_arcmin"], params["bkg_inner_arcmin"], params["bkg_outer_arcmin"]) == (1.0, 2.5, 5.0)
-        assert params["irfname"] == "ixpe:obssim20230101_alpha075:v13"
-    det1 = pha[f"data/obs/02/{obs}/event_l2/ixpe{obs}_det1_evt2_v01_rej_src_pha1.fits"]
-    assert (det1["du"], det1["filter"]) == ("DU1", "rej_src")
+    assert len(src) == len(bkg) == 3 and all(Path(p).parent == out and Path(p).is_file() for p in src + bkg)
+    assert (src, bkg) == red_ixpe.spectra(str(out), obs)
+    assert len(products) == 18 and {Path(p["path"]).parent for p in products} == {out}
+    assert all(Path(p["path"]).is_file() and p["caption"] for p in products)
+    assert {red_ixpe.get_pha_q(f) for f in src} <= {p["path"] for p in products}
+    # Every file in the folder is a link to an input, a selected event list, or a spectrum it declares.
+    written = {p for p in out.iterdir() if not p.is_symlink()}
+    assert {Path(p["path"]) for p in products} <= written
+    assert all(p.name.endswith(("_src.fits", "_bkg.fits")) for p in written - {Path(q["path"]) for q in products})
     assert _mtimes(IXPE_ROOT / obs / "event_l2") == real
 
 
 @pytest.mark.data("cygx1_ixpe")
-def test_pha_refuses_before_writing_what_it_could_not_record(tmp_path):
+def test_pha_refuses_before_reducing_what_it_cannot_reduce(tmp_path):
     from xspec_utils.lib import red_ixpe
 
     obs = IXPE_PCUBE_OBS
-    copy = tmp_path / f"{obs}_picorr" / "event_l2"  # a working copy outside the obs-db layout
+    copy = tmp_path / obs / "event_l2"
     events = _linked(_rej_events(IXPE_ROOT, obs), copy)
     args = dict(src_rad=1.0, bkg_inner_rad=2.5, bkg_outer_rad=5.0, ra=299.59, dec=35.2, irf_date="20230101")
     before = _mtimes(copy)
-    with pytest.raises(ValueError, match="event_l2"):
+    with pytest.raises(ValueError, match="pass outdir"):
         red_ixpe.pha(obs, events, **args)
     with pytest.raises(ValueError, match="overwrite=True"):
-        red_ixpe.pha(obs, events, overwrite=False, **args)
-    assert _mtimes(copy) == before
+        red_ixpe.pha(obs, events, overwrite=False, outdir=str(tmp_path / "out"), **args)
+    renamed = _linked([events[0]], tmp_path / "other" / obs)
+    (Path(renamed[0])).rename(Path(renamed[0]).with_name("spectrum.fits"))
+    with pytest.raises(ValueError, match="level-2 event files"):
+        red_ixpe.pha(obs, [str(Path(renamed[0]).with_name("spectrum.fits"))], outdir=str(tmp_path / "out"), **args)
+    assert _mtimes(copy) == before and not (tmp_path / "out").exists()

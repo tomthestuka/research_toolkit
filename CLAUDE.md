@@ -18,8 +18,8 @@ the sibling orchestration repo `auto_research`, whose runtime analysts discover 
 these tools in a sandbox.
 
 **Trust boundary (one-directional, hard rule):** nothing here may `import auto_research`.
-This repo is self-contained; the only cross-repo contract is the on-disk data catalog
-([§6](#6-the-data-catalog)). Keeping the dependency one-way is what lets the orchestration
+This repo is self-contained; the cross-repo contract is the toolkit contract (manifests, envs, tests)
+and the data store's product contract ([§6](#6-the-data-store)), which `storelib/contract.py` mirrors. Keeping the dependency one-way is what lets the orchestration
 side treat this repo as an untrusted, swappable tool source.
 
 ---
@@ -31,17 +31,16 @@ Two kinds of top-level package live here, and the distinction matters:
 | Kind | Examples | Discoverable as an LLM tool? | Built by |
 |---|---|---|---|
 | **`<domain>_utils/` toolkits** | `xspec_utils`, `heasarc_utils`, `catalog_utils` (exist); `lib_utils` (planned) | **Yes** — via `skills/TOOL_MANIFEST` | human + (Phase-2) runtime tool-author, on a branch |
-| **Plain support packages** | `obsdb_catalog` | **No** — deliberately invisible | human / build-time agent, by hand |
+| **Plain support packages** | `storelib` | **No** — deliberately invisible | human / build-time agent, by hand |
 
 - **`*_utils` toolkits** are the AI-facing surface. Their name and `TOOL_MANIFEST` are how
   the orchestration repo finds tools. Follow the uniform layout in
   [§5](#5-the-_utils-toolkit-layout).
-- **`obsdb_catalog`** is a reliability-bearing support package — the *single trusted writer*
-  of the data catalog and the resolver of where an observation is (`locate`). It is
+- **`storelib`** is a reliability-bearing support package — the tools' *one door* to the data
+  store: version-pinned reads and create-once products recorded in the catalog. It is
   intentionally **not** `*_utils`-named and exposes **no `skills/` / `TOOL_MANIFEST`**, so tool
-  discovery never surfaces it; its `python -m obsdb_catalog` CLI is for deliberate human use.
-  Catalog writes are a side effect of data-producing tools, never a model action. See its
-  `README.md`.
+  discovery never surfaces it. Store writes are a side effect of data-producing tools (a manifest
+  `writes`), never a model action. See its `README.md`.
 
 ---
 
@@ -138,34 +137,34 @@ Invariants (they are *why* the split exists):
 
 ---
 
-## 6. The data catalog
+## 6. The data store
 
-The observation database clones HEASARC's archive. An obs-db root holds one folder per
-mission, named as HEASARC names it (`<root>/ixpe/`, `nicer/`, `nustar/`), and below it each
-ObsID sits where HEASARC's archive keeps it (`ixpe/data/obs/01/01002901/`; the tree rules are
-`obsdb_catalog._domain.TREES`). Each mission folder holds a single `catalog.json` — the
-inventory of what data is local and how it was produced (provenance) — whose product paths are
-relative to the mission folder. `auto_research` reads it **read-only** to decide what is
-already local.
+Observation data and the products made from it live in a data store (`auto_research`'s store `db`):
+bytes behind the S3 interface plus a Postgres catalog of products, their objects, a "current" pointer
+per (kind, subject), credentials and events. The orchestration runs it, issues each unit its own keys
+(`AWS_*`, `PG*`) for the run, receipts every call from the store's own records, verifies committed
+products and moves "current". The toolkit's side:
 
-- **One resolver finds an observation:** `obsdb_catalog.locate(obs_db_root, mission, obsid)`
-  returns the ObsID's folder (the catalog's record first, then the mission's tree rule). Every
-  Python reader goes through it; the batch shell scripts still read a flat `<obsid>/` layout.
-- **The only write path is `obsdb_catalog`** (`neutral` for producers, `repair` for deliberate
-  recovery). No producer, script, or runtime-authored tool ever opens `catalog.json` for
-  writing — see `obsdb_catalog/README.md`.
-- Producers record by **calling `obsdb_catalog.neutral`**: `heasarc_utils.acquire(obsid,
-  mission, obs_db_root)` (`neutral.new`, level 2, after downloading into HEASARC's tree) and
-  `xspec_utils.red_ixpe.pha` (`neutral.advance`, level 3, with its reduction's settings).
-  Wiring the reduction shell scripts (`*_red.sh`, `filter_inst_bkg_IXPE.sh`) is still pending.
+- **Tools are the only interface.** A tool reaches the store only through `storelib`; no tool takes a
+  path into the store. Inputs are **records** (`{"store", "bucket", "key", "version_id"}`, argument
+  kind `record`); every read names a version.
+- **Layout** (`storelib/README.md`): `<bucket>/<kind>/<subject>/<short hash>[.<generation>]/<file>` plus
+  a `recipe.json` written last. Here bucket = the mission as HEASARC names it (`ixpe`, `nicer`,
+  `nustar`), subject = the ObsID, kind = `raw` (an archive download, laid out as HEASARC's ObsID
+  folder) or `pha` (IXPE Stokes spectra); the root `README.md` is the briefing.
+- **A product is made once per recipe** — tool (manifest key), `algorithm_version` (manifest; bump it
+  when what the tool stores changes), settings, input records — through `storelib.produce`: claim,
+  create-only uploads with five metadata entries, `recipe.json`, commit (or fail with the reason). A
+  tool that stores products declares `writes: ["db"]` and `algorithm_version` in its manifest entry.
 - **What a tool writes is one of three classes:**
   - a **science artifact** — anything that depends on a `parameter` or a setting outside the
-    mission team's defaults — goes under an argument of kind `output` (its `shape` folder, file
-    or prefix) and is returned under `products` (`{"path", "caption"}`) or, for a PNG,
-    `figures`, so the runtime receipts it;
-  - an **obs-db item** — raw archive data and the mission team's standard reductions — goes into
-    the obs-db and is recorded through `obsdb_catalog.neutral`, the catalog being its record;
-  - **scratch** — a program's own bookkeeping — goes in a temporary folder, unrecorded.
+    mission team's defaults — goes under an argument of kind `output` (its `shape` folder, file or
+    prefix) and is returned under `products` (`{"path", "caption"}`) or, for a PNG, `figures`, so the
+    runtime receipts it;
+  - a **store product** — raw archive data and the mission team's standard reductions — goes into
+    the store through `storelib.produce`, its record returned;
+  - **scratch** — a program's own bookkeeping, a reduction's temporary files — stays in the call's
+    working folder (a production's temporary folder is removed with it).
 
 ---
 
@@ -191,7 +190,7 @@ envs/<id>/
   `activate.sh` sources an external's init by its absolute path.
 - **The default environment** (`auto_research`'s toolkit contract `default_env`): `envs/analysis/`,
   derived on the human `astropy` environment with HEASoft and CALDB. A unit's own REPL and shell run
-  in it, and so do packages that name no environment (`heasarc_utils`, `catalog_utils`). It has no
+  in it, and so do packages that name no environment. It has no
   `boot.py`: none of its tools needs an XSPEC session (`envs/xspec/boot.py` holds that), and the shell
   never runs a boot file. Its `probe` (`import xspec, heasarc_utils, catalog_utils`) runs at launch,
   in the jail when it is on.
@@ -206,14 +205,20 @@ envs/<id>/
 - A tool routed to a pipeline environment runs only in the jail (`agent_os_jail: true`); every
   path `activate.sh` or `boot.py` reads must be on the jail's allow-list or a declared external.
 - `envs/xspec/` serves `xspec_utils`: Python 3.13 and numpy 2.x match HEASoft 6.34's PyXspec
-  build (compiled against Python 3.13 / numpy 2.2), so its lock pins them.
+  build (compiled against Python 3.13 / numpy 2.2), so its lock pins them; it also holds the store's
+  clients (boto3 with awscrt, s3fs, psycopg).
+- `envs/archive/` serves `heasarc_utils` and `catalog_utils` (built: astroquery, astropy, boto3 with
+  awscrt, s3fs, psycopg, pytest). The derived default environment cannot gain packages and the human
+  `astropy` environment lacks the store's clients, so these packages name a built one, named after
+  what it reaches (the archive and the store).
 
 ---
 
 ## 7. Tech & conventions
 
-- **Python ≥ 3.10**; standard scientific stack for `*_utils` toolkits, **standard library
-  only** for support packages like `obsdb_catalog`.
+- **Python ≥ 3.10**; standard scientific stack for `*_utils` toolkits; a support package imports
+  its third-party clients only inside the function that uses them (`storelib`: boto3, psycopg,
+  s3fs), so it imports in any Python.
 - **Tests:** `pytest`, deterministic only; live science-stack runs are exercised by hand, not
   asserted. `python3 -m pytest <package>/tests/`. The root `conftest.py` defines four classes:
   unmarked (fast, deterministic, seconds), `slow` (real data or a real model, minutes; runs by
@@ -224,10 +229,14 @@ envs/<id>/
   `TOOLKIT_DATA_<NAME>` for each data set its host's `test_data` names, and fails a change whose
   data test it skipped, and the launch refuses a data set no host declares. Live data sets:
   `cygx1_ixpe`, `cygx1_nustar`. A test of the change that the gate skips or marks xfail fails it too.
-- **Mission data paths** are the mission folders of the obs-db root (e.g.
-  `/xray02/fzhou_obsdb/{ixpe,nicer,nustar}`, laid out as HEASARC's archive, §6); a tool writes
-  only what its class allows (§6): artifacts under its output argument, obs-db items into the
-  obs-db through `obsdb_catalog`, scratch in a temporary folder.
+- **Mission data** is in the data store (§6), named by records; a tool writes only what its class
+  allows (§6): artifacts under its output argument, store products through `storelib.produce`,
+  scratch in its working folder. A test taking the root conftest's `store` fixture reaches a throwaway
+  store the host gives (`TOOLKIT_STORE` and its keys); without one it skips with the reason, and the
+  authoring gate (which gives one) fails a store test it skipped. A test stages its store inputs only
+  through the host's seed channel (the `seed` fixture); only a manifest tool's call writes the store,
+  and library code never calls `storelib.produce`. A tool reading the store without a `record`
+  argument declares `reads: ["db"]`. No tool calls another manifest tool: shared logic lives in `lib/`.
 
 ---
 
@@ -269,7 +278,7 @@ envs/<id>/
 - 2026-11-04 — **Obs-db as a clone of HEASARC's archive; the three output classes.** §2 lists
   `catalog_utils` and `obsdb_catalog`'s resolver and human CLI. §6: an obs-db root of
   HEASARC-named mission folders laid out as HEASARC's tree (`_domain.TREES`), `locate`, product
-  paths relative to the mission folder, producers `heasarc_utils.acquire(obs_db_root)` and
+  paths relative to the mission folder, producers `heasarc_utils.acquire` (into the obs-db root) and
   `xspec_utils.red_ixpe.pha`, and what a tool writes (artifacts, obs-db items, scratch). §7: the
   mission data paths and what a tool writes there.
 - 2026-11-09 — §6b: `envs/analysis/` is the default environment (derived on the human `astropy`
@@ -277,3 +286,12 @@ envs/<id>/
   `analyst_env.sh`/`repl_init.py`; a base is a name the host declares (`human_envs`); `env.yaml`
   takes an optional one-line `probe`.
 - 2026-11-09 — **The `data` test class (auto_research Phase 3 step 0a W3).** §7: `data("<name>")` in the root `conftest.py` (root from `TOOLKIT_DATA_<NAME>`, skipped with the reason when absent); `xspec_utils/tests/test_outputs.py` reads Cyg X-1's IXPE and NuSTAR folders through `data("cygx1_ixpe")` / `data("cygx1_nustar")` instead of hardcoded paths. The gate deselects `live` and fails a change whose data test it skipped.
+- 2026-11-10 — **The data store** (auto_research Phase 3 step 0b, S8). §1: the cross-repo contract
+  names the store's product contract. §2: `storelib` replaces `obsdb_catalog` (deleted; `catalog.json`
+  retired, not migrated in code). §6 rewritten: the data store (tools the only interface, records,
+  the layout and its meaning here, one product per recipe, the three output classes with store
+  products). §6b: `envs/archive/` for `heasarc_utils` and `catalog_utils`; `envs/xspec/` gains the store
+  clients. §7: mission data is in the store; the `store` test fixture.
+- 2026-11-10 — §7 (auto_research rulings): test inputs only through the seed channel; only a manifest
+  tool writes the store, library code never calls `storelib.produce`; manifest `reads`; no tool calls
+  another manifest tool.
