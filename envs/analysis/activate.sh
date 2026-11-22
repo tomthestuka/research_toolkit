@@ -1,8 +1,8 @@
 # HEASoft (FTOOLS, PyXspec) and CALDB for the units' own REPL and shell. Absolute paths: the runtime sources a copy.
-export HEADAS=/opt/heasoft/heasoft-6.34/x86_64-pc-linux-gnu-libc2.34
+export HEADAS=/home/tomth/astro-software/heasoft/heasoft
 . "$HEADAS/headas-init.sh"
 
-export CALDB=/man1/CALDB
+export CALDB=/home/tomth/astro-software/CALDB
 export CALDBCONFIG="$CALDB/software/tools/caldb.config"
 export CALDBALIAS="$CALDB/software/tools/alias_config.fits"
-export GEOMAG_PATH=/man1/CALDB/data/gen/pcf/geomag
+export GEOMAG_PATH=/home/tomth/astro-software/CALDB/data/gen/pcf/geomag
